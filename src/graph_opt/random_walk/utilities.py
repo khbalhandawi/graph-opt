@@ -1,0 +1,237 @@
+
+# -*- coding: utf-8 -*-
+#
+# Adopted from stellargraph
+
+import numpy as np
+import collections
+from typing import Union, Tuple, List, Any
+from numba import cuda
+from random import Random
+
+from networkx import Graph, DiGraph, MultiGraph, MultiDiGraph
+
+def separated(values, *, limit, stringify, sep):
+    """
+    Print up to ``limit`` values with a separator.
+
+    Args:
+        values (list): the values to print
+        limit (optional, int): the maximum number of values to print (None for no limit)
+        stringify (callable): a function to use to convert values to strings
+        sep (str): the separator to use between elements (and the "... (NNN more)" continuation)
+    """
+    count = len(values)
+    if limit is not None and count > limit:
+        values = values[:limit]
+        continuation = f"{sep}... ({count - limit} more)" if count > limit else ""
+    else:
+        continuation = ""
+
+    rendered = sep.join(stringify(x) for x in values)
+    return rendered + continuation
+
+def comma_sep(values, limit=20, stringify=repr):
+    """
+    Print up to ``limit`` values, comma separated.
+
+    Args:
+        values (list): the values to print
+        limit (optional, int): the maximum number of values to print (None for no limit)
+        stringify (callable): a function to use to convert values to strings
+    """
+    return separated(values, limit=limit, stringify=stringify, sep=", ")
+
+def require_integer_in_range(x, variable_name, min_val=-np.inf, max_val=np.inf):
+    """
+    A function to verify that a variable is an integer in a specified closed range.
+    Args:
+        x: the variable to check
+        variable_name (str): the name of the variable to print out in error messages
+        min_val: the minimum value that `x` can attain
+        min_val: the maximum value that `x` can attain
+    """
+
+    if not isinstance(x, int):
+        raise TypeError(f"{variable_name}: expected int, found {type(x).__name__}")
+
+    if x < min_val or x > max_val:
+
+        if min_val == -np.inf:
+            region = f"<= {max_val}"
+        elif max_val == np.inf:
+            region = f">= {min_val}"
+        else:
+            region = f"in the range [{min_val}, {max_val}]"
+
+        raise ValueError(f"{variable_name}: expected integer {region}, found {x}")
+
+def is_real_iterable(x):
+    """
+    Tests if x is an iterable and is not a string.
+
+    Args:
+        x: a variable to check for whether it is an iterable
+
+    Returns:
+        True if x is an iterable (but not a string) and False otherwise
+    """
+    return isinstance(x, collections.abc.Iterable) and not isinstance(x, (str, bytes))
+
+def edge_arrays(
+        G:Union[Graph,DiGraph], include_edge_type=False, include_edge_weight=False
+    ) -> List[np.ndarray]:
+    """
+    Obtains the collection of edges in the graph as a tuple of arrays (sources, targets, types, weights).
+    ``types`` and ``weights`` will be `None` if the optional parameters are not specified.
+
+    Args:
+        include_edge_type (bool): A flag that indicates whether to return edge types.
+        include_edge_weight (bool): A flag that indicates whether to return edge weights.
+        use_ilocs (bool): if True return :ref:`ilocs for nodes (and edge types) <iloc-explanation>`
+
+    Returns:
+        A tuple containing 1D arrays of the source and target nodes (sources, targets, types, weights).
+        Setting include_edge_type and/or include_edge_weight to True will include arrays of edge types
+        and/or edge weights in this tuple, otherwise they will be set to ``None``.
+    """
+
+    edge_data = list(G.edges(data=True))
+
+    types = np.empty(0)
+    weights = np.empty(0)
+    sources = np.empty(0)
+    targets = np.empty(0)
+    for edge_tuple in edge_data:
+        types = np.append(types, edge_tuple[1] if (include_edge_type and isinstance(G,(MultiGraph,MultiDiGraph))) else None)
+        weights = np.append(weights, edge_tuple[-1].get('weight',0.0) if include_edge_weight 
+                            else np.array(None,dtype=np.float64))
+        sources = np.append(sources, edge_tuple[0])
+        targets = np.append(targets, edge_tuple[1])
+
+    return sources, targets, types, weights
+
+def _transform_edges(other_node: np.ndarray, 
+                     edges:Union[List[Tuple[int,int,dict]],List[Tuple[int,int,int,dict]]], 
+                     include_edge_weight: bool, 
+                     filter_edge_types: List[Any]) -> Union[np.ndarray,List[np.ndarray]]:
+    
+    types = np.array([e[-1].get('type',None) for e in edges])
+    if include_edge_weight:
+        weights = np.array([e[-1].get('weight',0.0) for e in edges])
+    else:
+        weights = None
+        
+    if filter_edge_types is not None:
+        correct_type = np.isin(types, filter_edge_types)
+        other_node = other_node[correct_type]
+        if weights is not None:
+            weights = weights[correct_type]
+
+    if weights is not None:
+        return other_node, weights
+
+    return other_node
+
+def neighbor_arrays(
+        graph:Union[Graph,DiGraph], node: int, include_edge_weight=False, edge_types=None
+    ):
+        """
+        Obtains the collection of neighbouring nodes connected to the given node
+        as an array of node_ids. If `include_edge_weight` edge is `True` then
+        an array of edges weights is also returned in a tuple of `(neighbor_ids, edge_weights)`.
+
+        Args:
+            node (any): The node in question.
+            include_edge_weight (bool, default False): If True an array of edge weights is also returned.
+            edge_types (list of hashable, optional): If provided, only traverse the graph
+                via the provided edge types when collecting neighbours.
+            use_ilocs (bool): if True `node` is treated as a :ref:`node iloc <iloc-explanation>`
+                (and similarly `edge_types` is treated as a edge type ilocs) and the ilocs of each
+                neighbour is returned.
+
+        Returns:
+            A numpy array of the neighboring nodes. If `include_edge_weight` is `True` then an array
+            of edge weights is also returned in a tuple `(neighbor_array, edge_weight_array)`
+        """
+        if isinstance(graph,(DiGraph,MultiDiGraph)):
+            edges = list(graph.out_edges(node,data=True))
+        else:
+            edges = list(graph.edges(node,data=True))
+        source = np.array([e[0] for e in edges])
+        target = np.array([e[1] for e in edges])
+        other_node = np.where(source == node, target, source)
+
+        return _transform_edges(
+            other_node, edges, include_edge_weight, edge_types
+        )
+
+def naive_weighted_choices(rs:Random, weights:List[float], size:int=None):
+    """
+    Select indices at random, weighted by the iterator `weights` of
+    arbitrary (non-negative) floats. That is, `x` will be returned
+    with probability `weights[x]/sum(weights)`.
+
+    For doing a single sample with arbitrary weights, this is much (5x
+    or more) faster than numpy.random.choice, because the latter
+    requires a lot of preprocessing (normalized probabilties), and
+    does a lot of conversions/checks/preprocessing internally.
+    """
+    probs = np.cumsum(weights)
+    total = probs[-1]
+    if total == 0:
+        # all weights were zero (probably), so we shouldn't choose anything
+        return None
+
+    thresholds = rs.random() if size is None else rs.random(size)
+    idx = np.searchsorted(probs, thresholds * total, side="left")
+
+    return idx
+
+######################################
+@cuda.jit(device=True)
+def searchsorted_d(a, v):
+    out = 0
+    total = a[-1]
+    for j in range(a.shape[0]):
+        if a[j] <= v*total:
+            out = j+1
+            
+    return out
+            
+@cuda.jit(device=True)
+def cumsum_d(arr, out):
+    val = 0
+    for j in range(arr.shape[0]):
+        val += arr[j]
+        out[j] = val
+        
+@cuda.jit(device=True)
+def searchsorted_kernel(a, v, out):
+    i = cuda.grid(1)
+    if i < v.shape[0]:
+        out[i] = 0
+        for j in range(a.shape[0]):
+            if a[j] <= v[i]:
+                out[i] = j+1
+         
+@cuda.jit(device=True)
+def cumsum_kernel(arr, out):
+    tid = cuda.threadIdx.x
+    bid = cuda.blockIdx.x
+    bdim = cuda.blockDim.x
+    i = tid + bid * bdim
+    stride = bdim * cuda.gridDim.x
+    val = 0
+    for j in range(i, arr.shape[0], stride):
+        val += arr[j]
+        out[j] = val
+        
+def cumsum_gpu(arr):
+    out = np.empty_like(arr)
+    blockdim = 256
+    griddim = (arr.shape[0] + blockdim - 1) // blockdim
+    cumsum_kernel[griddim, blockdim](arr, out)
+    for i in range(1, griddim):
+        out[i * blockdim:(i + 1) * blockdim] += out[(i - 1) * blockdim]
+    return out

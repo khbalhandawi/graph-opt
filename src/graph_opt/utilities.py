@@ -1,13 +1,18 @@
-
-# -*- coding: utf-8 -*-
-#
-# Adopted from stellargraph
-
 import numpy as np
 import collections
-from typing import Union, Tuple, List, Any
+from typing import Tuple
+from matplotlib import patches
+import matplotlib.pyplot as plt
+import joblib
+import pickle
 
-from networkx import Graph, DiGraph, MultiGraph, MultiDiGraph
+def _default_if_none(value, default, name, ensure_not_none=True):
+    value = value if value is not None else default
+    if ensure_not_none and value is None:
+        raise ValueError(
+            f"{name}: expected a value to be specified in either `__init__` or `run`, found None in both"
+        )
+    return value
 
 def separated(values, *, limit, stringify, sep):
     """
@@ -76,89 +81,90 @@ def is_real_iterable(x):
     """
     return isinstance(x, collections.abc.Iterable) and not isinstance(x, (str, bytes))
 
-def _transform_edges(other_node: np.ndarray, 
-                     edges:Union[List[Tuple[int,int,dict]],List[Tuple[int,int,int,dict]]], 
-                     include_edge_weight: bool, 
-                     filter_edge_types: List[Any]) -> Union[np.ndarray,List[np.ndarray]]:
-    
-    types = np.array([e[-1].get('type',None) for e in edges])
-    if include_edge_weight:
-        weights = np.array([e[-1].get('weight',0.0) for e in edges])
-    else:
-        weights = None
-        
-    if filter_edge_types is not None:
-        correct_type = np.isin(types, filter_edge_types)
-        other_node = other_node[correct_type]
-        if weights is not None:
-            weights = weights[correct_type]
-
-    if weights is not None:
-        return other_node, weights
-
-    return other_node
-
-def neighbor_arrays(
-        graph:Union[Graph,DiGraph], node: int, include_edge_weight=False, edge_types=None
-    ):
-        """
-        Obtains the collection of neighbouring nodes connected to the given node
-        as an array of node_ids. If `include_edge_weight` edge is `True` then
-        an array of edges weights is also returned in a tuple of `(neighbor_ids, edge_weights)`.
-
-        Args:
-            node (any): The node in question.
-            include_edge_weight (bool, default False): If True an array of edge weights is also returned.
-            edge_types (list of hashable, optional): If provided, only traverse the graph
-                via the provided edge types when collecting neighbours.
-            use_ilocs (bool): if True `node` is treated as a :ref:`node iloc <iloc-explanation>`
-                (and similarly `edge_types` is treated as a edge type ilocs) and the ilocs of each
-                neighbour is returned.
-
-        Returns:
-            A numpy array of the neighboring nodes. If `include_edge_weight` is `True` then an array
-            of edge weights is also returned in a tuple `(neighbor_array, edge_weight_array)`
-        """
-        if isinstance(graph,(DiGraph,MultiDiGraph)):
-            edges = list(graph.out_edges(node,data=True))
+# https://stackoverflow.com/a/7205107
+def merge_dicts(a, b, path=None):
+    "merges b into a"
+    if path is None: path = []
+    for key in b:
+        if key in a:
+            if isinstance(a[key], dict) and isinstance(b[key], dict):
+                merge_dicts(a[key], b[key], path + [str(key)])
+            elif a[key] == b[key]:
+                pass # same leaf value
+            else:
+                raise Exception('Conflict at %s' % '.'.join(path + [str(key)]))
         else:
-            edges = list(graph.edges(node,data=True))
-        source = np.array([e[0] for e in edges])
-        target = np.array([e[1] for e in edges])
-        other_node = np.where(source == node, target, source)
+            a[key] = b[key]
+    return a
 
-        return _transform_edges(
-            other_node, edges, include_edge_weight, edge_types
-        )
+def get_legend_data(cluster_dict,exclude_keys=[]):
+  '''
+  Create legend elements and artists from dictionary
+  '''
+  legend_elements = []
+  for key,value in cluster_dict.items():
+    if value['n_vertices'] > 0 and key not in exclude_keys:
+      legend_elements += [patches.Patch(facecolor=value['color'], 
+                                        edgecolor=value['color_frame'], 
+                                        label='%s:%i' %(key,value['n_vertices']))]
+  return legend_elements
 
-def edge_arrays(
-        G:Union[Graph,DiGraph], include_edge_type=False, include_edge_weight=False
-    ) -> List[np.ndarray]:
-    """
-    Obtains the collection of edges in the graph as a tuple of arrays (sources, targets, types, weights).
-    ``types`` and ``weights`` will be `None` if the optional parameters are not specified.
+def make_colormap(values,classes=None,colors=None,colors_frame=None):
+  '''
+  Creates a legend out a list of class predictions
+  '''
+  if classes is None:
+    classes = list(np.sort(np.unique(values)))
+  n_classes = len(classes)
+  
+  if colors is None:
+    colors = [rgba_to_hex(plt.cm.rainbow(x)) for x in np.linspace(1,0,n_classes)]
+  else:
+    colors = [colors[c] for c in classes]
 
-    Args:
-        include_edge_type (bool): A flag that indicates whether to return edge types.
-        include_edge_weight (bool): A flag that indicates whether to return edge weights.
-        use_ilocs (bool): if True return :ref:`ilocs for nodes (and edge types) <iloc-explanation>`
+  if colors_frame is None:
+    colors_frame = ["#000000"] * (n_classes)
 
-    Returns:
-        A tuple containing 1D arrays of the source and target nodes (sources, targets, types, weights).
-        Setting include_edge_type and/or include_edge_weight to True will include arrays of edge types
-        and/or edge weights in this tuple, otherwise they will be set to ``None``.
-    """
+  class_properties = [dict(zip(['color','color_frame'],[c,cf])) for c,cf in zip(colors,colors_frame)]
+  class_dict = dict(zip(classes, class_properties))
 
-    edge_data = list(G.edges(data=True))
+  for key in class_dict.keys():
+    n_vertices = sum([1 if x == key else 0 for x in values])
+    class_dict[key]['n_vertices'] = n_vertices
 
-    types = np.empty(0)
-    weights = np.empty(0)
-    sources = np.empty(0)
-    targets = np.empty(0)
-    for edge_tuple in edge_data:
-        types = np.append(types, edge_tuple[1] if (include_edge_type and isinstance(G,(MultiGraph,MultiDiGraph))) else None)
-        weights = np.append(weights, edge_tuple[-1].get('weight',0.0) if include_edge_weight else None)
-        sources = np.append(sources, edge_tuple[0])
-        targets = np.append(targets, edge_tuple[1])
+  # create color map for classes
+  class_colors = [class_dict[x]['color'] for x in values]
+  class_frames = [class_dict[x]['color_frame'] for x in values]
+  
+  return class_colors, class_frames, class_dict
 
-    return sources, targets, types, weights
+def rgba_to_hex(rgba: Tuple[float]) -> str:
+  rgb = tuple([int(c*255) for c in rgba[:-1]])
+  return '#%02x%02x%02x' % rgb
+
+def pickle_trick(obj, max_depth=10):
+    '''
+    Check picklability of an object
+    '''
+    output = {}
+
+    if max_depth <= 0:
+        return output
+    try:
+        joblib.dump(obj,'test.pkl')
+    except:
+        failing_children = []
+        if hasattr(obj, "__dict__"):
+            for k, v in obj.__dict__.items():
+                result = pickle_trick(v, max_depth=max_depth - 1)
+                if result:
+                    failing_children.append(result)
+
+        output = {
+            "fail": obj, 
+            # "err": e, 
+            "depth": max_depth, 
+            "failing_children": failing_children
+        }
+
+    return output
