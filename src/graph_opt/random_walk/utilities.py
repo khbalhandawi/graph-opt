@@ -6,7 +6,6 @@
 import numpy as np
 import collections
 from typing import Union, Tuple, List, Any
-from numba import cuda
 from random import Random
 
 from networkx import Graph, DiGraph, MultiGraph, MultiDiGraph
@@ -187,51 +186,3 @@ def naive_weighted_choices(rs:Random, weights:List[float], size:int=None):
     idx = np.searchsorted(probs, thresholds * total, side="left")
 
     return idx
-
-######################################
-@cuda.jit(device=True)
-def searchsorted_d(a, v):
-    out = 0
-    total = a[-1]
-    for j in range(a.shape[0]):
-        if a[j] <= v*total:
-            out = j+1
-            
-    return out
-            
-@cuda.jit(device=True)
-def cumsum_d(arr, out):
-    val = 0
-    for j in range(arr.shape[0]):
-        val += arr[j]
-        out[j] = val
-        
-@cuda.jit(device=True)
-def searchsorted_kernel(a, v, out):
-    i = cuda.grid(1)
-    if i < v.shape[0]:
-        out[i] = 0
-        for j in range(a.shape[0]):
-            if a[j] <= v[i]:
-                out[i] = j+1
-         
-@cuda.jit(device=True)
-def cumsum_kernel(arr, out):
-    tid = cuda.threadIdx.x
-    bid = cuda.blockIdx.x
-    bdim = cuda.blockDim.x
-    i = tid + bid * bdim
-    stride = bdim * cuda.gridDim.x
-    val = 0
-    for j in range(i, arr.shape[0], stride):
-        val += arr[j]
-        out[j] = val
-        
-def cumsum_gpu(arr):
-    out = np.empty_like(arr)
-    blockdim = 256
-    griddim = (arr.shape[0] + blockdim - 1) // blockdim
-    cumsum_kernel[griddim, blockdim](arr, out)
-    for i in range(1, griddim):
-        out[i * blockdim:(i + 1) * blockdim] += out[(i - 1) * blockdim]
-    return out
