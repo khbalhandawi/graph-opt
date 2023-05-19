@@ -4,8 +4,13 @@ from matplotlib import patches
 import matplotlib.pyplot as plt
 import joblib
 import pickle
+import multiprocessing as mpp
 from multiprocessing import Pool
 from itertools import repeat
+import tqdm
+import inspect
+from sklearn.cluster import KMeans,AffinityPropagation
+from sklearn.mixture import GaussianMixture
 
 from typing import Tuple, Callable, List, Any, Dict, Union
 
@@ -172,12 +177,41 @@ def pickle_trick(obj, max_depth=10):
 
     return output
 
+# istarmap.py for Python 3.8+
+import multiprocessing.pool as mpp
+
+
+def istarmap(self, func, iterable, chunksize=1):
+    """
+    starmap-version of imap
+    https://stackoverflow.com/a/57364423
+    """
+    self._check_running()
+    if chunksize < 1:
+        raise ValueError(
+            "Chunksize must be 1+, not {0:n}".format(
+                chunksize))
+
+    task_batches = mpp.Pool._get_tasks(func, iterable, chunksize)
+    result = mpp.IMapIterator(self)
+    self._taskqueue.put(
+        (
+            self._guarded_task_generation(result._job,
+                                          mpp.starmapstar,
+                                          task_batches),
+            result._set_length
+        ))
+    return (item for chunk in result for item in chunk)
+
+mpp.Pool.istarmap = istarmap
+
 def starmap_with_kwargs(pool, fn, args_iter, kwargs_iter):
     """
     https://stackoverflow.com/questions/45718523/pass-kwargs-to-starmap-while-using-pool-in-python
     """
     args_for_starmap = zip(repeat(fn), args_iter, kwargs_iter)
-    return pool.starmap(apply_args_and_kwargs, args_for_starmap)
+    # return pool.starmap(apply_args_and_kwargs, tqdm.tqdm(args_for_starmap, total=len(args_iter)))
+    return list(tqdm.tqdm(pool.istarmap(apply_args_and_kwargs, args_for_starmap), total=len(args_iter)))
 
 def apply_args_and_kwargs(fn, args, kwargs):
     return fn(*args, **kwargs)
@@ -241,3 +275,54 @@ def parallel_sampling(func:Callable,
             results.append(result)
 
     return results
+
+def serialize(input:Union[list,np.ndarray,dict,type]):
+    """
+    Converts a dict or list with non-serializable objects to strings
+
+    Parameters
+    ----------
+    input : dict, list
+        input to serialize
+
+    Returns
+    -------
+    dict, list
+        string formatted
+    """
+    if isinstance(input, dict):
+        return {serialize(key): serialize(value)
+                for key, value in input.items()}
+    elif isinstance(input, (list,np.ndarray)):
+        return [serialize(element) for element in input]
+    elif inspect.isclass(input):
+        return input.__name__
+    else:
+        return input
+    
+def deserialize(input:Union[list,np.ndarray,dict,type]):
+    """
+    Converts a dict or list with non-serializable objects to strings
+
+    Parameters
+    ----------
+    input : dict, list
+        input to serialize
+
+    Returns
+    -------
+    dict, list
+        string formatted
+    """
+    if isinstance(input, dict):
+        return {deserialize(key): deserialize(value)
+                for key, value in input.items()}
+    elif isinstance(input, (list,np.ndarray)):
+        return [deserialize(element) for element in input]
+    elif isinstance(input, str):
+        for class_ in [GaussianMixture,KMeans,AffinityPropagation]:
+            if input == class_.__name__:
+                return class_
+        return input
+    else:
+        return input
