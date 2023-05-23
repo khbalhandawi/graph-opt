@@ -4,8 +4,9 @@ from matplotlib import patches
 import matplotlib.pyplot as plt
 import joblib
 import pickle
-import multiprocessing as mpp
-from multiprocessing import Pool
+import math
+import multiprocessing as mp
+import multiprocessing.pool as mpp
 from itertools import repeat
 import tqdm
 import inspect
@@ -139,8 +140,8 @@ def make_colormap(values,classes=None,colors=None,colors_frame=None):
     class_dict[key]['n_vertices'] = n_vertices
 
   # create color map for classes
-  class_colors = [class_dict[x]['color'] for x in values]
-  class_frames = [class_dict[x]['color_frame'] for x in values]
+  class_colors = [class_dict.get(x,{'color':'#ffffff'})['color'] for x in values]
+  class_frames = [class_dict.get(x,{'color_frame':'#ffffff'})['color_frame'] for x in values]
   
   return class_colors, class_frames, class_dict
 
@@ -175,33 +176,29 @@ def pickle_trick(obj, max_depth=10):
 
     return output
 
-# istarmap.py for Python 3.8+
-import multiprocessing.pool as mpp
+class myPool(mpp.Pool):
 
+    def istarmap(self, func, iterable, chunksize=1):
+        """
+        starmap-version of imap
+        https://stackoverflow.com/a/57364423
+        """
+        self._check_running()
+        if chunksize < 1:
+            raise ValueError(
+                "Chunksize must be 1+, not {0:n}".format(
+                    chunksize))
 
-def istarmap(self, func, iterable, chunksize=1):
-    """
-    starmap-version of imap
-    https://stackoverflow.com/a/57364423
-    """
-    self._check_running()
-    if chunksize < 1:
-        raise ValueError(
-            "Chunksize must be 1+, not {0:n}".format(
-                chunksize))
-
-    task_batches = mpp.Pool._get_tasks(func, iterable, chunksize)
-    result = mpp.IMapIterator(self)
-    self._taskqueue.put(
-        (
-            self._guarded_task_generation(result._job,
-                                          mpp.starmapstar,
-                                          task_batches),
-            result._set_length
-        ))
-    return (item for chunk in result for item in chunk)
-
-mpp.Pool.istarmap = istarmap
+        task_batches = mpp.Pool._get_tasks(func, iterable, chunksize)
+        result = mpp.IMapIterator(self)
+        self._taskqueue.put(
+            (
+                self._guarded_task_generation(result._job,
+                                            mpp.starmapstar,
+                                            task_batches),
+                result._set_length
+            ))
+        return (item for chunk in result for item in chunk)
 
 def starmap_with_kwargs(pool, fn, args_iter, kwargs_iter):
     """
@@ -251,7 +248,10 @@ def parallel_sampling(func:Callable,
         kwargs_iter += [fkwargs.copy()]
 
     if n_jobs > 1:
-        pool = Pool(n_jobs)
+        n_tasks_child = math.ceil(len(args_iter)/n_jobs)
+        reset_every = math.floor(n_tasks_child*(1/100))
+        print('Start method: %s\nMax tasks per child: %i' %(mp.get_start_method(),reset_every))
+        pool = myPool(processes=n_jobs,maxtasksperchild=reset_every)
 
         results = starmap_with_kwargs(pool, func, args_iter, kwargs_iter)
         pool.terminate()
@@ -321,3 +321,30 @@ def deserialize(input:Union[list,np.ndarray,dict,type]):
         return input
     else:
         return input
+   
+    '''
+    Find the pareto-efficient points
+    :param costs: An (n_points, n_costs) array
+    :return: A (n_points, ) boolean array, indicating whether each point is Pareto efficient
+    ''' 
+def is_pareto_efficient(costs:np.ndarray) -> np.ndarray:
+    """
+    Find the pareto-efficient points
+    https://stackoverflow.com/a/40239615
+
+    Parameters
+    ----------
+    costs : np.ndarray
+        An (n_points, n_costs) array
+
+    Returns
+    -------
+    np.ndarray
+        A (n_points, ) boolean array, indicating whether each point is Pareto efficient
+    """
+    is_efficient = np.ones(costs.shape[0], dtype = bool)
+    for i, c in enumerate(costs):
+        if is_efficient[i]:
+            is_efficient[is_efficient] = np.any(costs[is_efficient]<c, axis=1)  # Keep any point with a lower cost
+            is_efficient[i] = True  # And keep self
+    return is_efficient
