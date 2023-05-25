@@ -10,6 +10,7 @@ import tqdm
 import inspect
 from sklearn.cluster import KMeans,AffinityPropagation
 from sklearn.mixture import GaussianMixture
+from networkx import Graph, DiGraph
 
 from typing import Tuple, Callable, List, Any, Dict, Union
 
@@ -306,3 +307,22 @@ def is_pareto_efficient(costs:np.ndarray) -> np.ndarray:
             is_efficient[is_efficient] = np.any(costs[is_efficient]<c, axis=1)  # Keep any point with a lower cost
             is_efficient[i] = True  # And keep self
     return is_efficient
+
+def get_by_attribute(G:Union[Graph,DiGraph],attr:str,value:Any) -> List[Any]:
+    """
+    Find the pareto-efficient points
+    https://stackoverflow.com/a/40239615
+
+    Parameters
+    ----------
+    attr : str
+        attribute to lookup
+    value : Any
+        attribute value to lookup
+
+    Returns
+    -------
+    List[Any]
+        A list of matching nodes
+    """
+    return [n for n,d in G.nodes(data=True) if d[attr]==value]
