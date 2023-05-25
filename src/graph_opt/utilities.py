@@ -1,7 +1,5 @@
 import numpy as np
 import collections
-from matplotlib import patches
-import matplotlib.pyplot as plt
 import joblib
 import pickle
 import math
@@ -105,51 +103,6 @@ def merge_dicts(a, b, path=None):
         else:
             a[key] = b[key]
     return a
-
-def get_legend_data(cluster_dict,exclude_keys=[]):
-  '''
-  Create legend elements and artists from dictionary
-  '''
-  legend_elements = []
-  for key,value in cluster_dict.items():
-    if value['n_vertices'] > 0 and key not in exclude_keys:
-      legend_elements += [patches.Patch(facecolor=value['color'], 
-                                        edgecolor=value['color_frame'], 
-                                        label='%s:%i' %(key,value['n_vertices']))]
-  return legend_elements
-
-def make_colormap(values,classes=None,colors=None,colors_frame=None):
-  '''
-  Creates a legend out a list of class predictions
-  '''
-  if classes is None:
-    classes = list(np.sort(np.unique(values)))
-  n_classes = len(classes)
-  
-  if colors is None:
-    colors = [rgba_to_hex(plt.cm.rainbow(x)) for x in np.linspace(1,0,n_classes)]
-  else:
-    colors = [colors[c] for c in classes]
-
-  if colors_frame is None:
-    colors_frame = ["#000000"] * (n_classes)
-
-  class_properties = [dict(zip(['color','color_frame'],[c,cf])) for c,cf in zip(colors,colors_frame)]
-  class_dict = dict(zip(classes, class_properties))
-
-  for key in class_dict.keys():
-    n_vertices = sum([1 if x == key else 0 for x in values])
-    class_dict[key]['n_vertices'] = n_vertices
-
-  # create color map for classes
-  class_colors = [class_dict.get(x,{'color':'#ffffff'})['color'] for x in values]
-  class_frames = [class_dict.get(x,{'color_frame':'#ffffff'})['color_frame'] for x in values]
-  
-  return class_colors, class_frames, class_dict
-
-def rgba_to_hex(rgba: Tuple[float]) -> str:
-  rgb = tuple([int(c*255) for c in rgba[:-1]])
-  return '#%02x%02x%02x' % rgb
 
 def pickle_trick(obj, max_depth=10):
     '''
