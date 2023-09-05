@@ -249,6 +249,8 @@ def serialize(input:Union[list,np.ndarray,dict,type]):
                 for key, value in input.items()}
     elif isinstance(input, (list,np.ndarray)):
         return [serialize(element) for element in input]
+    elif isinstance(input,np.integer):
+        return int(input)
     elif inspect.isclass(input):
         return input.__name__
     else:
