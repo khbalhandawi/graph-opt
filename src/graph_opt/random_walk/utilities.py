@@ -4,78 +4,10 @@
 # Adopted from stellargraph
 
 import numpy as np
-import collections
 from typing import Union, Tuple, List, Any
 from random import Random
 
 from networkx import Graph, DiGraph, MultiGraph, MultiDiGraph
-
-def separated(values, *, limit, stringify, sep):
-    """
-    Print up to ``limit`` values with a separator.
-
-    Args:
-        values (list): the values to print
-        limit (optional, int): the maximum number of values to print (None for no limit)
-        stringify (callable): a function to use to convert values to strings
-        sep (str): the separator to use between elements (and the "... (NNN more)" continuation)
-    """
-    count = len(values)
-    if limit is not None and count > limit:
-        values = values[:limit]
-        continuation = f"{sep}... ({count - limit} more)" if count > limit else ""
-    else:
-        continuation = ""
-
-    rendered = sep.join(stringify(x) for x in values)
-    return rendered + continuation
-
-def comma_sep(values, limit=20, stringify=repr):
-    """
-    Print up to ``limit`` values, comma separated.
-
-    Args:
-        values (list): the values to print
-        limit (optional, int): the maximum number of values to print (None for no limit)
-        stringify (callable): a function to use to convert values to strings
-    """
-    return separated(values, limit=limit, stringify=stringify, sep=", ")
-
-def require_integer_in_range(x, variable_name, min_val=-np.inf, max_val=np.inf):
-    """
-    A function to verify that a variable is an integer in a specified closed range.
-    Args:
-        x: the variable to check
-        variable_name (str): the name of the variable to print out in error messages
-        min_val: the minimum value that `x` can attain
-        min_val: the maximum value that `x` can attain
-    """
-
-    if not isinstance(x, int):
-        raise TypeError(f"{variable_name}: expected int, found {type(x).__name__}")
-
-    if x < min_val or x > max_val:
-
-        if min_val == -np.inf:
-            region = f"<= {max_val}"
-        elif max_val == np.inf:
-            region = f">= {min_val}"
-        else:
-            region = f"in the range [{min_val}, {max_val}]"
-
-        raise ValueError(f"{variable_name}: expected integer {region}, found {x}")
-
-def is_real_iterable(x):
-    """
-    Tests if x is an iterable and is not a string.
-
-    Args:
-        x: a variable to check for whether it is an iterable
-
-    Returns:
-        True if x is an iterable (but not a string) and False otherwise
-    """
-    return isinstance(x, collections.abc.Iterable) and not isinstance(x, (str, bytes))
 
 def edge_arrays(
         G:Union[Graph,DiGraph], include_edge_type=False, include_edge_weight=False
