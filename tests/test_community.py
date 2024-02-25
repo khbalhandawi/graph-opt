@@ -53,89 +53,91 @@ def example_case():
         test_weights_dict, test_weights_individual_dict, \
         communities_test
 
-@pytest.fixture(params=[
-    # case of a merger where there is not change in scores
-    {
-        "community_to_merge": 0,
-        "new_community": 1,
-        "merge_communities_test": {
-            'AT': 1,
-            'BT': 1,
-            'CT': 2,
-            'HT': 3,
-            'VT': 4
+@pytest.fixture(
+    params=[
+        # case of a merger where there is not change in scores
+        {
+            "community_to_merge": 0,
+            "new_community": 1,
+            "merge_communities_test": {
+                'AT': 1,
+                'BT': 1,
+                'CT': 2,
+                'HT': 3,
+                'VT': 4
+            },
+            "test_HHI": {
+                ('0', '1'): 5200.0,
+                ('0', '2'): 10000.0,
+                ('0', '4'): 10000.0,
+                ('1', '2'): 10000.0,
+                ('3', '4'): 6800.0,
+                ('4', '0'): 10000.0
+            },
+            "test_weights_dict": {
+                'AT': 0,
+                'BT': 0,
+                'CT': 0,
+                'HT': 0,
+                'VT': 5000
+            }
         },
-        "test_HHI": {
-            ('0', '1'): 5200.0,
-            ('0', '2'): 10000.0,
-            ('0', '4'): 10000.0,
-            ('1', '2'): 10000.0,
-            ('3', '4'): 6800.0,
-            ('4', '0'): 10000.0
+        # case of a merger where there is a change in airline scores
+        {
+            "community_to_merge": 2,
+            "new_community": 4,
+            "merge_communities_test": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 4,
+                'HT': 3,
+                'VT': 4
+            },
+            "test_HHI": {
+                ('0', '1'): 5200.0,
+                ('0', '2'): 10000.0,
+                ('0', '4'): 10000.0,
+                ('1', '2'): 10000.0,
+                ('3', '4'): 6800.0,
+                ('4', '0'): 10000.0
+            },
+            "test_weights_dict": {
+                'AT': 0,
+                'BT': 0,
+                'CT': 7000,
+                'HT': 0,
+                'VT': 7000 # 5000 + 2000
+            }
         },
-        "test_weights_dict": {
-            'AT': 0,
-            'BT': 0,
-            'CT': 0,
-            'HT': 0,
-            'VT': 5000
-        }
-    },
-    # case of a merger where there is a change in airline scores
-    {
-        "community_to_merge": 2,
-        "new_community": 4,
-        "merge_communities_test": {
-            'AT': 0,
-            'BT': 1,
-            'CT': 4,
-            'HT': 3,
-            'VT': 4
+        # case of a merger where there is a change in all scores
+        {
+            "community_to_merge": 3,
+            "new_community": 4,
+            "merge_communities_test": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 2,
+                'HT': 4,
+                'VT': 4
+            },
+            "test_HHI": {
+                ('0', '1'): 10000.0,
+                ('0', '2'): 10000.0,
+                ('0', '4'): 10000.0,
+                ('1', '2'): 10000.0,
+                ('3', '4'): 6800.0,
+                ('4', '0'): 10000.0
+            },
+            "test_weights_dict": {
+                'AT': 0,
+                'BT': 0,
+                'CT': 0,
+                'HT': 7000,
+                'VT': 8000
+            }
         },
-        "test_HHI": {
-            ('0', '1'): 5200.0,
-            ('0', '2'): 10000.0,
-            ('0', '4'): 10000.0,
-            ('1', '2'): 10000.0,
-            ('3', '4'): 6800.0,
-            ('4', '0'): 10000.0
-        },
-        "test_weights_dict": {
-            'AT': 0,
-            'BT': 0,
-            'CT': 7000,
-            'HT': 0,
-            'VT': 7000 # 5000 + 2000
-        }
-    },
-    # case of a merger where there is a change in all scores
-    {
-        "community_to_merge": 3,
-        "new_community": 4,
-        "merge_communities_test": {
-            'AT': 0,
-            'BT': 1,
-            'CT': 2,
-            'HT': 4,
-            'VT': 4
-        },
-        "test_HHI": {
-            ('0', '1'): 10000.0,
-            ('0', '2'): 10000.0,
-            ('0', '4'): 10000.0,
-            ('1', '2'): 10000.0,
-            ('3', '4'): 6800.0,
-            ('4', '0'): 10000.0
-        },
-        "test_weights_dict": {
-            'AT': 0,
-            'BT': 0,
-            'CT': 0,
-            'HT': 7000,
-            'VT': 8000
-        }
-    },
-])
+    ]
+)
 def example_merge(request, example_case):
     MG, nodes_airlines_dict, \
     test_HHI, test_weights_dict, \
@@ -153,6 +155,53 @@ def example_merge(request, example_case):
            community_to_merge, new_community, \
            merge_communities_test, test_HHI, \
            test_weights_dict
+
+@pytest.fixture(
+    params=[
+        {
+            "weights": (1.0,0.0),
+            "test_communities_dict": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 2,
+                'HT': 3,
+                'VT': 4
+            }
+        },
+        {
+            "weights": (-1.0,0.0),
+            "test_communities_dict": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 4,
+                'HT': 4,
+                'VT': 4
+            }
+        },
+        {
+            "weights": (0.0,1.0),
+            "test_communities_dict": {
+                'AT': 4,
+                'BT': 4,
+                'CT': 4,
+                'HT': 4,
+                'VT': 4
+            }
+        }
+    ]
+)
+def optimization_cases(request, example_case):
+    MG, nodes_airlines_dict, \
+    test_HHI, test_weights_dict, \
+    test_weights_individual_dict, \
+    init_communities_test = example_case
+
+    param = request.param
+    weights = param["weights"]
+    test_communities_dict = param["test_communities_dict"]
+
+    return MG, weights, test_communities_dict
+
 
 @pytest.mark.dependency()
 def test_initialization(example_case):
@@ -204,3 +253,16 @@ def test_merge(example_merge):
 
     for key,value in test_class.weights_dict.items():
         assert value == test_weights_dict[key]
+
+def test_optimize(optimization_cases):
+
+    MG, weights, test_communities_dict = optimization_cases
+
+    test_class = AllianceBuilder(MG)
+
+    test_class.greedy_optimize(weights=weights)
+
+    assert test_class.communities_dict == test_communities_dict
+
+    print(test_class.f_history)
+    print(test_class.communities_history)
