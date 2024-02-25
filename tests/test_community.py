@@ -6,6 +6,8 @@ import networkx as nx
 import json
 import os
 
+seed = 1234
+
 @pytest.fixture
 def example_case():
 
@@ -55,7 +57,6 @@ def example_case():
 
 @pytest.fixture(
     params=[
-        # case of a merger where there is not change in scores
         {
             "community_to_merge": 0,
             "new_community": 1,
@@ -82,7 +83,6 @@ def example_case():
                 'VT': 5000
             }
         },
-        # case of a merger where there is a change in airline scores
         {
             "community_to_merge": 2,
             "new_community": 4,
@@ -136,6 +136,11 @@ def example_case():
                 'VT': 8000
             }
         },
+    ],
+    ids=[
+        'no change in scores',
+        'change in airline scores',
+        'change in all scores'
     ]
 )
 def example_merge(request, example_case):
@@ -166,7 +171,8 @@ def example_merge(request, example_case):
                 'CT': 2,
                 'HT': 3,
                 'VT': 4
-            }
+            },
+            "n_samples": None
         },
         {
             "weights": (-1.0,0.0),
@@ -176,7 +182,8 @@ def example_merge(request, example_case):
                 'CT': 4,
                 'HT': 4,
                 'VT': 4
-            }
+            },
+            "n_samples": None
         },
         {
             "weights": (0.0,1.0),
@@ -186,8 +193,26 @@ def example_merge(request, example_case):
                 'CT': 4,
                 'HT': 4,
                 'VT': 4
-            }
-        }
+            },
+            "n_samples": None
+        },
+        {
+            "weights": (0.5,5.0),
+            "test_communities_dict": {
+                'AT': 2,
+                'BT': 3,
+                'CT': 2,
+                'HT': 3,
+                'VT': 2
+            },
+            "n_samples": 2
+        },
+    ],
+    ids=[
+        'minimize HHI',
+        'maximize HHI',
+        'maximize MAI',
+        'test sampling',
     ]
 )
 def optimization_cases(request, example_case):
@@ -198,9 +223,10 @@ def optimization_cases(request, example_case):
 
     param = request.param
     weights = param["weights"]
+    n_samples = param["n_samples"]
     test_communities_dict = param["test_communities_dict"]
 
-    return MG, weights, test_communities_dict
+    return MG, weights, n_samples, test_communities_dict
 
 
 @pytest.mark.dependency()
@@ -256,11 +282,11 @@ def test_merge(example_merge):
 
 def test_optimize(optimization_cases):
 
-    MG, weights, test_communities_dict = optimization_cases
+    MG, weights, n_samples, test_communities_dict = optimization_cases
 
-    test_class = AllianceBuilder(MG)
+    test_class = AllianceBuilder(MG,seed=seed)
 
-    test_class.greedy_optimize(weights=weights)
+    test_class.greedy_optimize(weights=weights,n_samples=n_samples)
 
     assert test_class.communities_dict == test_communities_dict
 

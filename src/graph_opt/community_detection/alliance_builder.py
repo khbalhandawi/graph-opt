@@ -6,11 +6,19 @@ import os
 import json
 import matplotlib.pyplot as plt
 from copy import deepcopy
-from tqdm import tqdm
+import sys
+import random
+
+# Check if the code is running in a Jupyter notebook
+if 'ipykernel' in sys.modules:
+    from tqdm.notebook import tqdm
+else:
+    from tqdm import tqdm
 
 from ..utilities import _default_if_none
 
 from typing import Dict, List, Union, Tuple, Optional, NewType
+from ..random import random_state
 
 type_share = NewType('type_share', Dict[int,float])
 type_shares = NewType('type_shares', Dict[Tuple[int, int], type_share])
@@ -18,12 +26,15 @@ type_scores = NewType('type_scores', Dict[Tuple[int, int], Dict[int, float]])
 
 class AllianceBuilder():
 
-    def __init__(self,
-        MG,
-        node_list: List[str] = None,
-        communities_dict: Dict[str,List[str]] = None) -> None:
+    def __init__(
+            self,
+            MG,
+            node_list: List[str] = None,
+            communities_dict: Dict[str,List[str]] = None,
+            seed: int = None
+        ) -> None:
 
-        self.communities_dict = {}
+        self._communities_dict = {}
         self.G: MultiDiGraph = deepcopy(MG)
         self.node_list = []
 
@@ -42,18 +53,21 @@ class AllianceBuilder():
         self.f_history = []
         self.multi_history = []
 
+        self.seed = seed
+        self.random_state: Tuple[random.Random,np.random.RandomState] = None
+
         self._parse_graph()
         self._initialize_communities(node_list, communities_dict)
         self._initialize_HHI()
         self._initialize_MAI()
 
     @property
+    def communities_dict(self):
+        return {node: self._communities_dict[node] for node in self._communities_dict.keys()}
+
+    @property
     def market_shares(self):
         return {edge: self._market_shares[edge].copy() for edge in self._market_shares.keys()}
-
-    @market_shares.setter
-    def market_shares(self, value):
-        self._market_shares = value
 
     @property
     def HHI(self):
@@ -109,10 +123,10 @@ class AllianceBuilder():
                 node_list = sorted(edge_types)
 
             for i,node in enumerate(node_list):
-                self.communities_dict[node] = i
+                self._communities_dict[node] = i
                 self.node_list.append(node)
         else:
-            self.communities_dict = deepcopy(communities_dict)
+            self._communities_dict = deepcopy(communities_dict)
 
     def _initialize_HHI(self):
         """
@@ -120,7 +134,7 @@ class AllianceBuilder():
         """
         for u, v, data in self.G.edges(data=True):
             # Accumulate the squares for each route
-            self._market_shares[(u, v)][self.communities_dict[data['edge_type']]] += data['market_share_percent']
+            self._market_shares[(u, v)][self._communities_dict[data['edge_type']]] += data['market_share_percent']
 
         # Calculate the HHI for each edge
         for edge, communities in self._market_shares.items():
@@ -131,7 +145,7 @@ class AllianceBuilder():
         Initializes the HHI attribute of each edge of the graph
         """
         for node in self.node_list:
-            target_community = self.communities_dict[node]
+            target_community = self._communities_dict[node]
 
             # Get edges by 'edge_type' from the pre-grouped dictionary
             edges_node = self.edges_by_type[node]
@@ -143,7 +157,7 @@ class AllianceBuilder():
             # Calculate weights
             if len(to_nodes) > 0:
                 edges_neighbors = set(sum((self.edges_by_source[node] for node in to_nodes), []))
-                weights = [self.edges_by_pair[(u,v,key)]['weight'] for u,v,key in edges_neighbors if self.communities_dict[self.edges_by_pair[(u,v,key)]['edge_type']] == target_community]
+                weights = [self.edges_by_pair[(u,v,key)]['weight'] for u,v,key in edges_neighbors if self._communities_dict[self.edges_by_pair[(u,v,key)]['edge_type']] == target_community]
                 weights_individual = [attr['weight'] for _, _, attr in G_sub.edges(data=True)]
 
                 self._weights_dict[node] = sum(weights)
@@ -157,13 +171,22 @@ class AllianceBuilder():
         self._update_HHI_scores(edges_to_update)
         self._update_scores(nodes_to_update)
 
-    def greedy_optimize(self, weights: Optional[Tuple[float,float]]=(0.5,0.5), max_iterations: Optional[int]=1000):
+    def greedy_optimize(
+            self, 
+            weights: Optional[Tuple[float,float]]=(0.5,0.5), 
+            max_iterations: Optional[int]=1000,
+            n_samples: Optional[int] = None
+        ):
         ########################################
         ## 4. Algorithm
         ########################################
+        self.random_state = _default_if_none(self.random_state, random_state(self.seed), "rng_state")
 
         def multiobjective(f1, f2, weights: Optional[Tuple[float,float]]=(0.5,0.5)):
             return weights[0]*f1 + weights[1]*f2
+
+        rng = self.random_state[0]
+        rng_np = self.random_state[1]
 
         # Calculate the initial mean HHI over all routes
         f1 = -(sum(self._HHI.values())*100) / (len(self._HHI)*10000)
@@ -182,15 +205,22 @@ class AllianceBuilder():
                 best_pair = None
 
                 # cache current partition
-                communities_dict = self.communities_dict.copy()
+                distinct_communities = set(self._communities_dict.values())
+                communities_dict = self._communities_dict.copy()
                 market_shares, HHI = self._get_cache_HHI()
                 weights_dict, airline_score = self._get_cache_MAI()
-                n_pairs = len(self.communities_dict)**2
+                
+                if n_samples is None:
+                    search_communities = distinct_communities
+                else:
+                    assert n_samples >= 2, "number of samples must be at least 2"
+                    search_communities = rng.sample(distinct_communities,k=n_samples)
 
                 # For each pair of communities
+                n_pairs = len(search_communities)**2
                 with tqdm(total=n_pairs, desc="Inner Loop", leave=False) as pbar_inner:
-                    for community1 in set(self.communities_dict.values()):
-                        for community2 in set(self.communities_dict.values()):
+                    for community1 in search_communities:
+                        for community2 in search_communities:
                             if community1 != community2:
                                 # Calculate the mean HHI if these two communities were to be merged
                                 self.update_scores(community1,community2)
@@ -208,11 +238,11 @@ class AllianceBuilder():
                                     best_pair = (community1, community2)
 
                                 # Revert the merge
-                                self.communities_dict = communities_dict.copy()
+                                self._communities_dict = communities_dict.copy()
                                 self._set_cache_HHI(market_shares, HHI)
                                 self._set_cache_MAI(weights_dict, airline_score)
 
-                                pbar_inner.update(1)
+                            pbar_inner.update(1)
 
                 # If the maximum increase is greater than 0, merge these two communities and update the mean HHI
                 if max_increase > 0:
@@ -231,19 +261,19 @@ class AllianceBuilder():
                 pbar_outer.update(1)
 
         # Print the final community structure and the final mean HHI
-        print("Final community structure:", self.communities_dict)
+        print("Final community structure:", self._communities_dict)
         print("Final objective:", f)
 
     def _update_communities(self, community_to_merge, new_community, update_communities=True):
         # Find the nodes in the community to merge
-        nodes_to_update_HHI = [k for k, v in self.communities_dict.items() if v in [community_to_merge,]]
-        nodes_to_update_MAI = [k for k, v in self.communities_dict.items() if v in [community_to_merge,new_community]]
+        nodes_to_update_HHI = [k for k, v in self._communities_dict.items() if v in [community_to_merge,]]
+        nodes_to_update_MAI = [k for k, v in self._communities_dict.items() if v in [community_to_merge,new_community]]
 
         # Update the community in communities_dict ands reset the market shares for this route
         edges_to_update = set()
         for node in nodes_to_update_HHI:
             if update_communities:
-                self.communities_dict[node] = new_community
+                self._communities_dict[node] = new_community
 
             edges_to_update.update(set(((u,v) for u,v,key in self.edges_by_type[node])))
 
@@ -258,7 +288,7 @@ class AllianceBuilder():
             data = self.G.get_edge_data(u,v)
             for key,data_node in data.items():
                 # Recalculate the market shares and HHI score for this route
-                self._market_shares[(u, v)][self.communities_dict[data_node['edge_type']]] += data_node['market_share_percent']
+                self._market_shares[(u, v)][self._communities_dict[data_node['edge_type']]] += data_node['market_share_percent']
 
         # Recalculate the community HHI for each affected route
         for edge, communities in self._market_shares.items():
@@ -268,7 +298,7 @@ class AllianceBuilder():
 
         # Recalculate scores for the affected airlines
         for node in nodes_to_update:
-            target_community = self.communities_dict[node]
+            target_community = self._communities_dict[node]
 
             # Get edges by 'edge_type' from the pre-grouped dictionary
             edges = self.edges_by_type[node]
@@ -279,7 +309,7 @@ class AllianceBuilder():
             # Calculate weights
             if len(to_nodes) > 0:
                 edges = set(sum((self.edges_by_source[node] for node in to_nodes), []))
-                weights = [self.edges_by_pair[(u,v,key)]['weight'] for u,v,key in edges if self.communities_dict[self.edges_by_pair[(u,v,key)]['edge_type']] == target_community]
+                weights = [self.edges_by_pair[(u,v,key)]['weight'] for u,v,key in edges if self._communities_dict[self.edges_by_pair[(u,v,key)]['edge_type']] == target_community]
 
                 self._weights_dict[node] = sum(weights)
 
