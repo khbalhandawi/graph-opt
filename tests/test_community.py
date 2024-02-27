@@ -1,10 +1,13 @@
 import pytest
+import os
 from ..community_detection.alliance_builder import AllianceBuilder
 
 import numpy as np
 import networkx as nx
 import json
 import os
+
+os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
 
 seed = 1234
 
@@ -292,3 +295,46 @@ def test_optimize(optimization_cases):
 
     print(test_class.f_history)
     print(test_class.communities_history)
+
+def test_optimize_gpu(optimization_cases):
+
+    # Cudasim Setup
+    os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
+
+    MG, weights, n_samples, test_communities_dict = optimization_cases
+
+    test_class = AllianceBuilder(MG,seed=seed, use_gpu=True)
+
+    test_class.greedy_optimize(weights=weights,n_samples=n_samples)
+
+    assert test_class.communities_dict == test_communities_dict
+
+    print(test_class.f_history)
+    print(test_class.communities_history)
+
+
+if __name__ == "__main__":
+    MG, nodes_airlines_dict, \
+    test_HHI, test_weights_dict, \
+    test_weights_individual_dict, \
+    init_communities_test = example_case
+
+    param = {
+        "weights": (1.0,0.0),
+        "test_communities_dict": {
+            'AT': 0,
+            'BT': 1,
+            'CT': 2,
+            'HT': 3,
+            'VT': 4
+        },
+        "n_samples": None
+    }
+
+    weights = param["weights"]
+    n_samples = param["n_samples"]
+    test_communities_dict = param["test_communities_dict"]
+
+    test_class = AllianceBuilder(MG,seed=seed, use_gpu=True)
+
+    test_class.greedy_optimize(weights=weights,n_samples=n_samples)

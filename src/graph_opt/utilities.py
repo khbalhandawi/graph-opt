@@ -9,6 +9,7 @@ from itertools import repeat
 import tqdm
 import inspect
 from networkx import Graph, DiGraph
+import functools
 
 from typing import Tuple, Callable, List, Any, Dict, Union
 
@@ -283,6 +284,7 @@ def deserialize(input:Union[list,np.ndarray,dict,type]):
     :param costs: An (n_points, n_costs) array
     :return: A (n_points, ) boolean array, indicating whether each point is Pareto efficient
     ''' 
+
 def is_pareto_efficient(costs:np.ndarray) -> np.ndarray:
     """
     Find the pareto-efficient points
@@ -323,3 +325,40 @@ def get_by_attribute(G:Union[Graph,DiGraph],attr:str,value:Any) -> List[Any]:
         A list of matching nodes
     """
     return [n for n,d in G.nodes(data=True) if d[attr]==value]
+
+def dict2array(data: Dict[Any,Dict[Any,Union[float, int]]]) -> np.ndarray:
+    """
+    Converts a nested dictionary to numpy n-dimensional array
+
+    Parameters
+    ----------
+    data : Dict[Any,Dict[Any,Union[float, int]]]
+        The dictionary to convert
+
+    Returns
+    -------
+    np.ndarray
+        the resulting array
+    """
+    
+    def recursive_d2l (d):
+        if isinstance(d, dict):
+            return [recursive_d2l(v) for v in d.values()]
+        else:
+            return d
+        
+    lists = recursive_d2l(data)
+
+    return np.array(lists)
+
+def cpu_gpu_dispatcher(cpu_method_name, gpu_method_name):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if self.use_gpu:
+                method = getattr(self, gpu_method_name)
+            else:
+                method = getattr(self, cpu_method_name)
+            return method(*args, **kwargs)
+        return wrapper
+    return decorator

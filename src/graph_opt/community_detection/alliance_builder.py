@@ -8,6 +8,10 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 import sys
 import random
+import functools
+import math
+from pdb import set_trace
+from typing import Callable, Dict, Any, Union
 
 # Check if the code is running in a Jupyter notebook
 if 'ipykernel' in sys.modules:
@@ -15,28 +19,32 @@ if 'ipykernel' in sys.modules:
 else:
     from tqdm import tqdm
 
-from ..utilities import _default_if_none
+from ..utilities import _default_if_none, dict2array, cpu_gpu_dispatcher
 
 from typing import Dict, List, Union, Tuple, Optional, NewType
-from ..random import random_state
+from ..random_settings import random_state
 
 type_share = NewType('type_share', Dict[int,float])
 type_shares = NewType('type_shares', Dict[Tuple[int, int], type_share])
 type_scores = NewType('type_scores', Dict[Tuple[int, int], Dict[int, float]])
+
 
 class AllianceBuilder():
 
     def __init__(
             self,
             MG,
-            node_list: List[str] = None,
             communities_dict: Dict[str,List[str]] = None,
-            seed: int = None
+            seed: int = None,
+            use_gpu: Optional[bool] = False
         ) -> None:
 
         self._communities_dict = {}
         self.G: MultiDiGraph = deepcopy(MG)
         self.node_list = []
+        self.node_spatial_list = []
+        self.node_dict = {}
+        self.node_spatial_dict = {}
 
         self._HHI = defaultdict(float)
         self._market_shares = defaultdict(lambda: defaultdict(float))
@@ -56,10 +64,40 @@ class AllianceBuilder():
         self.seed = seed
         self.random_state: Tuple[random.Random,np.random.RandomState] = None
 
+        self.use_gpu = use_gpu
+
         self._parse_graph()
-        self._initialize_communities(node_list, communities_dict)
+        self._initialize_communities(communities_dict)
         self._initialize_HHI()
         self._initialize_MAI()
+
+        if self.use_gpu:
+            from .utilities_cuda import cuda, merge_score
+            self.cuda = cuda
+            self.merge_score: Callable = merge_score
+
+            # Populate the adjacency matrix
+            edge_nodes = []
+            edge_weights = []
+            adj = np.zeros((self.G.number_of_edges(), 2), dtype=np.int32)
+            for i, (u, v, key, data) in enumerate(self.G.edges(data=True, keys=True)):
+                adj[i,:] = np.array([self.node_spatial_dict[u],self.node_spatial_dict[v]])
+                edge_nodes.append(self.node_dict[data["edge_type"]])
+                edge_weights.append(data["weight"])
+
+            # move constants to memory
+            self.adj_d = self.cuda.to_device(adj)
+            self.edge_nodes_d = self.cuda.to_device(np.array(edge_nodes,dtype=np.int32))
+            self.edge_weights_d = self.cuda.to_device(np.array(edge_weights,dtype=np.float32))
+            self.node_weight_individual_d = self.cuda.to_device(np.array(list(self._weights_individual_dict.values()),dtype=np.float32))
+
+        else:
+            self.cuda = None
+            self.merge_score: Callable = None
+
+            self.adj_d = None
+            self.edge_nodes_d = None
+            self.edge_weights_d = None
 
     @property
     def communities_dict(self):
@@ -68,6 +106,17 @@ class AllianceBuilder():
     @property
     def market_shares(self):
         return {edge: self._market_shares[edge].copy() for edge in self._market_shares.keys()}
+
+    @property
+    def market_shares_dense(self):
+        
+        market_share = {}
+        for u, v in self._market_shares.keys():
+            market_share[(u, v)] = {}
+            for node, value in self._communities_dict.items():
+                market_share[(u, v)][value] = self._market_shares[(u, v)].get(value,0.0)
+
+        return market_share
 
     @property
     def HHI(self):
@@ -94,12 +143,22 @@ class AllianceBuilder():
         """
         Group edges by 'edge_type' and source node for faster lookup
         """
+
+        # initialize nodes
+        self.m_edges = self.G.number_of_edges()
+
         for u, v, key, attr in self.G.edges(keys=True, data=True):
             self.edges_by_type[attr['edge_type']].append((u, v, key))
             self.edges_by_source[u].append((u, v, key))
             self.edges_by_pair[(u, v, key)] = attr
+        
+        for i, u in enumerate(self.G.nodes()):
+            self.node_spatial_dict[u] = i
+            self.node_spatial_list.append(u)
 
-    def _initialize_communities(self, node_list: List[str], communities_dict: Dict[str,str]):
+        self.n_nodes_spatial = len(self.node_spatial_list)
+
+    def _initialize_communities(self, communities_dict: Optional[Dict[str,str]] = None):
         """
         Initialize each node to be its own community
 
@@ -113,21 +172,27 @@ class AllianceBuilder():
 
         if communities_dict is None:
 
-            if node_list is None:
-                edge_types = set()
-                for _, _, data in self.G.edges(data=True):
-                    edge_type = data.get('edge_type', None)
-                    if edge_type:
-                        edge_types.add(edge_type)
+            edge_types = set()
+            for _, _, data in self.G.edges(data=True):
+                edge_type = data.get('edge_type', None)
+                if edge_type:
+                    edge_types.add(edge_type)
 
-                node_list = sorted(edge_types)
+            node_list = sorted(edge_types)
 
             for i,node in enumerate(node_list):
                 self._communities_dict[node] = i
                 self.node_list.append(node)
+                self.node_dict[node] = i
         else:
             self._communities_dict = deepcopy(communities_dict)
+            node_list = sorted(list(communities_dict.keys()))
+            for i,node in enumerate(node_list):
+                self.node_list.append(node)
+                self.node_dict[node] = i   
 
+        self.n_nodes = len(self.node_list)
+        
     def _initialize_HHI(self):
         """
         Initializes the HHI attribute of each edge of the graph
@@ -136,9 +201,14 @@ class AllianceBuilder():
             # Accumulate the squares for each route
             self._market_shares[(u, v)][self._communities_dict[data['edge_type']]] += data['market_share_percent']
 
+        self.market_shares_nodal = self.market_shares_dense
+        
         # Calculate the HHI for each edge
         for edge, communities in self._market_shares.items():
             self._HHI[edge] = sum(market_share ** 2 for market_share in communities.values())
+
+        self.unique_edges = list(self._market_shares.keys())
+        self.n_edges = len(self.unique_edges)
 
     def _initialize_MAI(self):
         """
@@ -171,15 +241,129 @@ class AllianceBuilder():
         self._update_HHI_scores(edges_to_update)
         self._update_scores(nodes_to_update)
 
-    def greedy_optimize(
+    def _greedy_optimize_gpu(
             self, 
             weights: Optional[Tuple[float,float]]=(0.5,0.5), 
             max_iterations: Optional[int]=1000,
             n_samples: Optional[int] = None
-        ):
-        ########################################
-        ## 4. Algorithm
-        ########################################
+        ) -> Tuple[Dict[int,int], float]:
+        
+
+        def multiobjective(f1, f2, weights: Optional[Tuple[float,float]]=(0.5,0.5)):
+            return weights[0]*f1 + weights[1]*f2
+
+        # Calculate the initial mean HHI over all routes
+        f1 = -(sum(self._HHI.values())*100) / (len(self._HHI)*10000)
+        f2 = sum(self._airline_score.values()) / len(self._airline_score)
+        f = multiobjective(f1,f2,weights)
+
+        # Initialize flag for improvement
+        improvement = True
+
+        # Loop while improvement is possible
+        n_iterations = 0
+        with tqdm(total=max_iterations, desc="Outer Loop") as pbar_outer:
+            while improvement or n_iterations < max_iterations:
+
+                improvement = False
+                max_increase = 0
+                best_pair = None
+
+                # retrieve iteration constants
+                distinct_communities_set = set(self._communities_dict.values())
+                distinct_communities = np.arange(0,len(distinct_communities_set),dtype=np.int32)
+                n_communities = len(distinct_communities)
+
+                # move iteration constants to memory
+                communities_d = self.cuda.to_device(distinct_communities)
+                membership_d = self.cuda.to_device(list((self._communities_dict.values())))
+                market_shares_nodal_d = self.cuda.to_device(dict2array(self.market_shares_nodal))
+
+                edge_HHI_d = self.cuda.to_device(list(self._HHI.values()))
+                node_weight_d = self.cuda.to_device(list(self._weights_dict.values()))
+                node_score_d = self.cuda.to_device(list(self._airline_score.values()))
+
+                # initialize memory
+                # market_shares_d = cuda.device_array((len(self._HHI),len(distinct_communities)), dtype=np.float32)
+                # n_communities = 500
+                # n_nodes = 500
+                # n_edges = 20000
+                membership_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_nodes), dtype=np.int32)
+                market_shares_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_edges,self.n_nodes), dtype=np.float32)
+                hhi_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_edges), dtype=np.float32)
+                weights_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_nodes), dtype=np.float32)
+                score_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_nodes), dtype=np.float32)
+                
+                hhi_pairs_d.fill(0)
+                weights_pairs_d.fill(0)
+                score_pairs_d.fill(0)
+
+                # Define the thread and block dimensions
+                TPB = 4
+                threadsperblock = (TPB, TPB)
+                blockspergrid_x = math.ceil(n_communities / threadsperblock[0])
+                blockspergrid_y = math.ceil(n_communities / threadsperblock[1])
+                blockspergrid = (blockspergrid_x, blockspergrid_y)
+
+                self.merge_score[blockspergrid,threadsperblock](
+                    n_communities,
+                    self.n_edges,
+                    self.n_nodes,
+                    self.m_edges,
+                    communities_d,
+                    membership_d,
+                    market_shares_nodal_d,
+                    self.adj_d,
+                    self.edge_nodes_d,
+                    self.edge_weights_d,
+                    edge_HHI_d,
+                    node_weight_d,
+                    self.node_weight_individual_d,
+                    node_score_d,
+                    membership_pairs_d,
+                    market_shares_pairs_d,
+                    hhi_pairs_d,
+                    weights_pairs_d,
+                    score_pairs_d
+                )
+                self.cuda.synchronize()
+
+                market_shares_pairs_h = market_shares_pairs_d.copy_to_host()
+                hhi_pairs_h = hhi_pairs_d.copy_to_host()
+                weights_pairs_h = weights_pairs_d.copy_to_host()
+                score_pairs_h = score_pairs_d.copy_to_host()
+
+                # free memory
+                communities_d = None
+                membership_d = None
+                market_shares_nodal_d = None
+                edge_HHI_d = None
+                node_weight_d = None
+                node_score_d = None
+                membership_pairs_d = None
+                market_shares_pairs_d = None
+                hhi_pairs_d = None
+                weights_pairs_d = None
+                score_pairs_d = None
+
+        adj_d = None
+        edge_nodes_d = None
+        edge_weights_d = None
+
+    def __del__(self):
+        print("Destructor: Instance destroyed")
+        self.adj_d = None
+        self.edge_nodes_d = None
+        self.edge_weights_d = None
+        self.node_weight_individual_d = None
+
+    def _greedy_optimize_cpu(
+            self, 
+            weights: Optional[Tuple[float,float]]=(0.5,0.5), 
+            max_iterations: Optional[int]=1000,
+            n_samples: Optional[int] = None
+        ) -> Tuple[Dict[int,int], float]:
+
         self.random_state = _default_if_none(self.random_state, random_state(self.seed), "rng_state")
 
         def multiobjective(f1, f2, weights: Optional[Tuple[float,float]]=(0.5,0.5)):
@@ -214,7 +398,7 @@ class AllianceBuilder():
                     search_communities = distinct_communities
                 else:
                     assert n_samples >= 2, "number of samples must be at least 2"
-                    search_communities = rng.sample(distinct_communities,k=n_samples)
+                    search_communities = rng.sample(list(distinct_communities),k=n_samples)
 
                 # For each pair of communities
                 n_pairs = len(search_communities)**2
@@ -263,6 +447,39 @@ class AllianceBuilder():
         # Print the final community structure and the final mean HHI
         print("Final community structure:", self._communities_dict)
         print("Final objective:", f)
+
+        return self.communities_dict, f
+
+    @cpu_gpu_dispatcher('_greedy_optimize_cpu', '_greedy_optimize_gpu')
+    def greedy_optimize(
+            self,
+            weights: Optional[Tuple[float,float]]=(0.5,0.5), 
+            max_iterations: Optional[int]=1000,
+            n_samples: Optional[int] = None
+        ) -> Tuple[Dict[int,int], float]:
+        """
+        performs greedy optimization on the graph community
+        structure such that HHI score is minimized and 
+        MAI score is maximized
+
+        Parameters
+        ----------
+        weights : Optional[Tuple[float,float]], optional
+            The weighting used for the importance of
+            HHI vs MAI, by default (0.5,0.5)
+        max_iterations : Optional[int], optional
+            maximium number of iterations to terminate at, by default 1000
+        n_samples : Optional[int], optional
+            number of random community pair samples to merge during
+            each iteration of the greedy algorithm, by default None
+
+        Returns
+        -------
+        Tuple[Dict[int,int], float]
+            returns a pair of the optimal community partitions
+            and the objective function value
+        """
+        pass
 
     def _update_communities(self, community_to_merge, new_community, update_communities=True):
         # Find the nodes in the community to merge
@@ -351,3 +568,30 @@ class AllianceBuilder():
         for node in weights_dict.keys():
             self._weights_dict[node] = weights_dict[node]
             self._airline_score[node] = airline_score[node]
+
+if __name__ == "__main__":
+    script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
+    data_dir = os.path.join('..','test_data')
+    MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir,data_dir,'test_DG_AP_AL.graphml')) # store graph
+    with open(os.path.join(script_dir,data_dir,'test_airline_nodes.json'),'r') as file:
+        nodes_airlines_dict = json.load(file)
+
+    param = {
+        "weights": (1.0,0.0),
+        "test_communities_dict": {
+            'AT': 0,
+            'BT': 1,
+            'CT': 2,
+            'HT': 3,
+            'VT': 4
+        },
+        "n_samples": None
+    }
+
+    weights = param["weights"]
+    n_samples = param["n_samples"]
+    test_communities_dict = param["test_communities_dict"]
+
+    test_class = AllianceBuilder(MG,seed=1234, use_gpu=True)
+
+    test_class.greedy_optimize(weights=weights,n_samples=n_samples)

@@ -1,0 +1,43 @@
+
+# -*- coding: utf-8 -*-
+#
+# Adopted from stellargraph
+
+import os
+from numba import cuda, errors, config, float64
+if os.environ.get('NUMBA_ENABLE_CUDASIM','0') == '1':
+    from numba.cuda.simulator.cudadrv.devicearray import FakeCUDAArray as DeviceNDArray
+else:
+    from numba.cuda.cudadrv.devicearray import DeviceNDArray
+
+config.warnings.filterwarnings("ignore", category=errors.NumbaPerformanceWarning)
+
+@cuda.jit(device=True)
+def find_value(a, v):
+    for i in range(a.shape[0]):
+        if a[i] == v:
+            return i
+    return -1  # Return -1 if the value is not found
+
+@cuda.jit(device=True)
+def replace_values(a, old_value, new_value):
+    for i in range(a.shape[0]):
+        if a[i] == old_value:
+            a[i] = new_value
+
+@cuda.jit(device=True)
+def searchsorted_d(a, v):
+    out = 0
+    total = a[-1]
+    for j in range(a.shape[0]-1):
+        if a[j] <= v*total:
+            out = j+1
+
+    return out
+
+@cuda.jit(device=True)
+def cumsum_d(arr, out):
+    val = 0
+    for j in range(arr.shape[0]):
+        val += arr[j]
+        out[j] = val
