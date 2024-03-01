@@ -55,6 +55,7 @@ def merge_score(
     m_edges:int,
     communities:DeviceNDArray,
     membership:DeviceNDArray,
+    market_shares:DeviceNDArray,
     market_shares_nodal:DeviceNDArray,
     adj:DeviceNDArray,
     edge_nodes:DeviceNDArray,
@@ -73,7 +74,7 @@ def merge_score(
     community2 = communities[j]
     if community1 == community2:
         membership_pairs[i,j,:] = membership
-        market_shares_pairs[i,j,:,:] = market_shares_nodal
+        market_shares_pairs[i,j,:,:] = market_shares
         hhi_pairs[i,j,:] = edge_HHI
         weights_pairs[i,j,:] = node_weight
         score_pairs[i,j,:] = node_score
@@ -114,6 +115,7 @@ def merge_score_kernel(
         m_edges:int,
         communities:DeviceNDArray,
         membership:DeviceNDArray,
+        market_shares:DeviceNDArray,
         market_shares_nodal:DeviceNDArray,
         adj:DeviceNDArray,
         edge_nodes:DeviceNDArray,
@@ -148,6 +150,7 @@ def merge_score_kernel(
                 m_edges,
                 communities,
                 membership,
+                market_shares,
                 market_shares_nodal,
                 adj,
                 edge_nodes,

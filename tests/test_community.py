@@ -340,6 +340,16 @@ class TestAllianceBuilder:
 
         return test_class
 
+    @pytest.fixture(scope="function")
+    def init_class_gpu(self, example_case) -> AllianceBuilder:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
+
+        return test_class
+
     @pytest.fixture(scope="class")
     def init_class_gpu_iteration(self, example_case) -> AllianceBuilder:
         # This setup will run once for the entire class
@@ -408,6 +418,19 @@ class TestAllianceBuilder:
 
         for key,value in zip(test_class.node_list,weights_pairs[community_to_merge,new_community]):
             assert test_weights_dict[key] == value
+
+    def test_optimize_gpu(self, init_class_gpu: AllianceBuilder, optimization_cases):
+
+        _, weights, n_samples, test_communities_dict = optimization_cases
+
+        test_class = init_class_gpu
+
+        test_class.greedy_optimize(weights=weights,n_samples=n_samples)
+
+        assert same_community(test_class.communities_dict, test_communities_dict)
+
+        print(test_class.f_history)
+        print(test_class.communities_history)
 
 
 if __name__ == "__main__":

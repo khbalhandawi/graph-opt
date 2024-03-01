@@ -95,6 +95,7 @@ class AllianceBuilder():
             self._edge_nodes_d = self.cuda.to_device(self._edge_nodes)
             self._edge_weights_d = self.cuda.to_device(self._edge_weights)
             self._node_weight_individual_d = self.cuda.to_device(np.array(list(self._weights_individual_dict.values()),dtype=np.float32))
+            self._market_shares_nodal_d = self.cuda.to_device(dict2array(self.market_shares_nodal))
 
         else:
             self.cuda = None
@@ -270,6 +271,11 @@ class AllianceBuilder():
         f2 = sum(self._airline_score.values()) / len(self._airline_score)
         f = multiobjective(f1,f2,weights)
 
+        # log history
+        self.communities_history.append(self.communities_dict)
+        self.f_history.append(f)
+        self.multi_history.append((f1,f2))
+
         # Initialize flag for improvement
         improvement = True
 
@@ -283,9 +289,10 @@ class AllianceBuilder():
                 best_pair = None
 
                 # move iteration constants to memory
+                market_shares = dict2array(self.market_shares_dense)
                 communities_d = self.cuda.to_device(self._distinct_communities)
                 membership_d = self.cuda.to_device(list((self._communities_dict.values())))
-                market_shares_nodal_d = self.cuda.to_device(dict2array(self.market_shares_nodal))
+                market_shares_d = self.cuda.to_device(market_shares)
 
                 edge_HHI_d = self.cuda.to_device(list(self._HHI.values()))
                 node_weight_d = self.cuda.to_device(list(self._weights_dict.values()))
@@ -322,7 +329,8 @@ class AllianceBuilder():
                     self.m_edges,
                     communities_d,
                     membership_d,
-                    market_shares_nodal_d,
+                    market_shares_d,
+                    self._market_shares_nodal_d,
                     self._adj_d,
                     self._edge_nodes_d,
                     self._edge_weights_d,
@@ -362,7 +370,6 @@ class AllianceBuilder():
                 # free memory
                 communities_d = None
                 membership_d = None
-                market_shares_nodal_d = None
                 edge_HHI_d = None
                 node_weight_d = None
                 node_score_d = None
@@ -413,6 +420,8 @@ class AllianceBuilder():
         self._edge_nodes_d = None
         self._edge_weights_d = None
         self._node_weight_individual_d = None
+        self._market_shares_nodal_d = None
+
 
     def _greedy_optimize_cpu(
             self, 
@@ -433,6 +442,11 @@ class AllianceBuilder():
         f1 = -(sum(self._HHI.values())*100) / (len(self._HHI)*10000)
         f2 = sum(self._airline_score.values()) / len(self._airline_score)
         f = multiobjective(f1,f2,weights)
+
+        # log history
+        self.communities_history.append(self.communities_dict)
+        self.f_history.append(f)
+        self.multi_history.append((f1,f2))
 
         # Initialize flag for improvement
         improvement = True
