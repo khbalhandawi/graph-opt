@@ -19,6 +19,7 @@ if 'ipykernel' in sys.modules:
 else:
     from tqdm import tqdm
 
+from .utilities import resort_communities
 from ..utilities import _default_if_none, dict2array, cpu_gpu_dispatcher
 
 from typing import Dict, List, Union, Tuple, Optional, NewType
@@ -71,37 +72,45 @@ class AllianceBuilder():
         self._initialize_HHI()
         self._initialize_MAI()
 
-        if self.use_gpu:
-            from .utilities_cuda import cuda, merge_score
-            self.cuda = cuda
-            self.merge_score: Callable = merge_score
+        # Populate the adjacency matrix
+        edge_nodes = []
+        edge_weights = []
+        adj = np.zeros((self.G.number_of_edges(), 2), dtype=np.int32)
+        for i, (u, v, key, data) in enumerate(self.G.edges(data=True, keys=True)):
+            adj[i,:] = np.array([self.node_spatial_dict[u],self.node_spatial_dict[v]])
+            edge_nodes.append(self.node_dict[data["edge_type"]])
+            edge_weights.append(data["weight"])
 
-            # Populate the adjacency matrix
-            edge_nodes = []
-            edge_weights = []
-            adj = np.zeros((self.G.number_of_edges(), 2), dtype=np.int32)
-            for i, (u, v, key, data) in enumerate(self.G.edges(data=True, keys=True)):
-                adj[i,:] = np.array([self.node_spatial_dict[u],self.node_spatial_dict[v]])
-                edge_nodes.append(self.node_dict[data["edge_type"]])
-                edge_weights.append(data["weight"])
+        self._adj = adj
+        self._edge_nodes = np.array(edge_nodes,dtype=np.int32)
+        self._edge_weights = np.array(edge_weights,dtype=np.float32)
+
+        if self.use_gpu:
+            from .utilities_cuda import cuda, merge_score_kernel
+            self.cuda = cuda
+            self.merge_score_kernel: Callable = merge_score_kernel
 
             # move constants to memory
-            self.adj_d = self.cuda.to_device(adj)
-            self.edge_nodes_d = self.cuda.to_device(np.array(edge_nodes,dtype=np.int32))
-            self.edge_weights_d = self.cuda.to_device(np.array(edge_weights,dtype=np.float32))
-            self.node_weight_individual_d = self.cuda.to_device(np.array(list(self._weights_individual_dict.values()),dtype=np.float32))
+            self._adj_d = self.cuda.to_device(self._adj)
+            self._edge_nodes_d = self.cuda.to_device(self._edge_nodes)
+            self._edge_weights_d = self.cuda.to_device(self._edge_weights)
+            self._node_weight_individual_d = self.cuda.to_device(np.array(list(self._weights_individual_dict.values()),dtype=np.float32))
 
         else:
             self.cuda = None
-            self.merge_score: Callable = None
+            self.merge_score_kernel: Callable = None
 
-            self.adj_d = None
-            self.edge_nodes_d = None
-            self.edge_weights_d = None
+            self._adj_d = None
+            self._edge_nodes_d = None
+            self._edge_weights_d = None
 
     @property
-    def communities_dict(self):
+    def communities_dict(self)->Dict[str,int]:
         return {node: self._communities_dict[node] for node in self._communities_dict.keys()}
+
+    @communities_dict.setter
+    def communities_dict(self,value:Dict[str,int]):
+        key, self._communities_dict, self._distinct_communities, self.n_communities = resort_communities(value)
 
     @property
     def market_shares(self):
@@ -180,13 +189,16 @@ class AllianceBuilder():
 
             node_list = sorted(edge_types)
 
+            communities_dict = {}
             for i,node in enumerate(node_list):
-                self._communities_dict[node] = i
+                communities_dict[node] = i
                 self.node_list.append(node)
                 self.node_dict[node] = i
+
+            self.communities_dict = communities_dict
         else:
-            self._communities_dict = deepcopy(communities_dict)
-            node_list = sorted(list(communities_dict.keys()))
+            self.communities_dict = communities_dict
+            node_list = sorted(list(self._communities_dict.keys()))
             for i,node in enumerate(node_list):
                 self.node_list.append(node)
                 self.node_dict[node] = i   
@@ -245,11 +257,12 @@ class AllianceBuilder():
             self, 
             weights: Optional[Tuple[float,float]]=(0.5,0.5), 
             max_iterations: Optional[int]=1000,
-            n_samples: Optional[int] = None
+            n_samples: Optional[int] = None,
+            debug: bool = False
         ) -> Tuple[Dict[int,int], float]:
         
 
-        def multiobjective(f1, f2, weights: Optional[Tuple[float,float]]=(0.5,0.5)):
+        def multiobjective(f1: Union[float,np.ndarray], f2: Union[float,np.ndarray], weights: Optional[Tuple[float,float]]=(0.5,0.5)):
             return weights[0]*f1 + weights[1]*f2
 
         # Calculate the initial mean HHI over all routes
@@ -263,19 +276,14 @@ class AllianceBuilder():
         # Loop while improvement is possible
         n_iterations = 0
         with tqdm(total=max_iterations, desc="Outer Loop") as pbar_outer:
-            while improvement or n_iterations < max_iterations:
+            while improvement and n_iterations < max_iterations:
 
                 improvement = False
                 max_increase = 0
                 best_pair = None
 
-                # retrieve iteration constants
-                distinct_communities_set = set(self._communities_dict.values())
-                distinct_communities = np.arange(0,len(distinct_communities_set),dtype=np.int32)
-                n_communities = len(distinct_communities)
-
                 # move iteration constants to memory
-                communities_d = self.cuda.to_device(distinct_communities)
+                communities_d = self.cuda.to_device(self._distinct_communities)
                 membership_d = self.cuda.to_device(list((self._communities_dict.values())))
                 market_shares_nodal_d = self.cuda.to_device(dict2array(self.market_shares_nodal))
 
@@ -288,12 +296,14 @@ class AllianceBuilder():
                 # n_communities = 500
                 # n_nodes = 500
                 # n_edges = 20000
-                membership_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_nodes), dtype=np.int32)
-                market_shares_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_edges,self.n_nodes), dtype=np.float32)
-                hhi_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_edges), dtype=np.float32)
-                weights_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_nodes), dtype=np.float32)
-                score_pairs_d = self.cuda.device_array((n_communities,n_communities,self.n_nodes), dtype=np.float32)
+                # Note: no need to reduce n_communities by 1 during iteration
+                membership_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_nodes), dtype=np.int32)
+                market_shares_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_edges,self.n_communities), dtype=np.float32)
+                hhi_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_edges), dtype=np.float32)
+                weights_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_nodes), dtype=np.float32)
+                score_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_nodes), dtype=np.float32)
                 
+                market_shares_pairs_d.fill(0)
                 hhi_pairs_d.fill(0)
                 weights_pairs_d.fill(0)
                 score_pairs_d.fill(0)
@@ -301,24 +311,24 @@ class AllianceBuilder():
                 # Define the thread and block dimensions
                 TPB = 4
                 threadsperblock = (TPB, TPB)
-                blockspergrid_x = math.ceil(n_communities / threadsperblock[0])
-                blockspergrid_y = math.ceil(n_communities / threadsperblock[1])
+                blockspergrid_x = math.ceil(self.n_communities / threadsperblock[0])
+                blockspergrid_y = math.ceil(self.n_communities / threadsperblock[1])
                 blockspergrid = (blockspergrid_x, blockspergrid_y)
 
-                self.merge_score[blockspergrid,threadsperblock](
-                    n_communities,
+                self.merge_score_kernel[blockspergrid,threadsperblock](
+                    self.n_communities,
                     self.n_edges,
                     self.n_nodes,
                     self.m_edges,
                     communities_d,
                     membership_d,
                     market_shares_nodal_d,
-                    self.adj_d,
-                    self.edge_nodes_d,
-                    self.edge_weights_d,
+                    self._adj_d,
+                    self._edge_nodes_d,
+                    self._edge_weights_d,
                     edge_HHI_d,
                     node_weight_d,
-                    self.node_weight_individual_d,
+                    self._node_weight_individual_d,
                     node_score_d,
                     membership_pairs_d,
                     market_shares_pairs_d,
@@ -332,6 +342,22 @@ class AllianceBuilder():
                 hhi_pairs_h = hhi_pairs_d.copy_to_host()
                 weights_pairs_h = weights_pairs_d.copy_to_host()
                 score_pairs_h = score_pairs_d.copy_to_host()
+                membership_pairs_h = membership_pairs_d.copy_to_host()
+
+                f1_pairs = -np.mean(hhi_pairs_h,axis=2) / 100
+                f2_pairs = np.mean(score_pairs_h,axis=2)
+
+                f_pairs = multiobjective(f1_pairs,f2_pairs,weights=weights)
+
+                # Find the index of the maximum element
+                max_index_flat = np.argmax(f_pairs)
+                best_pair = np.unravel_index(max_index_flat, f_pairs.shape)
+
+                # Calculate the increase in objective
+                f_new = f_pairs[best_pair[0], best_pair[1]]
+                f1 = f1_pairs[best_pair[0], best_pair[1]]
+                f2 = f2_pairs[best_pair[0], best_pair[1]]
+                max_increase = f_new - f
 
                 # free memory
                 communities_d = None
@@ -346,16 +372,47 @@ class AllianceBuilder():
                 weights_pairs_d = None
                 score_pairs_d = None
 
-        adj_d = None
-        edge_nodes_d = None
-        edge_weights_d = None
+                # If the maximum increase is greater than 0, merge these two communities and update the mean HHI
+                if max_increase > 0:
+                    communities_dict = dict(zip(self.node_list,membership_pairs_h[best_pair[0], best_pair[1]]))
+                    HHI = dict(zip(self.unique_edges,hhi_pairs_h[best_pair[0], best_pair[1]]))
+                    market_shares = market_shares_pairs_h[best_pair[0], best_pair[1]]
+                    airline_score = dict(zip(self.node_list,score_pairs_h[best_pair[0], best_pair[1]]))
+                    
+                    to_original_key, self._communities_dict, self._distinct_communities, self.n_communities = resort_communities(communities_dict)
+
+                    # update current structure
+                    for u, v in self.unique_edges:
+                        self._market_shares[(u, v)] = defaultdict(float)
+
+                    for i, (u, v) in enumerate(self.unique_edges):
+                        for k in self._distinct_communities:
+                            if market_shares[i,to_original_key[k]] > 0.0:
+                                self._market_shares[(u, v)][k] = market_shares[i,to_original_key[k]]
+
+                    self._HHI = HHI
+                    self._airline_score = airline_score
+
+                    f += max_increase
+                    improvement = True
+
+                    # log history
+                    self.communities_history.append(self.communities_dict)
+                    self.f_history.append(f)
+                    self.multi_history.append((f1,f2))
+
+                n_iterations += 1
+                pbar_outer.update(1)
+
+        if debug:
+            return membership_pairs_h, hhi_pairs_h, market_shares_pairs_h, weights_pairs_h, score_pairs_h
 
     def __del__(self):
         print("Destructor: Instance destroyed")
-        self.adj_d = None
-        self.edge_nodes_d = None
-        self.edge_weights_d = None
-        self.node_weight_individual_d = None
+        self._adj_d = None
+        self._edge_nodes_d = None
+        self._edge_weights_d = None
+        self._node_weight_individual_d = None
 
     def _greedy_optimize_cpu(
             self, 
@@ -383,22 +440,21 @@ class AllianceBuilder():
         # Loop while improvement is possible
         n_iterations = 0
         with tqdm(total=max_iterations, desc="Outer Loop") as pbar_outer:
-            while improvement or n_iterations < max_iterations:
+            while improvement and n_iterations < max_iterations:
                 improvement = False
                 max_increase = 0
                 best_pair = None
 
                 # cache current partition
-                distinct_communities = set(self._communities_dict.values())
-                communities_dict = self._communities_dict.copy()
+                communities_dict = self.communities_dict
                 market_shares, HHI = self._get_cache_HHI()
                 weights_dict, airline_score = self._get_cache_MAI()
                 
-                if n_samples is None:
-                    search_communities = distinct_communities
+                if n_samples is None or n_samples >= len(self._distinct_communities):
+                    search_communities = self._distinct_communities
                 else:
                     assert n_samples >= 2, "number of samples must be at least 2"
-                    search_communities = rng.sample(list(distinct_communities),k=n_samples)
+                    search_communities = rng.sample(list(self._distinct_communities),k=n_samples)
 
                 # For each pair of communities
                 n_pairs = len(search_communities)**2
@@ -422,7 +478,7 @@ class AllianceBuilder():
                                     best_pair = (community1, community2)
 
                                 # Revert the merge
-                                self._communities_dict = communities_dict.copy()
+                                self.communities_dict = communities_dict
                                 self._set_cache_HHI(market_shares, HHI)
                                 self._set_cache_MAI(weights_dict, airline_score)
 
@@ -431,6 +487,7 @@ class AllianceBuilder():
                 # If the maximum increase is greater than 0, merge these two communities and update the mean HHI
                 if max_increase > 0:
                     self.update_scores(*best_pair)
+                    self.communities_dict = self._communities_dict
                     f += max_increase
                     improvement = True
 
@@ -455,7 +512,8 @@ class AllianceBuilder():
             self,
             weights: Optional[Tuple[float,float]]=(0.5,0.5), 
             max_iterations: Optional[int]=1000,
-            n_samples: Optional[int] = None
+            n_samples: Optional[int] = None,
+            **kwargs
         ) -> Tuple[Dict[int,int], float]:
         """
         performs greedy optimization on the graph community
@@ -521,11 +579,11 @@ class AllianceBuilder():
             edges = self.edges_by_type[node]
 
             # Get 'to' nodes
-            to_nodes = {v for _, v, _ in edges}
+            to_nodes = [v for _, v, _ in edges]
 
             # Calculate weights
             if len(to_nodes) > 0:
-                edges = set(sum((self.edges_by_source[node] for node in to_nodes), []))
+                edges = sum((self.edges_by_source[node] for node in to_nodes), [])
                 weights = [self.edges_by_pair[(u,v,key)]['weight'] for u,v,key in edges if self._communities_dict[self.edges_by_pair[(u,v,key)]['edge_type']] == target_community]
 
                 self._weights_dict[node] = sum(weights)
@@ -577,7 +635,7 @@ if __name__ == "__main__":
         nodes_airlines_dict = json.load(file)
 
     param = {
-        "weights": (1.0,0.0),
+        "weights": (0.1,0.9),
         "test_communities_dict": {
             'AT': 0,
             'BT': 1,

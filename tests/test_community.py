@@ -1,17 +1,21 @@
+from doctest import debug
 import pytest
 import os
 from ..community_detection.alliance_builder import AllianceBuilder
+from ..community_detection.utilities import resort_communities, same_community
 
 import numpy as np
 import networkx as nx
 import json
 import os
 
+from typing import Tuple
+
 os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
 
 seed = 1234
 
-@pytest.fixture
+@pytest.fixture(scope="class")
 def example_case():
 
     script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
@@ -58,7 +62,7 @@ def example_case():
         test_weights_dict, test_weights_individual_dict, \
         communities_test
 
-@pytest.fixture(
+@pytest.fixture(scope="class",
     params=[
         {
             "community_to_merge": 0,
@@ -107,12 +111,11 @@ def example_case():
             "test_weights_dict": {
                 'AT': 0,
                 'BT': 0,
-                'CT': 7000,
+                'CT': 14000,
                 'HT': 0,
                 'VT': 7000 # 5000 + 2000
             }
         },
-        # case of a merger where there is a change in all scores
         {
             "community_to_merge": 3,
             "new_community": 4,
@@ -164,7 +167,7 @@ def example_merge(request, example_case):
            merge_communities_test, test_HHI, \
            test_weights_dict
 
-@pytest.fixture(
+@pytest.fixture(scope="class",
     params=[
         {
             "weights": (1.0,0.0),
@@ -182,33 +185,33 @@ def example_merge(request, example_case):
             "test_communities_dict": {
                 'AT': 0,
                 'BT': 1,
-                'CT': 4,
-                'HT': 4,
-                'VT': 4
+                'CT': 2,
+                'HT': 2,
+                'VT': 2
             },
             "n_samples": None
         },
         {
             "weights": (0.0,1.0),
             "test_communities_dict": {
-                'AT': 4,
-                'BT': 4,
-                'CT': 4,
-                'HT': 4,
-                'VT': 4
+                'AT': 0,
+                'BT': 0,
+                'CT': 0,
+                'HT': 0,
+                'VT': 0
             },
             "n_samples": None
         },
         {
-            "weights": (0.5,5.0),
+            "weights": (0.5,0.5),
             "test_communities_dict": {
-                'AT': 2,
-                'BT': 3,
-                'CT': 2,
-                'HT': 3,
-                'VT': 2
+                'AT': 0,
+                'BT': 1,
+                'CT': 0,
+                'HT': 1,
+                'VT': 0
             },
-            "n_samples": 2
+            "n_samples": 5
         },
     ],
     ids=[
@@ -231,86 +234,180 @@ def optimization_cases(request, example_case):
 
     return MG, weights, n_samples, test_communities_dict
 
+@pytest.mark.parametrize("dict1, dict2, expected", [
+    ({'AT': 0, 'BT': 1, 'CT': 0, 'HT': 1, 'VT': 0}, {'AT': 1, 'BT': 0, 'CT': 1, 'HT': 0, 'VT': 1}, True),
+    ({'AT': 0, 'BT': 1, 'CT': 0, 'HT': 1, 'VT': 0}, {'AT': 2, 'BT': 0, 'CT': 2, 'HT': 0, 'VT': 2}, True),
+    ({'AT': 0, 'BT': 1, 'CT': 0, 'HT': 1, 'VT': 0}, {'AT': 2, 'BT': 1, 'CT': 2, 'HT': 1, 'VT': 2}, True),
+    ({'AT': 0, 'BT': 1, 'CT': 0, 'HT': 1, 'VT': 0}, {'AT': 1, 'BT': 2, 'CT': 1, 'HT': 0, 'VT': 1}, False),
+], ids=['case 1', 'case 2', 'case 3', 'case 4'])
+def test_same_community(dict1, dict2, expected):
+    assert same_community(dict1, dict2) == expected
 
-@pytest.mark.dependency()
-def test_initialization(example_case):
+@pytest.mark.parametrize(
+    'input_dict, test_dict, test_unique, test_n_communities', [
+        (
+            {
+                '1' : 1,
+                '2' : 1,
+                '3' : 2,
+                '4' : 5,
+                '5' : 6,
+                '6' : 6,
+            },
+            {
+                '1' : 0,
+                '2' : 0,
+                '3' : 1,
+                '4' : 2,
+                '5' : 3,
+                '6' : 3,
+            },
+            [
+                0,1,2,3
+            ],
+            4
+        ),
+        (
+            {
+                '1' : 4,
+                '2' : 4,
+                '3' : 2,
+                '4' : 5,
+                '5' : 6,
+                '6' : 6,
+            },
+            {
+                '1' : 1,
+                '2' : 1,
+                '3' : 0,
+                '4' : 2,
+                '5' : 3,
+                '6' : 3,
+            },
+            [
+                0,1,2,3
+            ],
+            4
+        )
+    ], ids=[
+        'case 1',
+        'case 2'
+    ]
+)
+def test_reorder(input_dict, test_dict, test_unique, test_n_communities):
+    key, reorder_dict, unique_list, n_communities = resort_communities(input_dict)
+    assert n_communities == test_n_communities
+    assert reorder_dict == test_dict
+    assert unique_list == test_unique
+    assert same_community(input_dict,reorder_dict) # check community structure is preserved
 
-    MG, nodes_airlines_dict, \
-    test_HHI, test_weights_dict, \
-    test_weights_individual_dict, \
-    init_communities_test = example_case
+class TestAllianceBuilder:
 
-    test_class = AllianceBuilder(MG)
+    @pytest.mark.dependency()
+    def test_initialization(self,example_case):
 
-    # check all keys in test dictionary are present
-    assert all(key in test_HHI.keys() for key in test_class.HHI)
+        MG, nodes_airlines_dict, \
+        test_HHI, test_weights_dict, \
+        test_weights_individual_dict, \
+        init_communities_test = example_case
 
-    for key,value in test_class.HHI.items():
-        assert test_HHI[key] == value
+        test_class = AllianceBuilder(MG)
 
-    assert all(key in test_weights_dict.keys() for key in test_class.weights_dict)
+        # check all keys in test dictionary are present
+        assert all(key in test_HHI.keys() for key in test_class.HHI)
 
-    for key,value in test_class.weights_dict.items():
-        assert value == test_weights_dict[key]
+        for key,value in test_class.HHI.items():
+            assert test_HHI[key] == value
 
-    for key,value in test_class.weights_individual_dict.items():
-        assert value == test_weights_individual_dict[key]
+        assert all(key in test_weights_dict.keys() for key in test_class.weights_dict)
 
-    for key,value in test_class.communities_dict.items():
-        assert value == init_communities_test[key]
+        for key,value in test_class.weights_dict.items():
+            assert value == test_weights_dict[key]
 
-# @pytest.mark.dependency(depends=["test_initialization"])
-def test_merge(example_merge):
+        for key,value in test_class.weights_individual_dict.items():
+            assert value == test_weights_individual_dict[key]
 
-    MG, \
-    community_to_merge, new_community, \
-    merge_communities_test, test_HHI, \
-    test_weights_dict = example_merge
+        for key,value in test_class.communities_dict.items():
+            assert value == init_communities_test[key]
 
-    test_class = AllianceBuilder(MG)
+    @pytest.fixture(scope="function")
+    def init_class(self, example_case) -> AllianceBuilder:
+        # This setup will run once for the entire class
 
-    test_class.update_scores(community_to_merge,new_community)
+        MG, _, _, _, _, _ = example_case
 
-    # check all keys in test dictionary are present
-    assert all(key in test_HHI.keys() for key in test_class.HHI)
+        test_class = AllianceBuilder(MG, seed=seed)
 
-    for key,value in test_class.communities_dict.items():
-        assert value == merge_communities_test[key]
+        return test_class
 
-    for key,value in test_class.HHI.items():
-        assert test_HHI[key] == value
+    @pytest.fixture(scope="class")
+    def init_class_gpu_iteration(self, example_case) -> AllianceBuilder:
+        # This setup will run once for the entire class
 
-    for key,value in test_class.weights_dict.items():
-        assert value == test_weights_dict[key]
+        MG, _, _, _, _, _ = example_case
 
-def test_optimize(optimization_cases):
+        test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
+        membership_pairs, hhi_pairs, market_shares_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(max_iterations=1,debug=True)
 
-    MG, weights, n_samples, test_communities_dict = optimization_cases
+        return test_class, membership_pairs, hhi_pairs, market_shares_pairs, weights_pairs, score_pairs
 
-    test_class = AllianceBuilder(MG,seed=seed)
+    def test_merge(self, init_class: AllianceBuilder, example_merge):
 
-    test_class.greedy_optimize(weights=weights,n_samples=n_samples)
+        test_class = init_class
 
-    assert test_class.communities_dict == test_communities_dict
+        _, \
+        community_to_merge, new_community, \
+        merge_communities_test, test_HHI, \
+        test_weights_dict = example_merge
 
-    print(test_class.f_history)
-    print(test_class.communities_history)
+        test_class.update_scores(community_to_merge,new_community)
 
-def test_optimize_gpu(optimization_cases):
+        # check all keys in test dictionary are present
+        assert all(key in test_HHI.keys() for key in test_class.HHI)
 
-    # Cudasim Setup
-    os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
+        for key,value in test_class.communities_dict.items():
+            assert value == merge_communities_test[key]
 
-    MG, weights, n_samples, test_communities_dict = optimization_cases
+        for key,value in test_class.HHI.items():
+            assert test_HHI[key] == value
 
-    test_class = AllianceBuilder(MG,seed=seed, use_gpu=True)
+        for key,value in test_class.weights_dict.items():
+            assert value == test_weights_dict[key]
 
-    test_class.greedy_optimize(weights=weights,n_samples=n_samples)
+    def test_optimize(self, init_class: AllianceBuilder, optimization_cases):
 
-    assert test_class.communities_dict == test_communities_dict
+        MG, weights, n_samples, test_communities_dict = optimization_cases
 
-    print(test_class.f_history)
-    print(test_class.communities_history)
+        test_class = init_class
+
+        test_class.greedy_optimize(weights=weights,n_samples=n_samples)
+
+        assert same_community(test_class.communities_dict, test_communities_dict)
+
+        print(test_class.f_history)
+        print(test_class.communities_history)
+
+    def test_merge_gpu(
+            self, 
+            init_class_gpu_iteration: Tuple[AllianceBuilder,np.ndarray,np.ndarray,np.ndarray,np.ndarray], 
+            example_merge
+        ):
+
+        test_class, membership_pairs, hhi_pairs, market_shares_pairs, weights_pairs, score_pairs = init_class_gpu_iteration
+
+        _, \
+        community_to_merge, new_community, \
+        merge_communities_test, test_HHI, \
+        test_weights_dict = example_merge
+
+        for key,value in zip(test_class.node_list,membership_pairs[community_to_merge,new_community]):
+            assert value == merge_communities_test[key]
+
+        for key,value in zip(test_class.unique_edges,hhi_pairs[community_to_merge,new_community]):
+            assert test_HHI[key] == value
+
+        for key,value in zip(test_class.node_list,weights_pairs[community_to_merge,new_community]):
+            assert test_weights_dict[key] == value
 
 
 if __name__ == "__main__":
