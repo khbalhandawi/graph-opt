@@ -49,6 +49,8 @@ def calc_ami(
 @cuda.jit(device=True)
 def merge_score(
     i,j,
+    i_global,
+    j_global,
     n_communities:int,
     n_edges:int,
     n_nodes:int,
@@ -70,8 +72,8 @@ def merge_score(
     weights_pairs:DeviceNDArray,
     score_pairs:DeviceNDArray
 ):
-    community1 = communities[i]
-    community2 = communities[j]
+    community1 = communities[i_global]
+    community2 = communities[j_global]
     if community1 == community2:
         membership_pairs[i,j,:] = membership
         market_shares_pairs[i,j,:,:] = market_shares
@@ -109,6 +111,10 @@ def merge_score(
 
 @cuda.jit()
 def merge_score_kernel(
+        start_idx_i: int,
+        start_idx_j: int,
+        end_idx_i: int,
+        end_idx_j: int,
         n_communities:int,
         n_edges:int,
         n_nodes:int,
@@ -137,13 +143,20 @@ def merge_score_kernel(
     # Compute the grid stride  
     dx, dy = cuda.gridsize(2)  
 
+    batch_size_i = end_idx_i - start_idx_i
+    batch_size_j = end_idx_j - start_idx_j
+
     # Grid stride loop  
-    for i in range(x, n_communities, dx):  
-        for j in range(y, n_communities, dy):  
-            
-            # if i == 0 and j == 1:
+    for i in range(x, batch_size_i, dx):
+        for j in range(y, batch_size_j, dy):
+            # Adjust indices for the current batch
+            i_global = i + start_idx_i
+            j_global = j + start_idx_j
+
             merge_score(
                 i,j,
+                i_global,
+                j_global,
                 n_communities,
                 n_edges,
                 n_nodes,

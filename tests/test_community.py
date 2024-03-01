@@ -357,9 +357,9 @@ class TestAllianceBuilder:
         MG, _, _, _, _, _ = example_case
 
         test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
-        membership_pairs, hhi_pairs, market_shares_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(max_iterations=1,debug=True)
+        membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(max_iterations=1,debug=True)
 
-        return test_class, membership_pairs, hhi_pairs, market_shares_pairs, weights_pairs, score_pairs
+        return test_class, membership_pairs, hhi_pairs, weights_pairs, score_pairs
 
     def test_merge(self, init_class: AllianceBuilder, example_merge):
 
@@ -403,7 +403,7 @@ class TestAllianceBuilder:
             example_merge
         ):
 
-        test_class, membership_pairs, hhi_pairs, market_shares_pairs, weights_pairs, score_pairs = init_class_gpu_iteration
+        test_class, membership_pairs, hhi_pairs, weights_pairs, score_pairs = init_class_gpu_iteration
 
         _, \
         community_to_merge, new_community, \
@@ -425,7 +425,7 @@ class TestAllianceBuilder:
 
         test_class = init_class_gpu
 
-        test_class.greedy_optimize(weights=weights,n_samples=n_samples)
+        test_class.greedy_optimize(weights=weights)
 
         assert same_community(test_class.communities_dict, test_communities_dict)
 

@@ -258,10 +258,12 @@ class AllianceBuilder():
             self, 
             weights: Optional[Tuple[float,float]]=(0.5,0.5), 
             max_iterations: Optional[int]=1000,
-            n_samples: Optional[int] = None,
+            num_streams: Optional[int] = 2,
+            TPB: Optional[int] = 2,
             debug: bool = False
         ) -> Tuple[Dict[int,int], float]:
         
+        num_streams = min(num_streams,self.n_communities)
 
         def multiobjective(f1: Union[float,np.ndarray], f2: Union[float,np.ndarray], weights: Optional[Tuple[float,float]]=(0.5,0.5)):
             return weights[0]*f1 + weights[1]*f2
@@ -298,59 +300,85 @@ class AllianceBuilder():
                 node_weight_d = self.cuda.to_device(list(self._weights_dict.values()))
                 node_score_d = self.cuda.to_device(list(self._airline_score.values()))
 
-                # initialize memory
-                # market_shares_d = cuda.device_array((len(self._HHI),len(distinct_communities)), dtype=np.float32)
-                # n_communities = 500
-                # n_nodes = 500
-                # n_edges = 20000
-                # Note: no need to reduce n_communities by 1 during iteration
-                membership_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_nodes), dtype=np.int32)
-                market_shares_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_edges,self.n_communities), dtype=np.float32)
-                hhi_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_edges), dtype=np.float32)
-                weights_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_nodes), dtype=np.float32)
-                score_pairs_d = self.cuda.device_array((self.n_communities,self.n_communities,self.n_nodes), dtype=np.float32)
-                
-                market_shares_pairs_d.fill(0)
-                hhi_pairs_d.fill(0)
-                weights_pairs_d.fill(0)
-                score_pairs_d.fill(0)
+                # batch processing (to fit GPU memory)
+                # Define the number of streams and batch size
+                batch_size_i = math.ceil(self.n_communities / num_streams)
+                batch_size_j = math.ceil(self.n_communities / num_streams)
+
+                # Create streams
+                streams = [self.cuda.stream() for _ in range(num_streams)]
 
                 # Define the thread and block dimensions
-                TPB = 4
                 threadsperblock = (TPB, TPB)
-                blockspergrid_x = math.ceil(self.n_communities / threadsperblock[0])
-                blockspergrid_y = math.ceil(self.n_communities / threadsperblock[1])
+                blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
+                blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
                 blockspergrid = (blockspergrid_x, blockspergrid_y)
 
-                self.merge_score_kernel[blockspergrid,threadsperblock](
-                    self.n_communities,
-                    self.n_edges,
-                    self.n_nodes,
-                    self.m_edges,
-                    communities_d,
-                    membership_d,
-                    market_shares_d,
-                    self._market_shares_nodal_d,
-                    self._adj_d,
-                    self._edge_nodes_d,
-                    self._edge_weights_d,
-                    edge_HHI_d,
-                    node_weight_d,
-                    self._node_weight_individual_d,
-                    node_score_d,
-                    membership_pairs_d,
-                    market_shares_pairs_d,
-                    hhi_pairs_d,
-                    weights_pairs_d,
-                    score_pairs_d
-                )
-                self.cuda.synchronize()
+                # Initialize host arrays to store results
+                hhi_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_edges), dtype=np.float32)
+                weights_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.float32)
+                score_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.float32)
+                membership_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.int32)
 
-                market_shares_pairs_h = market_shares_pairs_d.copy_to_host()
-                hhi_pairs_h = hhi_pairs_d.copy_to_host()
-                weights_pairs_h = weights_pairs_d.copy_to_host()
-                score_pairs_h = score_pairs_d.copy_to_host()
-                membership_pairs_h = membership_pairs_d.copy_to_host()
+                # Batch processing with streams
+                for i, stream in enumerate(streams):
+                    start_idx_i = i * batch_size_i
+                    end_idx_i = min((i + 1) * batch_size_i, self.n_communities)
+
+                    for j in range(num_streams):
+                        start_idx_j = j * batch_size_j
+                        end_idx_j = min((j + 1) * batch_size_j, self.n_communities)
+
+                        # Initialize device arrays for the batch
+                        membership_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.int32, stream=stream)
+                        market_shares_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges, self.n_communities), dtype=np.float32, stream=stream)
+                        hhi_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges), dtype=np.float32, stream=stream)
+                        weights_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32, stream=stream)
+                        score_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32, stream=stream)
+
+                        market_shares_pairs_d.fill(0)
+                        hhi_pairs_d.fill(0)
+                        weights_pairs_d.fill(0)
+                        score_pairs_d.fill(0)
+
+                        # Launch the kernel for the current batch
+                        self.merge_score_kernel[blockspergrid,threadsperblock,stream](
+                                start_idx_i,
+                                start_idx_j,
+                                end_idx_i,
+                                end_idx_j,
+                                self.n_communities,
+                                self.n_edges,
+                                self.n_nodes,
+                                self.m_edges,
+                                communities_d,
+                                membership_d,
+                                market_shares_d,
+                                self._market_shares_nodal_d,
+                                self._adj_d,
+                                self._edge_nodes_d,
+                                self._edge_weights_d,
+                                edge_HHI_d,
+                                node_weight_d,
+                                self._node_weight_individual_d,
+                                node_score_d,
+                                membership_pairs_d,
+                                market_shares_pairs_d,
+                                hhi_pairs_d,
+                                weights_pairs_d,
+                                score_pairs_d
+                            )
+
+                        # Copy results from device to host for the current batch
+                        # market_shares_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = market_shares_pairs_d.copy_to_host(stream=stream)
+                        hhi_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = hhi_pairs_d.copy_to_host(stream=stream)
+                        weights_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = weights_pairs_d.copy_to_host(stream=stream)
+                        score_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = score_pairs_d.copy_to_host(stream=stream)
+                        membership_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = membership_pairs_d.copy_to_host(stream=stream)
+
+                # Synchronize all streams
+                for stream in streams:
+                    stream.synchronize()
 
                 f1_pairs = -np.mean(hhi_pairs_h,axis=2) / 100
                 f2_pairs = np.mean(score_pairs_h,axis=2)
@@ -381,29 +409,14 @@ class AllianceBuilder():
 
                 # If the maximum increase is greater than 0, merge these two communities and update the mean HHI
                 if max_increase > 0:
-                    communities_dict = dict(zip(self.node_list,membership_pairs_h[best_pair[0], best_pair[1]]))
-                    HHI = dict(zip(self.unique_edges,hhi_pairs_h[best_pair[0], best_pair[1]]))
-                    market_shares = market_shares_pairs_h[best_pair[0], best_pair[1]]
-                    airline_score = dict(zip(self.node_list,score_pairs_h[best_pair[0], best_pair[1]]))
-                    
-                    to_original_key, self._communities_dict, self._distinct_communities, self.n_communities = resort_communities(communities_dict)
-
-                    # update current structure
-                    for u, v in self.unique_edges:
-                        self._market_shares[(u, v)] = defaultdict(float)
-
-                    for i, (u, v) in enumerate(self.unique_edges):
-                        for k in self._distinct_communities:
-                            if market_shares[i,to_original_key[k]] > 0.0:
-                                self._market_shares[(u, v)][k] = market_shares[i,to_original_key[k]]
-
-                    self._HHI = HHI
-                    self._airline_score = airline_score
-
+                    self.update_scores(*best_pair)
+                    self.communities_dict = self._communities_dict
                     f += max_increase
                     improvement = True
 
                     # log history
+                    f1 = -(sum(self._HHI.values())*100) / (len(self._HHI)*10000)
+                    f2 = sum(self._airline_score.values()) / len(self._airline_score)
                     self.communities_history.append(self.communities_dict)
                     self.f_history.append(f)
                     self.multi_history.append((f1,f2))
@@ -412,7 +425,7 @@ class AllianceBuilder():
                 pbar_outer.update(1)
 
         if debug:
-            return membership_pairs_h, hhi_pairs_h, market_shares_pairs_h, weights_pairs_h, score_pairs_h
+            return membership_pairs_h, hhi_pairs_h, weights_pairs_h, score_pairs_h
 
     def __del__(self):
         print("Destructor: Instance destroyed")
