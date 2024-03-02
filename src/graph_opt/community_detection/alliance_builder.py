@@ -86,15 +86,18 @@ class AllianceBuilder():
         self._edge_weights = np.array(edge_weights,dtype=np.float32)
 
         if self.use_gpu:
-            from .utilities_cuda import cuda, merge_score_kernel
+            from .utilities_cuda import cuda, compute_market_share, set_membership, calc_ami, calc_hhi
             self.cuda = cuda
-            self.merge_score_kernel: Callable = merge_score_kernel
+            self.compute_market_share: Callable = compute_market_share
+            self.set_membership: Callable = set_membership
+            self.calc_ami: Callable = calc_ami
+            self.calc_hhi: Callable = calc_hhi
 
             # move constants to memory
             self._adj_d = self.cuda.to_device(self._adj)
             self._edge_nodes_d = self.cuda.to_device(self._edge_nodes)
             self._edge_weights_d = self.cuda.to_device(self._edge_weights)
-            self._node_weight_individual_d = self.cuda.to_device(np.array(list(self._weights_individual_dict.values()),dtype=np.float32))
+            self._node_weight_individual = np.array(list(self._weights_individual_dict.values()),dtype=np.float32)
             self._market_shares_nodal_d = self.cuda.to_device(dict2array(self.market_shares_nodal))
 
         else:
@@ -297,7 +300,7 @@ class AllianceBuilder():
 
                 edge_HHI_d = self.cuda.to_device(list(self._HHI.values()))
                 node_weight_d = self.cuda.to_device(list(self._weights_dict.values()))
-                node_score_d = self.cuda.to_device(list(self._airline_score.values()))
+                node_score_d = self.cuda.to_device(list(self._weights_individual_dict.values()))
 
                 # Define the batch size based on memory requirements and available GPU memory
                 batch_size_i = batch_size
@@ -312,12 +315,6 @@ class AllianceBuilder():
 
                 # Create streams
                 streams = [self.cuda.stream() for _ in range(num_streams)]
-
-                # Define the thread and block dimensions
-                threadsperblock = (TPB, TPB)
-                blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
-                blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
-                blockspergrid = (blockspergrid_x, blockspergrid_y)
 
                 # Initialize host arrays to store results (adjust the size based on the actual number of batches)
                 best_pairs = np.zeros((num_batches_i, num_batches_j, 2), dtype=np.int32)
@@ -347,7 +344,10 @@ class AllianceBuilder():
                         market_shares_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges, self.n_communities), dtype=np.float16)
                         hhi_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges), dtype=np.float32)
                         weights_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
-                        score_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
+                        score_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)                        # Set the values in the kth direction of the array using the vector
+                        min_dim = min(score_pairs_h.shape) # Determine the length of the shorter dimension
+                        diag_indices = np.arange(min_dim) # Create an index array for the diagonal elements
+                        score_pairs_h[diag_indices, diag_indices, :] = self._node_weight_individual # Use advanced indexing to set the values
 
                         membership_pairs_d = self.cuda.to_device(membership_pairs_h,stream=stream)
                         market_shares_pairs_d = self.cuda.to_device(market_shares_pairs_h,stream=stream)
@@ -355,8 +355,38 @@ class AllianceBuilder():
                         weights_pairs_d = self.cuda.to_device(weights_pairs_h,stream=stream)
                         score_pairs_d = self.cuda.to_device(score_pairs_h,stream=stream)
 
-                        # Launch the kernel for the current batch
-                        self.merge_score_kernel[blockspergrid,threadsperblock,stream](
+                        # Define the thread and block dimensions
+                        threadsperblock = (TPB, TPB, TPB)
+                        blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
+                        blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
+                        blockspergrid_z = math.ceil(self.n_nodes / threadsperblock[2])
+                        blockspergrid = (blockspergrid_x, blockspergrid_y, blockspergrid_z)
+
+                        self.set_membership[blockspergrid,threadsperblock,stream](
+                                start_idx_i,
+                                start_idx_j,
+                                end_idx_i,
+                                end_idx_j,
+                                self.n_nodes,
+                                node_weight_d,
+                                node_score_d,
+                                communities_d,
+                                membership_d,
+                                membership_pairs_d,
+                                weights_pairs_d,
+                                score_pairs_d
+                            )
+                        
+                        # Define the thread and block dimensions
+                        threadsperblock = (TPB, TPB)
+                        blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
+                        blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
+                        blockspergrid = (blockspergrid_x, blockspergrid_y)
+                        
+                        stream.synchronize()
+                        print('membership done')
+
+                        self.compute_market_share[blockspergrid,threadsperblock,stream](
                                 start_idx_i,
                                 start_idx_j,
                                 end_idx_i,
@@ -364,38 +394,94 @@ class AllianceBuilder():
                                 self.n_communities,
                                 self.n_edges,
                                 self.n_nodes,
-                                self.m_edges,
                                 communities_d,
-                                membership_d,
                                 market_shares_d,
                                 self._market_shares_nodal_d,
-                                self._adj_d,
-                                self._edge_nodes_d,
-                                self._edge_weights_d,
                                 edge_HHI_d,
-                                node_weight_d,
-                                self._node_weight_individual_d,
-                                node_score_d,
                                 membership_pairs_d,
                                 market_shares_pairs_d,
-                                hhi_pairs_d,
+                                hhi_pairs_d
+                            )
+                        
+                        stream.synchronize()
+                        print('market share done')
+
+                        # Define the thread and block dimensions
+                        threadsperblock = (TPB, TPB, TPB)
+                        blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
+                        blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
+                        blockspergrid_z = math.ceil(self.n_communities / threadsperblock[2])
+                        blockspergrid = (blockspergrid_x, blockspergrid_y, blockspergrid_z)
+
+                        self.calc_hhi[blockspergrid,threadsperblock,stream](
+                                start_idx_i,
+                                start_idx_j,
+                                end_idx_i,
+                                end_idx_j,
+                                self.n_edges,
+                                self.n_communities,
+                                communities_d,
+                                market_shares_pairs_d,
+                                hhi_pairs_d
+                            )
+
+                        stream.synchronize()
+                        print('hhi done')
+
+                        # Define the thread and block dimensions
+                        threadsperblock = (TPB, TPB, TPB)
+                        blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
+                        blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
+                        blockspergrid_z = math.ceil(self.n_nodes / threadsperblock[2])
+                        blockspergrid = (blockspergrid_x, blockspergrid_y, blockspergrid_z)
+
+                        self.calc_ami[blockspergrid,threadsperblock,stream](
+                                start_idx_i,
+                                start_idx_j,
+                                end_idx_i,
+                                end_idx_j,
+                                self.n_nodes,
+                                self.m_edges,
+                                communities_d,
+                                self._adj_d,
+                                membership_pairs_d,
+                                self._edge_nodes_d,
+                                self._edge_weights_d,
                                 weights_pairs_d,
                                 score_pairs_d
                             )
+                        
+                        stream.synchronize()
+                        print('ami done')
 
                         # Copy results from device to host for the current batch
                         hhi_pairs_h = hhi_pairs_d.copy_to_host(stream=stream)
                         weights_pairs_h = weights_pairs_d.copy_to_host(stream=stream)
                         score_pairs_h = score_pairs_d.copy_to_host(stream=stream)
+                        score_pairs_h = np.where(score_pairs_h > 0, np.log(score_pairs_h), 0.0)
                         membership_pairs_h = membership_pairs_d.copy_to_host(stream=stream)
+
+                        # free memory
+                        membership_pairs_d = None
+                        market_shares_pairs_d = None
+                        hhi_pairs_d = None
+                        weights_pairs_d = None
+                        score_pairs_d = None
+
+                        stream.synchronize()
+                        print('copy to host done')
 
                         f1_pairs = -np.mean(hhi_pairs_h,axis=2) / 100
                         f2_pairs = np.mean(score_pairs_h,axis=2)
                         f_pairs = multiobjective(f1_pairs,f2_pairs,weights=weights)
 
+                        print('compute objective')
+
                         max_index_flat = np.argmax(f_pairs)
                         best_pair = list(np.unravel_index(max_index_flat, f_pairs.shape))
                         best_pair_global = (best_pair[0] + start_idx_i, best_pair[1] + start_idx_j)
+
+                        print('find best pair objective')
 
                         # Copy results from device to host for the current batch
                         best_pairs[batch_i,batch_j] = np.array(best_pair_global,dtype=np.int32)
