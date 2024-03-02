@@ -260,11 +260,10 @@ class AllianceBuilder():
             max_iterations: Optional[int]=1000,
             num_streams: Optional[int] = 2,
             TPB: Optional[int] = 2,
+            n_samples: int = None,
             debug: bool = False
         ) -> Tuple[Dict[int,int], float]:
         
-        num_streams = min(num_streams,self.n_communities)
-
         def multiobjective(f1: Union[float,np.ndarray], f2: Union[float,np.ndarray], weights: Optional[Tuple[float,float]]=(0.5,0.5)):
             return weights[0]*f1 + weights[1]*f2
 
@@ -280,6 +279,8 @@ class AllianceBuilder():
 
         # Initialize flag for improvement
         improvement = True
+
+        num_streams = min(num_streams,self.n_communities)
 
         # Loop while improvement is possible
         n_iterations = 0
@@ -315,10 +316,10 @@ class AllianceBuilder():
                 blockspergrid = (blockspergrid_x, blockspergrid_y)
 
                 # Initialize host arrays to store results
-                hhi_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_edges), dtype=np.float32)
-                weights_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.float32)
-                score_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.float32)
-                membership_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.int32)
+                hhi_pairs = np.zeros((num_streams, num_streams, self.n_edges), dtype=np.float32)
+                weights_pairs = np.zeros((num_streams, num_streams, self.n_nodes), dtype=np.float32)
+                score_pairs = np.zeros((num_streams, num_streams, self.n_nodes), dtype=np.float32)
+                membership_pairs = np.zeros((num_streams, num_streams, self.n_nodes), dtype=np.int32)
 
                 # Batch processing with streams
                 for i, stream in enumerate(streams):
@@ -328,18 +329,19 @@ class AllianceBuilder():
                     for j in range(num_streams):
                         start_idx_j = j * batch_size_j
                         end_idx_j = min((j + 1) * batch_size_j, self.n_communities)
-
+                        
                         # Initialize device arrays for the batch
-                        membership_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.int32, stream=stream)
-                        market_shares_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges, self.n_communities), dtype=np.float32, stream=stream)
-                        hhi_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges), dtype=np.float32, stream=stream)
-                        weights_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32, stream=stream)
-                        score_pairs_d = self.cuda.device_array((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32, stream=stream)
+                        membership_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.int32)
+                        market_shares_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges, self.n_communities), dtype=np.float32)
+                        hhi_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges), dtype=np.float32)
+                        weights_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
+                        score_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
 
-                        market_shares_pairs_d.fill(0)
-                        hhi_pairs_d.fill(0)
-                        weights_pairs_d.fill(0)
-                        score_pairs_d.fill(0)
+                        membership_pairs_d = self.cuda.to_device(membership_pairs_h)
+                        market_shares_pairs_d = self.cuda.to_device(market_shares_pairs_h)
+                        hhi_pairs_d = self.cuda.to_device(hhi_pairs_h)
+                        weights_pairs_d = self.cuda.to_device(weights_pairs_h)
+                        score_pairs_d = self.cuda.to_device(score_pairs_h)
 
                         # Launch the kernel for the current batch
                         self.merge_score_kernel[blockspergrid,threadsperblock,stream](
@@ -370,18 +372,30 @@ class AllianceBuilder():
                             )
 
                         # Copy results from device to host for the current batch
-                        # market_shares_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = market_shares_pairs_d.copy_to_host(stream=stream)
-                        hhi_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = hhi_pairs_d.copy_to_host(stream=stream)
-                        weights_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = weights_pairs_d.copy_to_host(stream=stream)
-                        score_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = score_pairs_d.copy_to_host(stream=stream)
-                        membership_pairs_h[start_idx_i:end_idx_i, start_idx_j:end_idx_j] = membership_pairs_d.copy_to_host(stream=stream)
+                        hhi_pairs_h = hhi_pairs_d.copy_to_host(stream=stream)
+                        weights_pairs_h = weights_pairs_d.copy_to_host(stream=stream)
+                        score_pairs_h = score_pairs_d.copy_to_host(stream=stream)
+                        membership_pairs_h = membership_pairs_d.copy_to_host(stream=stream)
+
+                        f1_pairs = -np.mean(hhi_pairs_h,axis=2) / 100
+                        f2_pairs = np.mean(score_pairs_h,axis=2)
+                        f_pairs = multiobjective(f1_pairs,f2_pairs,weights=weights)
+
+                        max_index_flat = np.argmax(f_pairs)
+                        best_pair = np.unravel_index(max_index_flat, f_pairs.shape)
+
+                        # Copy results from device to host for the current batch
+                        hhi_pairs[i,j] = hhi_pairs_h[best_pair[0], best_pair[1]]
+                        weights_pairs[i,j] = weights_pairs_h[best_pair[0], best_pair[1]]
+                        score_pairs[i,j] = score_pairs_h[best_pair[0], best_pair[1]]
+                        membership_pairs[i,j] = membership_pairs_h[best_pair[0], best_pair[1]]
 
                 # Synchronize all streams
                 for stream in streams:
                     stream.synchronize()
 
-                f1_pairs = -np.mean(hhi_pairs_h,axis=2) / 100
-                f2_pairs = np.mean(score_pairs_h,axis=2)
+                f1_pairs = -np.mean(hhi_pairs,axis=2) / 100
+                f2_pairs = np.mean(score_pairs,axis=2)
 
                 f_pairs = multiobjective(f1_pairs,f2_pairs,weights=weights)
 
@@ -425,7 +439,7 @@ class AllianceBuilder():
                 pbar_outer.update(1)
 
         if debug:
-            return membership_pairs_h, hhi_pairs_h, weights_pairs_h, score_pairs_h
+            return membership_pairs, hhi_pairs, weights_pairs, score_pairs
 
     def __del__(self):
         print("Destructor: Instance destroyed")

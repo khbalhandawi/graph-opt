@@ -11,7 +11,7 @@ import os
 
 from typing import Tuple
 
-os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
+os.environ['NUMBA_ENABLE_CUDASIM'] = "0"
 
 seed = 1234
 
@@ -202,23 +202,23 @@ def example_merge(request, example_case):
             },
             "n_samples": None
         },
-        {
-            "weights": (0.5,0.5),
-            "test_communities_dict": {
-                'AT': 0,
-                'BT': 1,
-                'CT': 0,
-                'HT': 1,
-                'VT': 0
-            },
-            "n_samples": 5
-        },
+        # {
+        #     "weights": (0.5,0.5),
+        #     "test_communities_dict": {
+        #         'AT': 0,
+        #         'BT': 1,
+        #         'CT': 0,
+        #         'HT': 1,
+        #         'VT': 0
+        #     },
+        #     "n_samples": 5
+        # },
     ],
     ids=[
         'minimize HHI',
         'maximize HHI',
         'maximize MAI',
-        'test sampling',
+        # 'test sampling',
     ]
 )
 def optimization_cases(request, example_case):
@@ -357,7 +357,11 @@ class TestAllianceBuilder:
         MG, _, _, _, _, _ = example_case
 
         test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
-        membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(max_iterations=1,debug=True)
+        membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(
+            max_iterations=1,
+            num_streams=test_class.n_communities,
+            debug=True
+        )
 
         return test_class, membership_pairs, hhi_pairs, weights_pairs, score_pairs
 

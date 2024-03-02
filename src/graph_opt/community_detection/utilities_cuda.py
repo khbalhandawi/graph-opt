@@ -9,14 +9,14 @@ def calc_hhi(
         n_edges,
         n_nodes,
         n_communities,
-        membership,
+        membership_pairs,
         market_shares_nodal,
         market_shares_pairs,
         hhi_pairs
     ):
     for k in range(n_edges):
         for n in range(n_nodes):
-            market_shares_pairs[i,j,k,membership[n]] += market_shares_nodal[k,n]
+            market_shares_pairs[i,j,k,membership_pairs[i,j,n]] += market_shares_nodal[k,n]
         
     for k in range(n_edges):
         for n in range(n_communities):
@@ -28,7 +28,7 @@ def calc_ami(
         m_edges,
         n_nodes,
         adj,
-        membership,
+        membership_pairs,
         edge_nodes,
         edge_weights,
         node_weight_individual,
@@ -40,7 +40,7 @@ def calc_ami(
         for k1 in range(m_edges):
             if edge_nodes[k1] == n:
                 for k2 in range(m_edges):
-                    if adj[k2,0] == adj[k1,1] and membership[n] == membership[edge_nodes[k2]]: 
+                    if adj[k2,0] == adj[k1,1] and membership_pairs[i,j,n] == membership_pairs[i,j,edge_nodes[k2]]: 
                         # if destination edge is connected to current edge
                         weights_pairs[i,j,n] += edge_weights[k2]
                         score_pairs[i,j,n] += edge_weights[k2]
@@ -75,11 +75,17 @@ def merge_score(
     community1 = communities[i_global]
     community2 = communities[j_global]
     if community1 == community2:
-        membership_pairs[i,j,:] = membership
-        market_shares_pairs[i,j,:,:] = market_shares
-        hhi_pairs[i,j,:] = edge_HHI
-        weights_pairs[i,j,:] = node_weight
-        score_pairs[i,j,:] = node_score
+
+        for k in range(n_nodes):
+            membership_pairs[i,j,k] = membership[k]
+            weights_pairs[i,j,k] = node_weight[k]
+            score_pairs[i,j,k] = node_score[k]
+
+        for k in range(n_edges):
+            hhi_pairs[i,j,k] = edge_HHI[k]
+            for l in range(n_communities):
+                market_shares_pairs[i,j,k,l] = market_shares[k,l]
+
     else:
         for k in range(n_nodes):
             cur_member = membership[k] if membership[k] != community1 else community2
@@ -90,7 +96,7 @@ def merge_score(
             n_edges,
             n_nodes,
             n_communities,
-            membership_pairs[i,j,:],
+            membership_pairs,
             market_shares_nodal,
             market_shares_pairs,
             hhi_pairs
@@ -101,7 +107,7 @@ def merge_score(
             m_edges,
             n_nodes,
             adj,
-            membership_pairs[i,j,:],
+            membership_pairs,
             edge_nodes,
             edge_weights,
             node_weight_individual,
