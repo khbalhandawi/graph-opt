@@ -258,9 +258,9 @@ class AllianceBuilder():
             self, 
             weights: Optional[Tuple[float,float]]=(0.5,0.5), 
             max_iterations: Optional[int]=1000,
-            num_streams: Optional[int] = 2,
+            batch_size: Optional[int] = 2,
+            num_streams: Optional[int] = 1,
             TPB: Optional[int] = 2,
-            n_samples: int = None,
             debug: bool = False
         ) -> Tuple[Dict[int,int], float]:
         
@@ -279,8 +279,6 @@ class AllianceBuilder():
 
         # Initialize flag for improvement
         improvement = True
-
-        num_streams = min(num_streams,self.n_communities)
 
         # Loop while improvement is possible
         n_iterations = 0
@@ -301,10 +299,16 @@ class AllianceBuilder():
                 node_weight_d = self.cuda.to_device(list(self._weights_dict.values()))
                 node_score_d = self.cuda.to_device(list(self._airline_score.values()))
 
-                # batch processing (to fit GPU memory)
-                # Define the number of streams and batch size
-                batch_size_i = math.ceil(self.n_communities / num_streams)
-                batch_size_j = math.ceil(self.n_communities / num_streams)
+                # Define the batch size based on memory requirements and available GPU memory
+                batch_size_i = batch_size
+                batch_size_j = batch_size
+
+                # Calculate the number of batches needed to process all communities
+                num_batches_i = math.ceil(self.n_communities / batch_size_i)
+                num_batches_j = math.ceil(self.n_communities / batch_size_j)
+
+                # Define the number of streams (can be adjusted based on the desired level of concurrency)
+                num_streams = min(num_streams, num_batches_i, num_batches_j)
 
                 # Create streams
                 streams = [self.cuda.stream() for _ in range(num_streams)]
@@ -315,33 +319,41 @@ class AllianceBuilder():
                 blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
                 blockspergrid = (blockspergrid_x, blockspergrid_y)
 
-                # Initialize host arrays to store results
-                hhi_pairs = np.zeros((num_streams, num_streams, self.n_edges), dtype=np.float32)
-                weights_pairs = np.zeros((num_streams, num_streams, self.n_nodes), dtype=np.float32)
-                score_pairs = np.zeros((num_streams, num_streams, self.n_nodes), dtype=np.float32)
-                membership_pairs = np.zeros((num_streams, num_streams, self.n_nodes), dtype=np.int32)
+                # Initialize host arrays to store results (adjust the size based on the actual number of batches)
+                best_pairs = np.zeros((num_batches_i, num_batches_j, 2), dtype=np.int32)
+                hhi_pairs = np.zeros((num_batches_i, num_batches_j, self.n_edges), dtype=np.float32)
+                weights_pairs = np.zeros((num_batches_i, num_batches_j, self.n_nodes), dtype=np.float32)
+                score_pairs = np.zeros((num_batches_i, num_batches_j, self.n_nodes), dtype=np.float32)
+                membership_pairs = np.zeros((num_batches_i, num_batches_j, self.n_nodes), dtype=np.int32)
 
                 # Batch processing with streams
-                for i, stream in enumerate(streams):
-                    start_idx_i = i * batch_size_i
-                    end_idx_i = min((i + 1) * batch_size_i, self.n_communities)
+                num_total_batches = num_batches_i * num_batches_j
+                with tqdm(total=num_total_batches, desc="Batches processed") as pbar_inner:
+                    for batch_index in range(num_total_batches):
+                        batch_i = batch_index // num_batches_j
+                        batch_j = batch_index % num_batches_j
 
-                    for j in range(num_streams):
-                        start_idx_j = j * batch_size_j
-                        end_idx_j = min((j + 1) * batch_size_j, self.n_communities)
-                        
+                        start_idx_i = batch_i * batch_size_i
+                        end_idx_i = min((batch_i + 1) * batch_size_i, self.n_communities)
+
+                        start_idx_j = batch_j * batch_size_j
+                        end_idx_j = min((batch_j + 1) * batch_size_j, self.n_communities)
+
+                        # Select a stream for this batch
+                        stream = streams[(batch_i * num_batches_j + batch_j) % num_streams]
+
                         # Initialize device arrays for the batch
-                        membership_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.int32)
-                        market_shares_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges, self.n_communities), dtype=np.float32)
+                        membership_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.int8)
+                        market_shares_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges, self.n_communities), dtype=np.float16)
                         hhi_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges), dtype=np.float32)
                         weights_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
                         score_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
 
-                        membership_pairs_d = self.cuda.to_device(membership_pairs_h)
-                        market_shares_pairs_d = self.cuda.to_device(market_shares_pairs_h)
-                        hhi_pairs_d = self.cuda.to_device(hhi_pairs_h)
-                        weights_pairs_d = self.cuda.to_device(weights_pairs_h)
-                        score_pairs_d = self.cuda.to_device(score_pairs_h)
+                        membership_pairs_d = self.cuda.to_device(membership_pairs_h,stream=stream)
+                        market_shares_pairs_d = self.cuda.to_device(market_shares_pairs_h,stream=stream)
+                        hhi_pairs_d = self.cuda.to_device(hhi_pairs_h,stream=stream)
+                        weights_pairs_d = self.cuda.to_device(weights_pairs_h,stream=stream)
+                        score_pairs_d = self.cuda.to_device(score_pairs_h,stream=stream)
 
                         # Launch the kernel for the current batch
                         self.merge_score_kernel[blockspergrid,threadsperblock,stream](
@@ -382,13 +394,17 @@ class AllianceBuilder():
                         f_pairs = multiobjective(f1_pairs,f2_pairs,weights=weights)
 
                         max_index_flat = np.argmax(f_pairs)
-                        best_pair = np.unravel_index(max_index_flat, f_pairs.shape)
+                        best_pair = list(np.unravel_index(max_index_flat, f_pairs.shape))
+                        best_pair_global = (best_pair[0] + start_idx_i, best_pair[1] + start_idx_j)
 
                         # Copy results from device to host for the current batch
-                        hhi_pairs[i,j] = hhi_pairs_h[best_pair[0], best_pair[1]]
-                        weights_pairs[i,j] = weights_pairs_h[best_pair[0], best_pair[1]]
-                        score_pairs[i,j] = score_pairs_h[best_pair[0], best_pair[1]]
-                        membership_pairs[i,j] = membership_pairs_h[best_pair[0], best_pair[1]]
+                        best_pairs[batch_i,batch_j] = np.array(best_pair_global,dtype=np.int32)
+                        hhi_pairs[batch_i,batch_j] = hhi_pairs_h[best_pair[0], best_pair[1]]
+                        weights_pairs[batch_i,batch_j] = weights_pairs_h[best_pair[0], best_pair[1]]
+                        score_pairs[batch_i,batch_j] = score_pairs_h[best_pair[0], best_pair[1]]
+                        membership_pairs[batch_i,batch_j] = membership_pairs_h[best_pair[0], best_pair[1]]
+
+                        pbar_inner.update(1)
 
                 # Synchronize all streams
                 for stream in streams:
@@ -401,12 +417,13 @@ class AllianceBuilder():
 
                 # Find the index of the maximum element
                 max_index_flat = np.argmax(f_pairs)
-                best_pair = np.unravel_index(max_index_flat, f_pairs.shape)
+                best_batch = np.unravel_index(max_index_flat, f_pairs.shape)
 
                 # Calculate the increase in objective
-                f_new = f_pairs[best_pair[0], best_pair[1]]
-                f1 = f1_pairs[best_pair[0], best_pair[1]]
-                f2 = f2_pairs[best_pair[0], best_pair[1]]
+                best_pair = tuple(best_pairs[best_batch[0], best_batch[1]])
+                f_new = f_pairs[best_batch[0], best_batch[1]]
+                f1 = f1_pairs[best_batch[0], best_batch[1]]
+                f2 = f2_pairs[best_batch[0], best_batch[1]]
                 max_increase = f_new - f
 
                 # free memory
@@ -422,7 +439,8 @@ class AllianceBuilder():
                 score_pairs_d = None
 
                 # If the maximum increase is greater than 0, merge these two communities and update the mean HHI
-                if max_increase > 0:
+                if max_increase > 0.0:
+                    
                     self.update_scores(*best_pair)
                     self.communities_dict = self._communities_dict
                     f += max_increase

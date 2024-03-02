@@ -11,7 +11,7 @@ import os
 
 from typing import Tuple
 
-os.environ['NUMBA_ENABLE_CUDASIM'] = "0"
+os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
 
 seed = 1234
 
@@ -360,6 +360,7 @@ class TestAllianceBuilder:
         membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(
             max_iterations=1,
             num_streams=test_class.n_communities,
+            batch_size=1,
             debug=True
         )
 
