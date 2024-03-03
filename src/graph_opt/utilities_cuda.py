@@ -4,7 +4,7 @@
 # Adopted from stellargraph
 
 import os
-from numba import cuda, errors, config, float64
+from numba import cuda, errors, config, float64, float32
 if os.environ.get('NUMBA_ENABLE_CUDASIM','0') == '1':
     from numba.cuda.simulator.cudadrv.devicearray import FakeCUDAArray as DeviceNDArray
 else:

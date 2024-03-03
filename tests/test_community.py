@@ -11,7 +11,7 @@ import os
 
 from typing import Tuple
 
-os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
+os.environ['NUMBA_ENABLE_CUDASIM'] = "0"
 
 seed = 1234
 
@@ -111,7 +111,7 @@ def example_case():
             "test_weights_dict": {
                 'AT': 0,
                 'BT': 0,
-                'CT': 14000,
+                'CT': 7000,
                 'HT': 0,
                 'VT': 7000 # 5000 + 2000
             }
@@ -423,7 +423,7 @@ class TestAllianceBuilder:
 
         for key,value in zip(test_class.node_list,weights_pairs[community_to_merge,new_community]):
             assert test_weights_dict[key] == value
-
+    
     def test_optimize_gpu(self, init_class_gpu: AllianceBuilder, optimization_cases):
 
         _, weights, n_samples, test_communities_dict = optimization_cases

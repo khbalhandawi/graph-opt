@@ -82,15 +82,18 @@ class AllianceBuilder():
         edge_weights = []
         edges_neighbour = []
         unique_edge_index = []
+        processed_edges = set()
+
         adj = np.zeros((self.G.number_of_edges(), 2), dtype=np.int32)
         for i, (u, v, key, data) in enumerate(self.G.edges(data=True, keys=True)):
             adj[i,:] = np.array([self.node_spatial_dict[u],self.node_spatial_dict[v]])
             edge_nodes.append(self.node_dict[data["edge_type"]])
             edge_weights.append(data["weight"])
             unique_edge_index.append(self.unique_edge_index[(u, v, key)])
-
-            for u_link, v_link, key_link in self.edges_by_source[v]:
-                edges_neighbour.append((self.edge_index[(u, v, key)], self.edge_index[(u_link, v_link, key_link)]))
+            if (v, key) not in processed_edges:
+                for u_link, v_link, key_link in self.edges_by_source[v]:
+                    edges_neighbour.append((self.edge_index[(u, v, key)], self.edge_index[(u_link, v_link, key_link)]))
+                processed_edges.add((v, key))
 
         self._adj = adj
         self._edge_nodes = np.array(edge_nodes,dtype=np.int32)
@@ -109,9 +112,8 @@ class AllianceBuilder():
         self._market_shares_sparse_nodes = np.array(self._market_shares_sparse_nodes, dtype=np.int32)
 
         if self.use_gpu:
-            from .utilities_cuda import cuda, compute_market_share, set_membership, calc_ami, calc_hhi
+            from .utilities_cuda import cuda, set_membership, calc_ami, calc_hhi
             self.cuda = cuda
-            self.compute_market_share: Callable = compute_market_share
             self.set_membership: Callable = set_membership
             self.calc_ami: Callable = calc_ami
             self.calc_hhi: Callable = calc_hhi
@@ -281,9 +283,9 @@ class AllianceBuilder():
             self,
             weights: Optional[Tuple[float,float]]=(0.5,0.5),
             max_iterations: Optional[int]=1000,
-            batch_size: Optional[int] = 2,
+            batch_size: Optional[Union[int,Tuple[int,int]]] = 2,
             num_streams: Optional[int] = 1,
-            TPB: Optional[int] = 2,
+            threads_per_block: Optional[Union[int,Tuple[int,int,int]]] = 2,
             debug: bool = False
         ) -> Tuple[Dict[int,int], float]:
 
@@ -315,14 +317,26 @@ class AllianceBuilder():
                 # move iteration constants to memory
                 communities_d = self.cuda.to_device(self._distinct_communities)
                 membership_d = self.cuda.to_device(list((self._communities_dict.values())))
-
                 edge_HHI_d = self.cuda.to_device(list(self._HHI.values()))
                 node_weight_d = self.cuda.to_device(list(self._weights_dict.values()))
                 node_score_d = self.cuda.to_device(list(self._weights_individual_dict.values()))
 
                 # Define the batch size based on memory requirements and available GPU memory
-                batch_size_i = batch_size
-                batch_size_j = batch_size
+                if isinstance(batch_size, int):
+                    batch_size_i = batch_size
+                    batch_size_j = batch_size
+                else:
+                    batch_size_i = batch_size[0]
+                    batch_size_j = batch_size[1]
+
+                if isinstance(threads_per_block, int):
+                    TPB_i = threads_per_block
+                    TPB_j = threads_per_block
+                    TPB_k = threads_per_block
+                else:
+                    TPB_i = threads_per_block[0]
+                    TPB_j = threads_per_block[1]
+                    TPB_k = threads_per_block[2]
 
                 # Calculate the number of batches needed to process all communities
                 num_batches_i = math.ceil(self.n_communities / batch_size_i)
@@ -340,7 +354,7 @@ class AllianceBuilder():
                 weights_pairs = np.zeros((num_batches_i, num_batches_j, self.n_nodes), dtype=np.float32)
                 score_pairs = np.zeros((num_batches_i, num_batches_j, self.n_nodes), dtype=np.float32)
                 membership_pairs = np.zeros((num_batches_i, num_batches_j, self.n_nodes), dtype=np.int32)
-
+                
                 # Batch processing with streams
                 num_total_batches = num_batches_i * num_batches_j
                 with tqdm(total=num_total_batches, desc="Batches processed") as pbar_inner:
@@ -359,8 +373,7 @@ class AllianceBuilder():
 
                         # Initialize device arrays for the batch
                         membership_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.int8)
-                        market_shares_values_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.m_edges), dtype=np.float32)
-                        market_shares_communities_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.m_edges), dtype=np.int32)
+                        local_array_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges), dtype=np.float32)
                         hhi_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges), dtype=np.float32)
                         weights_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
                         score_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
@@ -372,14 +385,13 @@ class AllianceBuilder():
 
                         # move final arrays to device
                         membership_pairs_d = self.cuda.to_device(membership_pairs_h,stream=stream)
-                        market_shares_communities_d = self.cuda.to_device(market_shares_communities_h,stream=stream)
-                        market_shares_values_d = self.cuda.to_device(market_shares_values_h,stream=stream)
+                        local_array_d = self.cuda.to_device(local_array_h,stream=stream)
                         hhi_pairs_d = self.cuda.to_device(hhi_pairs_h,stream=stream)
                         weights_pairs_d = self.cuda.to_device(weights_pairs_h,stream=stream)
                         score_pairs_d = self.cuda.to_device(score_pairs_h,stream=stream)
 
                         # Define the thread and block dimensions
-                        threadsperblock = (TPB, TPB, TPB)
+                        threadsperblock = (TPB_i, TPB_j, TPB_k)
                         blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
                         blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
                         blockspergrid_z = math.ceil(self.n_nodes / threadsperblock[2])
@@ -404,35 +416,10 @@ class AllianceBuilder():
                         print('membership done')
 
                         # Define the thread and block dimensions
-                        threadsperblock = (TPB, TPB)
+                        threadsperblock = (TPB_i, TPB_j)
                         blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
                         blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
                         blockspergrid = (blockspergrid_x, blockspergrid_y)
-
-                        # self.compute_market_share[blockspergrid,threadsperblock,stream](
-                        #         start_idx_i,
-                        #         start_idx_j,
-                        #         end_idx_i,
-                        #         end_idx_j,
-                        #         self.m_edges,
-                        #         self.n_communities,
-                        #         communities_d,
-                        #         self._market_shares_sparse_nodes_d,
-                        #         self._market_shares_sparse_values_d,
-                        #         market_shares_communities_d,
-                        #         market_shares_values_d,
-                        #         membership_pairs_d
-                        #     )
-
-                        # stream.synchronize()
-                        # print('market share done')
-
-                        # Define the thread and block dimensions
-                        # threadsperblock = (TPB, TPB, TPB)
-                        # blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
-                        # blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
-                        # blockspergrid_z = math.ceil(self.n_communities / threadsperblock[2])
-                        # blockspergrid = (blockspergrid_x, blockspergrid_y, blockspergrid_z)
 
                         self.calc_hhi[blockspergrid,threadsperblock,stream](
                                 start_idx_i,
@@ -448,14 +435,15 @@ class AllianceBuilder():
                                 self._unique_edge_index_d,
                                 edge_HHI_d,
                                 membership_pairs_d,
-                                hhi_pairs_d
+                                hhi_pairs_d,
+                                local_array_d
                             )
 
-                        stream.synchronize()
-                        print('hhi done')
+                        # stream.synchronize()
+                        # print('hhi done')
 
                         # Define the thread and block dimensions
-                        threadsperblock = (TPB, TPB, TPB)
+                        threadsperblock = (TPB_i, TPB_j, TPB_k)
                         blockspergrid_x = math.ceil(batch_size_i / threadsperblock[0])
                         blockspergrid_y = math.ceil(batch_size_j / threadsperblock[1])
                         blockspergrid_z = math.ceil(self.n_nodes / threadsperblock[2])
@@ -483,31 +471,32 @@ class AllianceBuilder():
                         # Copy results from device to host for the current batch
                         hhi_pairs_h = hhi_pairs_d.copy_to_host(stream=stream)
                         weights_pairs_h = weights_pairs_d.copy_to_host(stream=stream)
-                        score_pairs_h = score_pairs_d.copy_to_host(stream=stream)
-                        score_pairs_h = np.where(score_pairs_h > 0, np.log(score_pairs_h), 0.0)
+                        score_pairs_h = score_pairs_d.copy_to_host(stream=stream)   
+                        score_pairs_h = np.where(score_pairs_h > 0.0, np.log(score_pairs_h), 0.0)
                         membership_pairs_h = membership_pairs_d.copy_to_host(stream=stream)
-
+                        
                         # free memory
                         membership_pairs_d = None
-                        market_shares_pairs_d = None
+                        local_array_d = None
                         hhi_pairs_d = None
                         weights_pairs_d = None
                         score_pairs_d = None
-
-                        stream.synchronize()
-                        print('copy to host done')
 
                         f1_pairs = -np.mean(hhi_pairs_h,axis=2) / 100
                         f2_pairs = np.mean(score_pairs_h,axis=2)
                         f_pairs = multiobjective(f1_pairs,f2_pairs,weights=weights)
 
-                        print('compute objective')
+                        # Create a mask where i + start_idx_i > j + start_idx_j
+                        mask = np.fromfunction(lambda i, j: i + start_idx_i < j + start_idx_j, (end_idx_i - start_idx_i, end_idx_j - start_idx_j))
+                        f_pairs = np.where(mask, f_pairs, -np.inf)
+                        hhi_pairs_h = np.where(mask[:,:,np.newaxis], hhi_pairs_h, np.sign(weights[0])*10000.0)
+                        weights_pairs_h = np.where(mask[:,:,np.newaxis], weights_pairs_h, 0.0)
+                        score_pairs_h = np.where(mask[:,:,np.newaxis], score_pairs_h, 0.0)
+                        membership_pairs_h = np.where(mask[:,:,np.newaxis], membership_pairs_h, 0)
 
                         max_index_flat = np.argmax(f_pairs)
                         best_pair = list(np.unravel_index(max_index_flat, f_pairs.shape))
                         best_pair_global = (best_pair[0] + start_idx_i, best_pair[1] + start_idx_j)
-
-                        print('find best pair objective')
 
                         # Copy results from device to host for the current batch
                         best_pairs[batch_i,batch_j] = np.array(best_pair_global,dtype=np.int32)
@@ -545,7 +534,6 @@ class AllianceBuilder():
                 node_weight_d = None
                 node_score_d = None
                 membership_pairs_d = None
-                market_shares_pairs_d = None
                 hhi_pairs_d = None
                 weights_pairs_d = None
                 score_pairs_d = None
@@ -742,11 +730,11 @@ class AllianceBuilder():
             edges = self.edges_by_type[node]
 
             # Get 'to' nodes
-            to_nodes = [v for _, v, _ in edges]
+            to_nodes = {v for _, v, _ in edges}
 
             # Calculate weights
             if len(to_nodes) > 0:
-                edges = sum((self.edges_by_source[node] for node in to_nodes), [])
+                edges = set(sum((self.edges_by_source[node] for node in to_nodes), []))
                 weights = [self.edges_by_keypair[(u,v,key)]['weight'] for u,v,key in edges if self._communities_dict[self.edges_by_keypair[(u,v,key)]['edge_type']] == target_community]
 
                 self._weights_dict[node] = sum(weights)
@@ -796,7 +784,6 @@ class AllianceBuilder():
         self._edge_nodes_d = None
         self._edge_weights_d = None
         self._node_weight_individual_d = None
-        self.cuda.close()
 
 if __name__ == "__main__":
     script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
