@@ -15,13 +15,13 @@ if __name__ == "__main__":
     MG.add_node('4', iatacode='EEE', longitude=30.508333333, latitude=50.355, subregion='West Asia', region='Asia Pacific')
 
     # Add edges to the graph
-    MG.add_edge('0', '1', edge_type='VT', from_='AAA', to='BBB', market_share_percent=60.0, weight=5000)
-    MG.add_edge('0', '1', edge_type='HT', from_='AAA', to='BBB', market_share_percent=40.0, weight=3000)
+    MG.add_edge('0', '1', edge_type='VT', from_='AAA', to='BBB', market_share_percent=60.0, weight=4800)
+    MG.add_edge('0', '1', edge_type='HT', from_='AAA', to='BBB', market_share_percent=40.0, weight=3200)
     MG.add_edge('0', '2', edge_type='AT', from_='AAA', to='CCC', market_share_percent=100.0, weight=8789)
     MG.add_edge('0', '4', edge_type='CT', from_='AAA', to='EEE', market_share_percent=100.0, weight=2000)
     MG.add_edge('1', '2', edge_type='BT', from_='BBB', to='CCC', market_share_percent=100.0, weight=6000)
-    MG.add_edge('3', '4', edge_type='CT', from_='DDD', to='EEE', market_share_percent=80.0, weight=4000)
-    MG.add_edge('3', '4', edge_type='HT', from_='DDD', to='EEE', market_share_percent=20.0, weight=2000)
+    MG.add_edge('3', '4', edge_type='CT', from_='DDD', to='EEE', market_share_percent=80.0, weight=4800)
+    MG.add_edge('3', '4', edge_type='HT', from_='DDD', to='EEE', market_share_percent=20.0, weight=1200)
     MG.add_edge('4', '0', edge_type='VT', from_='EEE', to='AAA', market_share_percent=100.0, weight=7000)
 
 

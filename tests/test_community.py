@@ -11,7 +11,7 @@ import os
 
 from typing import Tuple
 
-os.environ['NUMBA_ENABLE_CUDASIM'] = "0"
+os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
 
 seed = 1234
 
@@ -38,15 +38,15 @@ def example_case():
         'BT': 0,
         'CT': 0,
         'HT': 0,
-        'VT': 5000
+        'VT': 4800
     }
 
     test_weights_individual_dict = {
         'AT': 8789,
         'BT': 6000,
-        'CT': 6000,
-        'HT': 5000,
-        'VT': 12000
+        'CT': 6800,
+        'HT': 4400,
+        'VT': 11800
     }
 
     communities_test = {
@@ -87,7 +87,7 @@ def example_case():
                 'BT': 0,
                 'CT': 0,
                 'HT': 0,
-                'VT': 5000
+                'VT': 4800
             }
         },
         {
@@ -113,7 +113,7 @@ def example_case():
                 'BT': 0,
                 'CT': 7000,
                 'HT': 0,
-                'VT': 7000 # 5000 + 2000
+                'VT': 6800 # 4800 + 2000
             }
         },
         {
@@ -437,6 +437,13 @@ class TestAllianceBuilder:
         print(test_class.f_history)
         print(test_class.communities_history)
 
+    def test_randomwalker(self, init_class_gpu: AllianceBuilder):
+
+        test_class = init_class_gpu
+
+        test_class.greedy_optimize_stochastic()
+
+        return None
 
 if __name__ == "__main__":
     MG, nodes_airlines_dict, \

@@ -51,14 +51,14 @@
       <data key="d6">AAA</data>
       <data key="d7">BBB</data>
       <data key="d8">60.0</data>
-      <data key="d9">5000</data>
+      <data key="d9">4800</data>
     </edge>
     <edge source="0" target="1" id="1">
       <data key="d5">HT</data>
       <data key="d6">AAA</data>
       <data key="d7">BBB</data>
       <data key="d8">40.0</data>
-      <data key="d9">3000</data>
+      <data key="d9">3200</data>
     </edge>
     <edge source="0" target="2" id="0">
       <data key="d5">AT</data>
@@ -86,14 +86,14 @@
       <data key="d6">DDD</data>
       <data key="d7">EEE</data>
       <data key="d8">80.0</data>
-      <data key="d9">4000</data>
+      <data key="d9">4800</data>
     </edge>
     <edge source="3" target="4" id="1">
       <data key="d5">HT</data>
       <data key="d6">DDD</data>
       <data key="d7">EEE</data>
       <data key="d8">20.0</data>
-      <data key="d9">2000</data>
+      <data key="d9">1200</data>
     </edge>
     <edge source="4" target="0" id="0">
       <data key="d5">VT</data>

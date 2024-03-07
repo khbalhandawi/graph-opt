@@ -5,6 +5,8 @@
 
 import os
 from numba import cuda, errors, config, float64, float32
+from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32, xoroshiro128p_uniform_float64
+
 if os.environ.get('NUMBA_ENABLE_CUDASIM','0') == '1':
     from numba.cuda.simulator.cudadrv.devicearray import FakeCUDAArray as DeviceNDArray
 else:
@@ -41,3 +43,37 @@ def cumsum_d(arr, out):
     for j in range(arr.shape[0]):
         val += arr[j]
         out[j] = val
+
+@cuda.jit(device=True)
+def searchsorted_global_2d(a, v, idx, idy):
+    out = 0
+    total = a[idx,idy,-1]
+    for j in range(a.shape[-1]-1):
+        if a[idx,idy,j] <= v*total:
+            out = j+1
+
+    return out
+
+@cuda.jit(device=True)
+def cumsum_global_2d(arr, out, idx, idy):
+    val = 0
+    for j in range(arr.shape[-1]):
+        val += arr[idx,idy,j]
+        out[idx,idy,j] = val
+
+@cuda.jit(device=True)
+def searchsorted_global_3d(a, v, idx, idy, idz):
+    out = 0
+    total = a[idx,idy,idz,-1]
+    for j in range(a.shape[-1]-1):
+        if a[idx,idy,idz,j] <= v*total:
+            out = j+1
+
+    return out
+
+@cuda.jit(device=True)
+def cumsum_global_3d(arr, out, idx, idy, idz):
+    val = 0
+    for j in range(arr.shape[-1]):
+        val += arr[idx,idy,idz,j]
+        out[idx,idy,idz,j] = val
