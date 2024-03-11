@@ -241,6 +241,62 @@ def attr_sampler(
 def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Callable]:
 
     @cuda.jit
+    def weighted_spatial_random_walk(
+            n_samples_nodes,
+            n_samples,
+            walk_length,
+            weights_nodes:DeviceNDArray,
+            adj:DeviceNDArray,
+            adj_i:DeviceNDArray,
+            walks:DeviceNDArray,
+            walks_edges_d:DeviceNDArray,
+            rng_states:DeviceNDArray,
+            cumsum:DeviceNDArray,
+            weights:DeviceNDArray
+        ):
+        # Compute flattened index inside the array  
+        x, y = cuda.grid(2)  
+
+        # Compute the grid stride 
+        dx, dy = cuda.gridsize(2)  
+
+        cumsum_init = cuda.local.array((n_nodes,),dtype=float32)
+
+        for i in range(x, n_samples_nodes, dx):
+
+            # sample starting node
+            cumsum_d(weights_nodes,cumsum_init)
+            threshold = xoroshiro128p_uniform_float32(rng_states, i)
+            current_node = searchsorted_d(cumsum_init,threshold)
+
+            for j in range(y, n_samples, dy):
+
+                idx = i * dy + j
+
+                walks[i,j,0] = current_node
+
+                for k in range(walk_length - 1):
+
+                    # select spatial node
+                    for n in range(n_nodes):
+                        weights[i,j,n] = adj[current_node,n]
+
+                    cumsum_global_2d(weights,cumsum,i,j)
+                    threshold = xoroshiro128p_uniform_float32(rng_states, idx)
+                    if cumsum[i,j,0] == 0 and cumsum[i,j,-1] == 0:
+                        chosen = current_node
+                    else:
+                        chosen = searchsorted_global_2d(cumsum,threshold,i,j)
+
+                    walks[i,j,k+1] = chosen
+                    chosen_edge = adj_i[current_node,chosen]
+                    if math.isnan(chosen_edge):
+                        walks_edges_d[i,j,k] = -1e6
+                    else:
+                        walks_edges_d[i,j,k] = chosen_edge
+                    current_node = chosen
+
+    @cuda.jit
     def spatial_random_walk(
             n_samples,
             walk_length,
@@ -262,30 +318,30 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
         for i in range(x, n_nodes, dx):
             for j in range(y, n_samples, dy):
 
-                    idx = i * dy + j
-                    current_node = nodes[i]
-                    walks[i,j,0] = current_node
+                idx = i * dy + j
+                current_node = nodes[i]
+                walks[i,j,0] = current_node
 
-                    for k in range(walk_length - 1):
+                for k in range(walk_length - 1):
 
-                        # select spatial node
-                        for n in range(n_nodes):
-                            weights[i,j,n] = adj[current_node,n]
+                    # select spatial node
+                    for n in range(n_nodes):
+                        weights[i,j,n] = adj[current_node,n]
 
-                        cumsum_global_2d(weights,cumsum,i,j)
-                        threshold = xoroshiro128p_uniform_float32(rng_states, idx)
-                        if cumsum[i,j,0] == 0 and cumsum[i,j,-1] == 0:
-                            chosen = current_node
-                        else:
-                            chosen = searchsorted_global_2d(cumsum,threshold,i,j)
+                    cumsum_global_2d(weights,cumsum,i,j)
+                    threshold = xoroshiro128p_uniform_float32(rng_states, idx)
+                    if cumsum[i,j,0] == 0 and cumsum[i,j,-1] == 0:
+                        chosen = current_node
+                    else:
+                        chosen = searchsorted_global_2d(cumsum,threshold,i,j)
 
-                        walks[i,j,k+1] = chosen
-                        chosen_edge = adj_i[current_node,chosen]
-                        if math.isnan(chosen_edge):
-                            walks_edges_d[i,j,k] = -1e6
-                        else:
-                            walks_edges_d[i,j,k] = chosen_edge
-                        current_node = chosen
+                    walks[i,j,k+1] = chosen
+                    chosen_edge = adj_i[current_node,chosen]
+                    if math.isnan(chosen_edge):
+                        walks_edges_d[i,j,k] = -1e6
+                    else:
+                        walks_edges_d[i,j,k] = chosen_edge
+                    current_node = chosen
 
     @cuda.jit
     def attr_sampler(
@@ -329,4 +385,4 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
                         samples[i,j,k] = chosen
                         samples_weights[i,j,k] = adj[current_edge] * (weights[chosen]/100.0)
 
-    return spatial_random_walk, attr_sampler
+    return spatial_random_walk, weighted_spatial_random_walk, attr_sampler

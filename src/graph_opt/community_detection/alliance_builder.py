@@ -44,16 +44,25 @@ class AllianceBuilder():
         self._communities_dict = {}
         self.G: MultiDiGraph = deepcopy(MG)
         self.node_list = []
+        self.edge_list = []
+        self.edge_unique_list = []
         self.node_spatial_list = []
-        self.node_dict = {}
-        self.node_spatial_dict = {}
-        self.node_spatial_dict_inverse = {}
+        self.node_spatial_weights = []
+        self.node_key2i = {}
+        self.node_i2key = {}
+        self.node_key2w = defaultdict(float)
+        self.node_spatial_key2i = {}
+        self.node_spatial_key2w = {}
+        self.node_spatial_i2key = {}
+        self.edge_pairkey2ui = {}
+        self.edge_pair2w = defaultdict(float)
+        self.edge_pair2ui = {}
+        self.edge_ui2pair = {}
 
         self._HHI = defaultdict(float)
-        self._market_shares = defaultdict(lambda: defaultdict(float))
-        self._market_shares_community = defaultdict(lambda: defaultdict(float))
-        self.unique_edge_index = {}
-        self._market_shares_sparse_community = []
+        self._cond_probs_nodes = defaultdict(lambda: defaultdict(float))
+        self._cond_probs_community = defaultdict(lambda: defaultdict(float))
+        self._cond_probs_community_sparse = []
         self._adj3 = np.empty(0)
         self._adj_dense_index = np.empty(0)
         self._adj = np.empty(0)
@@ -62,11 +71,12 @@ class AllianceBuilder():
         self._weights_dict = defaultdict(list)
         self._weights_individual_dict = defaultdict(list)
 
-        self.edges_by_type = defaultdict(list)
-        self.edges_by_source = defaultdict(list)
-        self.edges_by_keypair = {}
-        self.edges_by_pair = defaultdict(list)
-        self.edge_index = {}
+        self.edge_node2keypair_list = defaultdict(list)
+        self.edge_u2pairkey_list = defaultdict(list)
+        self.edge_u2pair_list = defaultdict(list)
+        self.edge_pairkey2atrr = {}
+        self.edge_pair2pairkey_list = defaultdict(list)
+        self.edge_pairkey2i = {}
 
         self.communities_history = []
         self.f_history = []
@@ -88,31 +98,30 @@ class AllianceBuilder():
         edge_nodes = []
         edge_weights = []
         edges_neighbour = []
-        unique_edge_index = []
+        edge_unique_index = []
         processed_edges = set()
 
         adj = np.zeros((self.G.number_of_edges(), 2), dtype=np.int32)
         for i, (u, v, key, data) in enumerate(self.G.edges(data=True, keys=True)):
-            adj[i,:] = np.array([self.node_spatial_dict[u],self.node_spatial_dict[v]])
-            edge_nodes.append(self.node_dict[data["edge_type"]])
+            adj[i,:] = np.array([self.node_spatial_key2i[u],self.node_spatial_key2i[v]])
+            edge_nodes.append(self.node_key2i[data["edge_type"]])
             edge_weights.append(data["weight"])
-            unique_edge_index.append(self.unique_edge_index[(u, v, key)])
+            edge_unique_index.append(self.edge_pairkey2ui[(u, v, key)])
             if (v, key) not in processed_edges:
-                for u_link, v_link, key_link in self.edges_by_source[v]:
-                    edges_neighbour.append((self.edge_index[(u, v, key)], self.edge_index[(u_link, v_link, key_link)]))
+                for u_link, v_link, key_link in self.edge_u2pairkey_list[v]:
+                    edges_neighbour.append((self.edge_pairkey2i[(u, v, key)], self.edge_pairkey2i[(u_link, v_link, key_link)]))
                 processed_edges.add((v, key))
 
         # dense adjacency        
-        self._adj_sparse = np.array(self.unique_edges)
         self._edge_nodes = np.array(edge_nodes,dtype=np.int32)
         self._edge_weights = np.array(edge_weights,dtype=np.float32)
         self._edges_neighbour = np.array(edges_neighbour,dtype=np.int32)
-        self._unique_edge_index = np.array(unique_edge_index,dtype=np.int32)
+        self._edge_unique_index = np.array(edge_unique_index,dtype=np.int32)
         self.m_edge_pairs = self._edges_neighbour.shape[0]
 
         self._market_shares_sparse_values = []
         self._market_shares_sparse_nodes = []
-        for n,v in self._market_shares_sparse_community:
+        for n,v in self._cond_probs_community_sparse:
             self._market_shares_sparse_values.append(v)
             self._market_shares_sparse_nodes.append(n)
 
@@ -137,15 +146,18 @@ class AllianceBuilder():
             self._edge_nodes_d = self.cuda.to_device(self._edge_nodes)
             self._edge_weights_d = self.cuda.to_device(self._edge_weights)
             self._edges_neighbour_d = self.cuda.to_device(self._edges_neighbour)
-            self._unique_edge_index_d = self.cuda.to_device(self._unique_edge_index)
+            self._edge_unique_index_d = self.cuda.to_device(self._edge_unique_index)
             self._node_weight_individual = np.array(list(self._weights_individual_dict.values()),dtype=np.float32)
             self._market_shares_sparse_values_d = self.cuda.to_device(self._market_shares_sparse_values)
             self._market_shares_sparse_nodes_d = self.cuda.to_device(self._market_shares_sparse_nodes)
             
-            _node_spatial_list_d = np.array(list(self.node_spatial_list),np.int32)
-            self._node_spatial_list_d = self.cuda.to_device(_node_spatial_list_d)
+            node_spatial_list = np.array(list(self.node_spatial_list),np.int32)
+            node_spatial_weights = np.array(list(self.node_spatial_weights),np.float32)
 
-            self.spatial_random_walk, self.attr_sampler = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial)
+            self._node_spatial_list_d = self.cuda.to_device(node_spatial_list)
+            self._node_spatial_weights_d = self.cuda.to_device(node_spatial_weights)
+
+            self.spatial_random_walk, self.weighted_spatial_random_walk, self.attr_sampler = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial)
 
         else:
             self.cuda = None
@@ -165,7 +177,7 @@ class AllianceBuilder():
 
     @property
     def market_shares_community(self):
-        return {edge: self._market_shares_community[edge].copy() for edge in self._market_shares_community.keys()}
+        return {edge: self._cond_probs_community[edge].copy() for edge in self._cond_probs_community.keys()}
 
     @property
     def HHI(self):
@@ -197,17 +209,21 @@ class AllianceBuilder():
         self.m_edges = self.G.number_of_edges()
 
         for i, (u, v, key, attr) in enumerate(self.G.edges(keys=True, data=True)):
-            self.edges_by_type[attr['edge_type']].append((u, v, key))
-            self.edges_by_source[u].append((u, v, key))
-            self.edges_by_keypair[(u, v, key)] = attr
-            self.edge_index[(u, v, key)] = i
-            self.edges_by_pair[(u, v)].append((u, v, key))
+            self.edge_node2keypair_list[attr['edge_type']].append((u, v, key))
+            self.edge_u2pairkey_list[u].append((u, v, key))
+            self.edge_pairkey2atrr[(u, v, key)] = attr
+            self.edge_pairkey2i[(u, v, key)] = i
+            self.edge_pair2pairkey_list[(u, v)].append((u, v, key))
 
 
         for i, u in enumerate(self.G.nodes()):
-            self.node_spatial_dict[u] = i
-            self.node_spatial_dict_inverse[i] = u
+            node_weight = self.G.out_degree(nbunch=u,weight="weight")
+            self.node_spatial_key2w[u] = node_weight
+            self.node_spatial_key2i[u] = i
+            self.node_spatial_key2i[u] = i
+            self.node_spatial_i2key[i] = u
             self.node_spatial_list.append(u)
+            self.node_spatial_weights.append(node_weight)
 
         self.n_nodes_spatial = len(self.node_spatial_list)
 
@@ -237,7 +253,8 @@ class AllianceBuilder():
             for i,node in enumerate(node_list):
                 communities_dict[node] = i
                 self.node_list.append(node)
-                self.node_dict[node] = i
+                self.node_key2i[node] = i
+                self.node_i2key[i] = node
 
             self.communities_dict = communities_dict
         else:
@@ -245,7 +262,7 @@ class AllianceBuilder():
             node_list = sorted(list(self._communities_dict.keys()))
             for i,node in enumerate(node_list):
                 self.node_list.append(node)
-                self.node_dict[node] = i
+                self.node_key2i[node] = i
 
         self.n_nodes = len(self.node_list)
 
@@ -255,26 +272,31 @@ class AllianceBuilder():
         """
         for u, v, data in self.G.edges(data=True):
             # Accumulate the squares for each route
-            self._market_shares[(u, v)][data['edge_type']] += data['market_share_percent']
-            self._market_shares_community[(u, v)][self._communities_dict[data['edge_type']]] += data['market_share_percent']
-            self._market_shares_sparse_community.append([self._communities_dict[data['edge_type']],data['market_share_percent']])
+            self.edge_pair2w[(u, v)] += data['weight']
+            self._cond_probs_nodes[(u, v)][data['edge_type']] += data['market_share_percent']
+            self.node_key2w[data['edge_type']] += data['weight']
+            self._cond_probs_community[(u, v)][self._communities_dict[data['edge_type']]] += data['market_share_percent']
+            self._cond_probs_community_sparse.append([self._communities_dict[data['edge_type']],data['market_share_percent']])
 
         # Calculate the HHI for each edge
-        for i, (edge, communities) in enumerate(self._market_shares_community.items()):
+        for i, (edge, communities) in enumerate(self._cond_probs_community.items()):
             self._HHI[edge] = sum(market_share ** 2 for market_share in communities.values())
-            for u,v,key in self.edges_by_pair[edge]:
-                self.unique_edge_index[(u,v,key)] = i
-        
-        self.unique_edges = list(self._market_shares_community.keys())
-        self.n_edges = len(self.unique_edges)
-        adj3 = np.zeros((self.n_edges,self.n_nodes))
-        adj = np.zeros((self.n_edges))
+
+        self.edge_unique_list = list(self._cond_probs_nodes.keys())
+        self.n_unique_edges = len(self.edge_unique_list)
+        adj3 = np.zeros((self.n_unique_edges,self.n_nodes))
+        adj = np.zeros((self.n_unique_edges))
         adj_dense_index = np.full((self.n_nodes_spatial, self.n_nodes_spatial), np.nan)
-        for i, (edge, nodes) in enumerate(self._market_shares.items()):
-            adj_dense_index[self.node_spatial_dict[edge[0]],self.node_spatial_dict[edge[1]]] = i
-            adj[i] = self._adj_dense[self.node_spatial_dict[edge[0]],self.node_spatial_dict[edge[1]]]
+        for i, (edge, nodes) in enumerate(self._cond_probs_nodes.items()):
+            self.edge_u2pair_list[edge[0]].append(edge)
+            self.edge_pair2ui[edge] = i
+            self.edge_ui2pair[i] = edge
+            adj_dense_index[self.node_spatial_key2i[edge[0]],self.node_spatial_key2i[edge[1]]] = i
+            adj[i] = self._adj_dense[self.node_spatial_key2i[edge[0]],self.node_spatial_key2i[edge[1]]]
             for node, value in nodes.items():
-                adj3[i,self.node_dict[node]] = value
+                adj3[i,self.node_key2i[node]] = value
+            for u,v,key in self.edge_pair2pairkey_list[edge]:
+                self.edge_pairkey2ui[(u,v,key)] = i
 
         self._adj3 = adj3
         self._adj = adj
@@ -288,7 +310,7 @@ class AllianceBuilder():
             target_community = self._communities_dict[node]
 
             # Get edges by 'edge_type' from the pre-grouped dictionary
-            edges_node = self.edges_by_type[node]
+            edges_node = self.edge_node2keypair_list[node]
             G_sub = self.G.edge_subgraph(edges_node)
 
             # Get 'to' nodes
@@ -296,8 +318,8 @@ class AllianceBuilder():
 
             # Calculate weights
             if len(to_nodes) > 0:
-                edges_neighbors = set(sum((self.edges_by_source[node] for node in to_nodes), []))
-                weights = [self.edges_by_keypair[(u,v,key)]['weight'] for u,v,key in edges_neighbors if self._communities_dict[self.edges_by_keypair[(u,v,key)]['edge_type']] == target_community]
+                edges_neighbors = set(sum((self.edge_u2pairkey_list[node] for node in to_nodes), []))
+                weights = [self.edge_pairkey2atrr[(u,v,key)]['weight'] for u,v,key in edges_neighbors if self._communities_dict[self.edge_pairkey2atrr[(u,v,key)]['edge_type']] == target_community]
                 weights_individual = [attr['weight'] for _, _, attr in G_sub.edges(data=True)]
 
                 self._weights_dict[node] = sum(weights)
@@ -382,7 +404,7 @@ class AllianceBuilder():
 
                 # Initialize host arrays to store results (adjust the size based on the actual number of batches)
                 best_pairs = np.zeros((num_batches_i, num_batches_j, 2), dtype=np.int32)
-                hhi_pairs = np.zeros((num_batches_i, num_batches_j, self.n_edges), dtype=np.float32)
+                hhi_pairs = np.zeros((num_batches_i, num_batches_j, self.n_unique_edges), dtype=np.float32)
                 weights_pairs = np.zeros((num_batches_i, num_batches_j, self.n_nodes), dtype=np.float32)
                 score_pairs = np.zeros((num_batches_i, num_batches_j, self.n_nodes), dtype=np.float32)
                 membership_pairs = np.zeros((num_batches_i, num_batches_j, self.n_nodes), dtype=np.int32)
@@ -405,8 +427,8 @@ class AllianceBuilder():
 
                         # Initialize device arrays for the batch
                         membership_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.int8)
-                        local_array_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges), dtype=np.float32)
-                        hhi_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_edges), dtype=np.float32)
+                        local_array_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_unique_edges), dtype=np.float32)
+                        hhi_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_unique_edges), dtype=np.float32)
                         weights_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
                         score_pairs_h = np.zeros((end_idx_i - start_idx_i, end_idx_j - start_idx_j, self.n_nodes), dtype=np.float32)
 
@@ -458,13 +480,13 @@ class AllianceBuilder():
                                 start_idx_j,
                                 end_idx_i,
                                 end_idx_j,
-                                self.n_edges,
+                                self.n_unique_edges,
                                 self.m_edges,
                                 self.n_communities,
                                 communities_d,
                                 self._market_shares_sparse_nodes_d,
                                 self._market_shares_sparse_values_d,
-                                self._unique_edge_index_d,
+                                self._edge_unique_index_d,
                                 edge_HHI_d,
                                 membership_pairs_d,
                                 hhi_pairs_d,
@@ -720,14 +742,62 @@ class AllianceBuilder():
             and the objective function value
         """
         pass
+    
+    def weighted_sampling(
+            self,
+            n_samples_source_node: Optional[int] = 20,
+            n_samples_edge: Optional[int] = 5,
+            walk_length: Optional[int] = 10,
+            threads_per_block: Optional[Union[int,Tuple[int,int,int]]] = 2,
+            testing: Optional[bool] = False
+        ):
+
+        threadsperblock = (threads_per_block,) * 2 if isinstance(threads_per_block,int) else threads_per_block
+
+        walks_weighted_d = self.cuda.device_array((n_samples_source_node,n_samples_edge,walk_length), dtype=np.int32)
+        walks_weighted_edges_d = self.cuda.device_array((n_samples_source_node,n_samples_edge,walk_length-1), dtype=np.int32)
+
+        cumsum_weighted_d = self.cuda.device_array((n_samples_source_node,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
+        weights_weighted_d = self.cuda.device_array((n_samples_source_node,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
+
+        # Define the thread and block dimensions
+        blockspergrid_x = math.ceil(n_samples_source_node / threadsperblock[0])
+        blockspergrid_y = math.ceil(n_samples_edge / threadsperblock[1])
+        blockspergrid = (blockspergrid_x, blockspergrid_y)
+
+        total_threads = np.prod(threadsperblock)
+        total_blocks = np.prod(blockspergrid)
+        nstates = int(total_threads * total_blocks)
+
+        cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
+        self.weighted_spatial_random_walk[blockspergrid,threadsperblock](
+            n_samples_source_node,
+            n_samples_edge,
+            walk_length,
+            self._node_spatial_weights_d,
+            self._adj_dense_d,
+            self._adj_dense_index_d,
+            walks_weighted_d,
+            walks_weighted_edges_d,
+            cuda_random_state,
+            cumsum_weighted_d,
+            weights_weighted_d
+        )
+
+        walks_weighted_h = walks_weighted_d.copy_to_host()
+        walks_weighted_edges_h = walks_weighted_edges_d.copy_to_host()
+
+        if testing:
+            return walks_weighted_h, walks_weighted_edges_h
 
     def greedy_optimize_stochastic(
             self,
             weights: Optional[Tuple[float,float]]=(0.5,0.5),
             max_iterations: Optional[int]=1000,
-            n_samples: Optional[Union[int,Tuple[int,int]]] = 20,
+            n_samples_edge: Optional[int] = 5,
             walk_length: Optional[int] = 10,
             threads_per_block: Optional[Union[int,Tuple[int,int,int]]] = 2,
+            testing: Optional[bool] = False
         ) -> Tuple[Dict[int,int], float]:
 
         def multiobjective(f1: Union[float,np.ndarray], f2: Union[float,np.ndarray], weights: Optional[Tuple[float,float]]=(0.5,0.5)):
@@ -735,20 +805,19 @@ class AllianceBuilder():
 
         TPB = threads_per_block
 
-        walks_d = self.cuda.device_array((self.n_nodes_spatial,n_samples,walk_length), dtype=np.int32)
-        walks_edges_d = self.cuda.device_array((self.n_nodes_spatial,n_samples,walk_length-1), dtype=np.int32)
-        walks_nodes_d = self.cuda.device_array((self.n_nodes_spatial,n_samples,walk_length-1), dtype=np.int32)
-        walks_nodes_weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples,walk_length-1), dtype=np.float32)
+        walks_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length), dtype=np.int32)
+        walks_edges_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.int32)
 
-        cumsum_d = self.cuda.device_array((self.n_nodes_spatial,n_samples,self.n_nodes_spatial,),dtype=np.float32)
-        weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples,self.n_nodes_spatial,),dtype=np.float32)
-        cumsum_3d = self.cuda.device_array((self.n_nodes_spatial,n_samples,walk_length-1,self.n_nodes_spatial,),dtype=np.float32)
-        weights_3d = self.cuda.device_array((self.n_nodes_spatial,n_samples,walk_length-1,self.n_nodes_spatial,),dtype=np.float32)
+        walks_nodes_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.int32)
+        walks_nodes_weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.float32)
+
+        cumsum_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
+        weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
 
         # Define the thread and block dimensions
         threadsperblock = (TPB, TPB)
         blockspergrid_x = math.ceil(self.n_nodes_spatial / threadsperblock[0])
-        blockspergrid_y = math.ceil(n_samples / threadsperblock[1])
+        blockspergrid_y = math.ceil(n_samples_edge / threadsperblock[1])
         blockspergrid = (blockspergrid_x, blockspergrid_y)
 
         total_threads = np.prod(threadsperblock)
@@ -756,7 +825,7 @@ class AllianceBuilder():
         nstates = int(total_threads * total_blocks)
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
         self.spatial_random_walk[blockspergrid,threadsperblock](
-            n_samples,
+            n_samples_edge,
             walk_length,
             self._node_spatial_list_d,
             self._adj_dense_d,
@@ -772,7 +841,7 @@ class AllianceBuilder():
 
         threadsperblock = (TPB, TPB, TPB)
         blockspergrid_x = math.ceil(self.n_nodes_spatial / threadsperblock[0])
-        blockspergrid_y = math.ceil(n_samples / threadsperblock[1])
+        blockspergrid_y = math.ceil(n_samples_edge / threadsperblock[1])
         blockspergrid_z = math.ceil((walk_length - 1) / threadsperblock[2])
         blockspergrid = (blockspergrid_x, blockspergrid_y, blockspergrid_z)
 
@@ -782,7 +851,7 @@ class AllianceBuilder():
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
 
         self.attr_sampler[blockspergrid,threadsperblock](
-            n_samples,
+            n_samples_edge,
             walk_length,
             walks_edges_d,
             self._adj_d,
@@ -794,10 +863,12 @@ class AllianceBuilder():
 
         walks_h = walks_d.copy_to_host()
         walks_edges_h = walks_edges_d.copy_to_host()
-        walks_nodes_weights_h = walks_nodes_weights_d.copy_to_host()
-        walks_nodes_weights_h = walks_nodes_d.copy_to_host()
 
-        return walks_h, walks_edges_h, walks_nodes_weights_h, walks_nodes_weights_h
+        walks_nodes_h = walks_nodes_d.copy_to_host()
+        walks_nodes_weights_h = walks_nodes_weights_d.copy_to_host()
+
+        if testing:
+            return walks_h, walks_edges_h, walks_nodes_h, walks_nodes_weights_h
 
     def _update_communities(self, community_to_merge, new_community, update_communities=True):
         # Find the nodes in the community to merge
@@ -810,24 +881,24 @@ class AllianceBuilder():
             if update_communities:
                 self._communities_dict[node] = new_community
 
-            edges_to_update.update(set(((u,v) for u,v,key in self.edges_by_type[node])))
+            edges_to_update.update(set(((u,v) for u,v,key in self.edge_node2keypair_list[node])))
 
         return edges_to_update, nodes_to_update_MAI
 
     def _update_HHI_scores(self, edges_to_update):
 
-        self._market_shares_sparse_community = []
+        self._cond_probs_community_sparse = []
         for u, v in edges_to_update:
-            self._market_shares_community[(u, v)] = defaultdict(float)
+            self._cond_probs_community[(u, v)] = defaultdict(float)
 
         for u, v in edges_to_update:
             data = self.G.get_edge_data(u,v)
             for key,data_node in data.items():
                 # Recalculate the market shares and HHI score for this route
-                self._market_shares_community[(u, v)][self._communities_dict[data_node['edge_type']]] += data_node['market_share_percent']
+                self._cond_probs_community[(u, v)][self._communities_dict[data_node['edge_type']]] += data_node['market_share_percent']
 
         # Recalculate the community HHI for each affected route
-        for edge, communities in self._market_shares_community.items():
+        for edge, communities in self._cond_probs_community.items():
             self._HHI[edge] = sum(market_share ** 2 for market_share in communities.values())
 
     def _update_scores(self, nodes_to_update):
@@ -837,15 +908,15 @@ class AllianceBuilder():
             target_community = self._communities_dict[node]
 
             # Get edges by 'edge_type' from the pre-grouped dictionary
-            edges = self.edges_by_type[node]
+            edges = self.edge_node2keypair_list[node]
 
             # Get 'to' nodes
             to_nodes = {v for _, v, _ in edges}
 
             # Calculate weights
             if len(to_nodes) > 0:
-                edges = set(sum((self.edges_by_source[node] for node in to_nodes), []))
-                weights = [self.edges_by_keypair[(u,v,key)]['weight'] for u,v,key in edges if self._communities_dict[self.edges_by_keypair[(u,v,key)]['edge_type']] == target_community]
+                edges = set(sum((self.edge_u2pairkey_list[node] for node in to_nodes), []))
+                weights = [self.edge_pairkey2atrr[(u,v,key)]['weight'] for u,v,key in edges if self._communities_dict[self.edge_pairkey2atrr[(u,v,key)]['edge_type']] == target_community]
 
                 self._weights_dict[node] = sum(weights)
 
@@ -855,12 +926,12 @@ class AllianceBuilder():
     def _get_cache_HHI(self, edges:Optional[List[Tuple[int,int]]]=None) -> Tuple[type_shares, type_scores]:
 
         if edges is None:
-            edges = self._market_shares_community.keys()
+            edges = self._cond_probs_community.keys()
 
         market_shares_community = {}
         HHI = {}
         for edge in edges:
-            market_shares_community[edge] = self._market_shares_community[edge].copy()
+            market_shares_community[edge] = self._cond_probs_community[edge].copy()
             HHI[edge] = self._HHI[edge]
 
         return market_shares_community, HHI
@@ -880,7 +951,7 @@ class AllianceBuilder():
 
     def _set_cache_HHI(self, market_shares_community: type_shares, HHI: type_scores):
         for edge in market_shares_community.keys():
-            self._market_shares_community[edge] = market_shares_community[edge].copy()
+            self._cond_probs_community[edge] = market_shares_community[edge].copy()
             self._HHI[edge] = HHI[edge]
 
     def _set_cache_MAI(self, weights_dict: type_scores, airline_score: type_scores):
