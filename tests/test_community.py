@@ -883,11 +883,13 @@ class TestAllianceBuilder:
         n_samples_edge = 5000
         n_samples_source_node = 50
         walk_length = 10
+        TPB = (8,8,8)
 
         walks_spatial_weighted_h, walks_edges_spatial_weighted_h = test_class.weighted_sampling(
                 n_samples_edge=n_samples_edge,
                 n_samples_source_node=n_samples_source_node,
                 walk_length=walk_length,
+                TPB = (8,8),
                 testing=True
             )
 
@@ -900,13 +902,12 @@ class TestAllianceBuilder:
             walks_edges_spatial=walks_edges_spatial_weighted_h
         )
 
-        assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
-        assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
-
-        walks_spatial_h, walks_edges_spatial_h, \
-            walks_nodes_h, walks_nodes_weights_h = test_class.greedy_optimize_stochastic(
+        edge_samples_h, walks_spatial_h, walks_edges_spatial_h, \
+            walks_nodes_h, walks_nodes_weights_h, \
+            edge_counts_h, cum_weight_h, source_counts_h = test_class.greedy_optimize_stochastic(
                 n_samples_edge=n_samples_edge,
                 walk_length=walk_length,
+                threads_per_block = 8,
                 testing=True
             )
 
@@ -918,7 +919,10 @@ class TestAllianceBuilder:
             walks_nodes=walks_nodes_h,
             walks_nodes_spatial=walks_spatial_h
         )
-
+        
+        assert np.allclose(test_class._adj3/100,edge_counts_h,rtol=1e-1)
+        assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
+        assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
         assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
 
 if __name__ == "__main__":

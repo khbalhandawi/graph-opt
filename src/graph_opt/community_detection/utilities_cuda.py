@@ -238,7 +238,34 @@ def attr_sampler(
 
                     samples[i,j,k] = chosen
 
-def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Callable]:
+def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Callable, Callable, Callable]:
+
+    @cuda.jit
+    def set_membership(
+            communities:DeviceNDArray,
+            membership:DeviceNDArray,
+            membership_pairs:DeviceNDArray,
+        ):
+
+        # Compute flattened index inside the array  
+        x, y, z = cuda.grid(3)  
+
+        # Compute the grid stride  
+        dx, dy, dz = cuda.gridsize(3)  
+
+        # Grid stride loop  
+        for i in range(x, communities.shape[0], dx):
+            for j in range(y, communities.shape[0], dy):
+                for k in range(z, n_nodes, dz):
+                    # Adjust indices for the current batch
+
+                    community1 = communities[i]
+                    community2 = communities[j]
+                    if community1 == community2:
+                        membership_pairs[i,j,k] = membership[k]
+                    elif community1 < community2:
+                        cur_member = membership[k] if membership[k] != community1 else community2
+                        membership_pairs[i,j,k] = cur_member
 
     @cuda.jit
     def weighted_spatial_random_walk(
@@ -385,4 +412,151 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
                         samples[i,j,k] = chosen
                         samples_weights[i,j,k] = adj[current_edge] * (weights[chosen]/100.0)
 
-    return spatial_random_walk, weighted_spatial_random_walk, attr_sampler
+    @cuda.jit
+    def edge_sampler(
+            n_samples,
+            n_unique_edges,
+            adj3:DeviceNDArray,
+            samples:DeviceNDArray,
+            rng_states:DeviceNDArray,
+        ):
+        
+        # Compute flattened index inside the array  
+        x, y = cuda.grid(2)  
+
+        # Compute the grid stride 
+        dx, dy = cuda.gridsize(2)  
+
+        cumsum = cuda.local.array((n_nodes,),dtype=float32)
+        weights = cuda.local.array((n_nodes,),dtype=float32)
+
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_samples, dy):
+
+                    idx = i * dy + j
+
+                    # select a node
+                    for n in range(n_nodes):
+                        weights[n] = adj3[i, n]
+
+                    cumsum_d(weights,cumsum)
+                    threshold = xoroshiro128p_uniform_float32(rng_states, idx)
+                    chosen = searchsorted_d(cumsum,threshold)
+
+                    samples[i,j] = chosen
+
+    @cuda.jit
+    def edge_postprocess(
+            ci,
+            cj,
+            n_samples,
+            n_unique_edges,
+            samples:DeviceNDArray,
+            counts:DeviceNDArray,
+            membership:DeviceNDArray,
+        ):
+        
+        # Compute flattened index inside the array  
+        x, y = cuda.grid(2)  
+
+        # Compute the grid stride 
+        dx, dy = cuda.gridsize(2)  
+
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_samples, dy):
+
+                item = membership[ci,cj,samples[i, j]]
+                cuda.atomic.add(counts[i], item, 1)  # Pass the array and index separately
+
+    @cuda.jit
+    def attr_postprocess(
+            ci,
+            cj,
+            n_samples,
+            walk_length,
+            samples_weights:DeviceNDArray,
+            samples:DeviceNDArray,
+            source_counts:DeviceNDArray,
+            cum_weight:DeviceNDArray,
+            membership:DeviceNDArray,
+        ):
+        # Compute flattened index inside the array  
+        x, y = cuda.grid(2)  
+
+        # Compute the grid stride 
+        dx, dy = cuda.gridsize(2)  
+
+        for i in range(x, n_nodes_spatial, dx):
+            for j in range(y, n_samples, dy):
+                
+                source_node = samples[i,j,0]
+                if not math.isnan(source_node) and source_node >= 0:
+                    source_c = membership[ci,cj,source_node]
+                    cuda.atomic.add(source_counts[i], source_node, 1)
+
+                    for k in range(walk_length-1):
+
+                        curr_node = samples[i,j,k]
+                        if math.isnan(curr_node) or curr_node < 0:
+                            break
+                        else:
+                            curr_c = membership[ci,cj,curr_node]
+
+                        curr_weight = samples_weights[i,j,k]
+
+                        if curr_c == source_c:
+                            cuda.atomic.add(cum_weight[i], source_node, curr_weight)
+                        else:
+                            break
+
+    @cuda.jit
+    def attr_sampler_aggregate(
+            ci,
+            cj,
+            n_samples,
+            walk_length,
+            walks_edges:DeviceNDArray,
+            adj:DeviceNDArray,
+            adj3:DeviceNDArray,
+            samples_weights:DeviceNDArray,
+            samples:DeviceNDArray,
+            membership:DeviceNDArray,
+            rng_states:DeviceNDArray,
+        ):
+        # Compute flattened index inside the array  
+        x, y = cuda.grid(2)  
+
+        # Compute the grid stride 
+        dx, dy = cuda.gridsize(2)  
+
+        cumsum = cuda.local.array((n_nodes,),dtype=float32)
+        weights = cuda.local.array((n_nodes,),dtype=float32)
+
+        for i in range(x, n_nodes_spatial, dx):
+            for j in range(y, n_samples, dy):
+                for k in range(walk_length):
+
+                    idx = i * dy + j
+
+                    current_edge = walks_edges[i,j,k]
+                    if math.isnan(current_edge) or current_edge < 0:
+                        samples[i,j,k] = -1e6
+                        samples_weights[i,j,k] = 0.0
+                    else:
+                        # select a node
+                        for n in range(n_nodes):
+                            weights[n] = adj3[current_edge, n]
+
+                        cumsum_d(weights,cumsum)
+                        threshold = xoroshiro128p_uniform_float32(rng_states, idx)
+                        chosen = searchsorted_d(cumsum,threshold)
+                        chosen_c = membership[ci,cj,chosen]
+
+                        if k == 0:
+                            source_c = chosen_c
+
+                        samples[i,j,k] = chosen
+                        if chosen_c == source_c:
+                            samples_weights[i,j,k] = adj[current_edge] * (weights[chosen]/100.0)
+
+    return set_membership, spatial_random_walk, weighted_spatial_random_walk, attr_sampler, edge_sampler, edge_postprocess, attr_postprocess

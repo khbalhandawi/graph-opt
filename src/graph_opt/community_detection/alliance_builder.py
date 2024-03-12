@@ -21,7 +21,7 @@ else:
     from tqdm import tqdm
 
 from .utilities import resort_communities
-from ..utilities import _default_if_none, dict2array, cpu_gpu_dispatcher
+from ..utilities import _default_if_none, dict2array, cpu_gpu_dispatcher, cuda_blocks
 
 from typing import Dict, List, Union, Tuple, Optional, NewType
 from ..random_settings import random_state
@@ -133,7 +133,7 @@ class AllianceBuilder():
                 create_xoroshiro128p_states, define_cuda_kernels
             self.cuda = cuda
             # self.DeviceNDArray = DeviceNDArray
-            self.set_membership: Callable = set_membership
+            self.set_batch_membership: Callable = set_membership
             self.calc_ami: Callable = calc_ami
             self.calc_hhi: Callable = calc_hhi
             self.create_xoroshiro128p_states: Callable = create_xoroshiro128p_states
@@ -157,7 +157,8 @@ class AllianceBuilder():
             self._node_spatial_list_d = self.cuda.to_device(node_spatial_list)
             self._node_spatial_weights_d = self.cuda.to_device(node_spatial_weights)
 
-            self.spatial_random_walk, self.weighted_spatial_random_walk, self.attr_sampler = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial)
+            self.set_membership, self.spatial_random_walk, self.weighted_spatial_random_walk, \
+                self.attr_sampler, self.edge_sampler, self.edge_postprocess, self.attr_postprocess = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial)
 
         else:
             self.cuda = None
@@ -451,7 +452,7 @@ class AllianceBuilder():
                         blockspergrid_z = math.ceil(self.n_nodes / threadsperblock[2])
                         blockspergrid = (blockspergrid_x, blockspergrid_y, blockspergrid_z)
 
-                        self.set_membership[blockspergrid,threadsperblock,stream](
+                        self.set_batch_membership[blockspergrid,threadsperblock,stream](
                                 start_idx_i,
                                 start_idx_j,
                                 end_idx_i,
@@ -748,11 +749,9 @@ class AllianceBuilder():
             n_samples_source_node: Optional[int] = 20,
             n_samples_edge: Optional[int] = 5,
             walk_length: Optional[int] = 10,
-            threads_per_block: Optional[Union[int,Tuple[int,int,int]]] = 2,
+            TPB: Optional[Union[int,Tuple[int,int,int]]] = 2,
             testing: Optional[bool] = False
         ):
-
-        threadsperblock = (threads_per_block,) * 2 if isinstance(threads_per_block,int) else threads_per_block
 
         walks_weighted_d = self.cuda.device_array((n_samples_source_node,n_samples_edge,walk_length), dtype=np.int32)
         walks_weighted_edges_d = self.cuda.device_array((n_samples_source_node,n_samples_edge,walk_length-1), dtype=np.int32)
@@ -761,14 +760,7 @@ class AllianceBuilder():
         weights_weighted_d = self.cuda.device_array((n_samples_source_node,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
 
         # Define the thread and block dimensions
-        blockspergrid_x = math.ceil(n_samples_source_node / threadsperblock[0])
-        blockspergrid_y = math.ceil(n_samples_edge / threadsperblock[1])
-        blockspergrid = (blockspergrid_x, blockspergrid_y)
-
-        total_threads = np.prod(threadsperblock)
-        total_blocks = np.prod(blockspergrid)
-        nstates = int(total_threads * total_blocks)
-
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(n_samples_source_node, n_samples_edge),TPB = TPB)
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
         self.weighted_spatial_random_walk[blockspergrid,threadsperblock](
             n_samples_source_node,
@@ -805,6 +797,27 @@ class AllianceBuilder():
 
         TPB = threads_per_block
 
+        # iteration constants
+        communities_d = self.cuda.to_device(self._distinct_communities)
+        membership_d = self.cuda.to_device(list((self._communities_dict.values())))
+
+        # iteration values
+        membership_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.int8)
+        membership_pairs_d = self.cuda.to_device(membership_pairs_h)
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge, walk_length-1),TPB = (TPB, TPB, TPB))
+        self.set_membership[blockspergrid,threadsperblock](
+            communities_d,
+            membership_d,
+            membership_pairs_d,
+        )
+
+        self.cuda.synchronize()
+
+        #################################
+        # perform random walks
+        edge_samples_d = self.cuda.device_array((self.n_unique_edges,n_samples_edge), dtype=np.int32)
+
         walks_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length), dtype=np.int32)
         walks_edges_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.int32)
 
@@ -813,17 +826,23 @@ class AllianceBuilder():
 
         cumsum_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
         weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
+        
+        # Define the thread and block dimensions
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+        cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
+
+        self.edge_sampler[blockspergrid,threadsperblock](
+            n_samples_edge,
+            self.n_unique_edges,
+            self._adj3_d,
+            edge_samples_d,
+            cuda_random_state,
+        )
 
         # Define the thread and block dimensions
-        threadsperblock = (TPB, TPB)
-        blockspergrid_x = math.ceil(self.n_nodes_spatial / threadsperblock[0])
-        blockspergrid_y = math.ceil(n_samples_edge / threadsperblock[1])
-        blockspergrid = (blockspergrid_x, blockspergrid_y)
-
-        total_threads = np.prod(threadsperblock)
-        total_blocks = np.prod(blockspergrid)
-        nstates = int(total_threads * total_blocks)
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge),TPB = (TPB, TPB))
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
+
         self.spatial_random_walk[blockspergrid,threadsperblock](
             n_samples_edge,
             walk_length,
@@ -839,15 +858,7 @@ class AllianceBuilder():
 
         self.cuda.synchronize()
 
-        threadsperblock = (TPB, TPB, TPB)
-        blockspergrid_x = math.ceil(self.n_nodes_spatial / threadsperblock[0])
-        blockspergrid_y = math.ceil(n_samples_edge / threadsperblock[1])
-        blockspergrid_z = math.ceil((walk_length - 1) / threadsperblock[2])
-        blockspergrid = (blockspergrid_x, blockspergrid_y, blockspergrid_z)
-
-        total_threads = np.prod(threadsperblock)
-        total_blocks = np.prod(blockspergrid)
-        nstates = int(total_threads * total_blocks)
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge, walk_length-1),TPB = (TPB, TPB, TPB))
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
 
         self.attr_sampler[blockspergrid,threadsperblock](
@@ -861,14 +872,72 @@ class AllianceBuilder():
             cuda_random_state
         )
 
+        self.cuda.synchronize()
+
+        #################################
+        # merge values
+        community_i = 0
+        community_j = 0
+
+        edge_counts_h = np.zeros((self.n_unique_edges,self.n_communities), dtype=np.int32)
+        edge_counts_d = self.cuda.to_device(edge_counts_h)
+
+        cum_weight_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
+        cum_weight_d = self.cuda.to_device(cum_weight_h)
+        source_counts_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
+        source_counts_d = self.cuda.to_device(source_counts_h)
+
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+
+        self.edge_postprocess[blockspergrid,threadsperblock](
+            community_i,
+            community_j,
+            n_samples_edge,
+            self.n_unique_edges,
+            edge_samples_d,
+            edge_counts_d,
+            membership_pairs_d
+        )
+
+        self.cuda.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+
+        self.attr_postprocess[blockspergrid,threadsperblock](
+            community_i,
+            community_j,
+            n_samples_edge,
+            walk_length,
+            walks_nodes_weights_d,
+            walks_nodes_d,
+            source_counts_d,
+            cum_weight_d,
+            membership_pairs_d,
+        )
+
+        self.cuda.synchronize()
+
+        edge_samples_h = edge_samples_d.copy_to_host()
+
         walks_h = walks_d.copy_to_host()
         walks_edges_h = walks_edges_d.copy_to_host()
 
         walks_nodes_h = walks_nodes_d.copy_to_host()
         walks_nodes_weights_h = walks_nodes_weights_d.copy_to_host()
 
+        edge_counts_h = edge_counts_d.copy_to_host() / n_samples_edge
+        cum_weight_h = cum_weight_d.copy_to_host() / n_samples_edge
+        source_counts_h = source_counts_d.copy_to_host() / n_samples_edge
+
+        hhi_estimate = edge_counts_h**2
+        hhi_estimate = np.nansum(hhi_estimate,axis=1)
+
+        mai_estimate = cum_weight_h / source_counts_h
+        mai_estimate = np.nansum(mai_estimate,axis=0)
+
         if testing:
-            return walks_h, walks_edges_h, walks_nodes_h, walks_nodes_weights_h
+            return edge_samples_h, walks_h, walks_edges_h, walks_nodes_h, walks_nodes_weights_h, edge_counts_h, cum_weight_h, source_counts_h
 
     def _update_communities(self, community_to_merge, new_community, update_communities=True):
         # Find the nodes in the community to merge
@@ -964,4 +1033,3 @@ class AllianceBuilder():
         del self._adj_d
         del self._edge_nodes_d
         del self._edge_weights_d
-        del self._node_weight_individual_d

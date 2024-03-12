@@ -362,3 +362,25 @@ def cpu_gpu_dispatcher(cpu_method_name, gpu_method_name):
             return method(*args, **kwargs)
         return wrapper
     return decorator
+
+def cuda_blocks(
+        dims: Union[int,Tuple[int],Tuple[int,int],Tuple[int,int,int]], 
+        TPB: Union[int,Tuple[int],Tuple[int,int],Tuple[int,int,int]]
+    ):
+    ndim = len(dims)
+    if isinstance(TPB,tuple):
+        threadsperblock = TPB
+        assert isinstance(dims,tuple)
+        assert ndim == len(threadsperblock)
+    else:
+        threadsperblock = (TPB, ) * ndim
+
+    blockspergrid = []
+    for k in range(ndim):
+        blockspergrid.append(math.ceil(dims[k] / threadsperblock[k]))
+
+    total_threads = np.prod(threadsperblock)
+    total_blocks = np.prod(blockspergrid)
+    nstates = int(total_threads * total_blocks)
+
+    return nstates, threadsperblock, tuple(blockspergrid)
