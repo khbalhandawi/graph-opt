@@ -904,7 +904,7 @@ class TestAllianceBuilder:
 
         edge_samples_h, walks_spatial_h, walks_edges_spatial_h, \
             walks_nodes_h, walks_nodes_weights_h, \
-            edge_counts_h, cum_weight_h, source_counts_h = test_class.greedy_optimize_stochastic(
+            edge_counts_h, cum_weight_h = test_class.greedy_optimize_stochastic(
                 n_samples_edge=n_samples_edge,
                 walk_length=walk_length,
                 threads_per_block = 8,

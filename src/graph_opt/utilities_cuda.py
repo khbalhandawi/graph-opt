@@ -77,3 +77,17 @@ def cumsum_global_3d(arr, out, idx, idy, idz):
     for j in range(arr.shape[-1]):
         val += arr[idx,idy,idz,j]
         out[idx,idy,idz,j] = val
+
+@cuda.jit()
+def elementwise_divide(A, B):
+
+    # Compute flattened index inside the array  
+    x, y = cuda.grid(2)  
+
+    # Compute the grid stride 
+    dx, dy = cuda.gridsize(2)  
+
+    for i in range(x, A.shape[0], dx):
+        for j in range(y, A.shape[1], dy):
+            if B[i,j] > 0:
+                A[i,j] /= B[i,j]

@@ -331,16 +331,16 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             adj:DeviceNDArray,
             adj_i:DeviceNDArray,
             walks:DeviceNDArray,
-            walks_edges_d:DeviceNDArray,
+            walks_edges:DeviceNDArray,
             rng_states:DeviceNDArray,
             cumsum:DeviceNDArray,
             weights:DeviceNDArray
         ):
         # Compute flattened index inside the array  
-        x, y = cuda.grid(2)  
+        x, y = cuda.grid(2)
 
         # Compute the grid stride 
-        dx, dy = cuda.gridsize(2)  
+        dx, dy = cuda.gridsize(2)
 
         for i in range(x, n_nodes, dx):
             for j in range(y, n_samples, dy):
@@ -365,9 +365,9 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
                     walks[i,j,k+1] = chosen
                     chosen_edge = adj_i[current_node,chosen]
                     if math.isnan(chosen_edge):
-                        walks_edges_d[i,j,k] = -1e6
+                        walks_edges[i,j,k] = -1e6
                     else:
-                        walks_edges_d[i,j,k] = chosen_edge
+                        walks_edges[i,j,k] = chosen_edge
                     current_node = chosen
 
     @cuda.jit
@@ -411,6 +411,25 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
 
                         samples[i,j,k] = chosen
                         samples_weights[i,j,k] = adj[current_edge] * (weights[chosen]/100.0)
+
+    @cuda.jit
+    def attr_source_postprocess(
+            n_samples,
+            samples:DeviceNDArray,
+            source_counts:DeviceNDArray
+        ):
+        # Compute flattened index inside the array  
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride 
+        dx, dy = cuda.gridsize(2)
+
+        for i in range(x, n_nodes_spatial, dx):
+            for j in range(y, n_samples, dy):
+
+                source_node = samples[i,j,0]
+                if not math.isnan(source_node) or source_node >= 0:
+                    cuda.atomic.add(source_counts[i], source_node, 1)
 
     @cuda.jit
     def edge_sampler(
@@ -492,7 +511,6 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
                 source_node = samples[i,j,0]
                 if not math.isnan(source_node) and source_node >= 0:
                     source_c = membership[ci,cj,source_node]
-                    cuda.atomic.add(source_counts[i], source_node, 1)
 
                     for k in range(walk_length-1):
 
@@ -503,60 +521,12 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
                             curr_c = membership[ci,cj,curr_node]
 
                         curr_weight = samples_weights[i,j,k]
+                        source_count = source_counts[i,source_node]
 
-                        if curr_c == source_c:
+                        if curr_c == source_c and source_count > 0:
                             cuda.atomic.add(cum_weight[i], source_node, curr_weight)
                         else:
                             break
 
-    @cuda.jit
-    def attr_sampler_aggregate(
-            ci,
-            cj,
-            n_samples,
-            walk_length,
-            walks_edges:DeviceNDArray,
-            adj:DeviceNDArray,
-            adj3:DeviceNDArray,
-            samples_weights:DeviceNDArray,
-            samples:DeviceNDArray,
-            membership:DeviceNDArray,
-            rng_states:DeviceNDArray,
-        ):
-        # Compute flattened index inside the array  
-        x, y = cuda.grid(2)  
-
-        # Compute the grid stride 
-        dx, dy = cuda.gridsize(2)  
-
-        cumsum = cuda.local.array((n_nodes,),dtype=float32)
-        weights = cuda.local.array((n_nodes,),dtype=float32)
-
-        for i in range(x, n_nodes_spatial, dx):
-            for j in range(y, n_samples, dy):
-                for k in range(walk_length):
-
-                    idx = i * dy + j
-
-                    current_edge = walks_edges[i,j,k]
-                    if math.isnan(current_edge) or current_edge < 0:
-                        samples[i,j,k] = -1e6
-                        samples_weights[i,j,k] = 0.0
-                    else:
-                        # select a node
-                        for n in range(n_nodes):
-                            weights[n] = adj3[current_edge, n]
-
-                        cumsum_d(weights,cumsum)
-                        threshold = xoroshiro128p_uniform_float32(rng_states, idx)
-                        chosen = searchsorted_d(cumsum,threshold)
-                        chosen_c = membership[ci,cj,chosen]
-
-                        if k == 0:
-                            source_c = chosen_c
-
-                        samples[i,j,k] = chosen
-                        if chosen_c == source_c:
-                            samples_weights[i,j,k] = adj[current_edge] * (weights[chosen]/100.0)
-
-    return set_membership, spatial_random_walk, weighted_spatial_random_walk, attr_sampler, edge_sampler, edge_postprocess, attr_postprocess
+    return set_membership, spatial_random_walk, weighted_spatial_random_walk, \
+        attr_sampler, attr_source_postprocess, edge_sampler, edge_postprocess, attr_postprocess

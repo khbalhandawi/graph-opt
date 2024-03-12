@@ -131,12 +131,16 @@ class AllianceBuilder():
         if self.use_gpu:
             from .utilities_cuda import cuda, set_membership, calc_ami, calc_hhi, \
                 create_xoroshiro128p_states, define_cuda_kernels
+            
+            from ..utilities_cuda import elementwise_divide
+
             self.cuda = cuda
             # self.DeviceNDArray = DeviceNDArray
             self.set_batch_membership: Callable = set_membership
             self.calc_ami: Callable = calc_ami
             self.calc_hhi: Callable = calc_hhi
             self.create_xoroshiro128p_states: Callable = create_xoroshiro128p_states
+            self.elementwise_divide: Callable = elementwise_divide
 
             # move constants to memory
             self._adj_d = self.cuda.to_device(self._adj)
@@ -158,7 +162,8 @@ class AllianceBuilder():
             self._node_spatial_weights_d = self.cuda.to_device(node_spatial_weights)
 
             self.set_membership, self.spatial_random_walk, self.weighted_spatial_random_walk, \
-                self.attr_sampler, self.edge_sampler, self.edge_postprocess, self.attr_postprocess = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial)
+                self.attr_sampler, self.attr_source_postprocess, self.edge_sampler, \
+                self.edge_postprocess, self.attr_postprocess = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial)
 
         else:
             self.cuda = None
@@ -824,6 +829,9 @@ class AllianceBuilder():
         walks_nodes_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.int32)
         walks_nodes_weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.float32)
 
+        source_counts_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
+        source_counts_d = self.cuda.to_device(source_counts_h)
+
         cumsum_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
         weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
         
@@ -874,6 +882,15 @@ class AllianceBuilder():
 
         self.cuda.synchronize()
 
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge),TPB = (TPB, TPB))
+        self.attr_source_postprocess[blockspergrid,threadsperblock](
+            n_samples_edge,
+            walks_nodes_d,
+            source_counts_d
+        )
+
+        self.cuda.synchronize()
+
         #################################
         # merge values
         community_i = 0
@@ -882,10 +899,8 @@ class AllianceBuilder():
         edge_counts_h = np.zeros((self.n_unique_edges,self.n_communities), dtype=np.int32)
         edge_counts_d = self.cuda.to_device(edge_counts_h)
 
-        cum_weight_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
+        cum_weight_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.float32)
         cum_weight_d = self.cuda.to_device(cum_weight_h)
-        source_counts_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
-        source_counts_d = self.cuda.to_device(source_counts_h)
 
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
@@ -918,6 +933,15 @@ class AllianceBuilder():
 
         self.cuda.synchronize()
 
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+
+        self.elementwise_divide[blockspergrid,threadsperblock](
+            cum_weight_d,
+            source_counts_d
+        )
+
+        self.cuda.synchronize()
+
         edge_samples_h = edge_samples_d.copy_to_host()
 
         walks_h = walks_d.copy_to_host()
@@ -927,17 +951,16 @@ class AllianceBuilder():
         walks_nodes_weights_h = walks_nodes_weights_d.copy_to_host()
 
         edge_counts_h = edge_counts_d.copy_to_host() / n_samples_edge
-        cum_weight_h = cum_weight_d.copy_to_host() / n_samples_edge
-        source_counts_h = source_counts_d.copy_to_host() / n_samples_edge
+        cum_weight_h = cum_weight_d.copy_to_host()
 
         hhi_estimate = edge_counts_h**2
         hhi_estimate = np.nansum(hhi_estimate,axis=1)
 
-        mai_estimate = cum_weight_h / source_counts_h
+        mai_estimate = cum_weight_h
         mai_estimate = np.nansum(mai_estimate,axis=0)
 
         if testing:
-            return edge_samples_h, walks_h, walks_edges_h, walks_nodes_h, walks_nodes_weights_h, edge_counts_h, cum_weight_h, source_counts_h
+            return edge_samples_h, walks_h, walks_edges_h, walks_nodes_h, walks_nodes_weights_h, edge_counts_h, cum_weight_h
 
     def _update_communities(self, community_to_merge, new_community, update_communities=True):
         # Find the nodes in the community to merge
