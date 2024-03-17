@@ -11,7 +11,7 @@ import inspect
 from networkx import Graph, DiGraph
 import functools
 
-from typing import Tuple, Callable, List, Any, Dict, Union
+from typing import Optional, Tuple, Callable, List, Any, Dict, Union
 
 def _default_if_none(value, default, name, ensure_not_none=True):
     value = value if value is not None else default

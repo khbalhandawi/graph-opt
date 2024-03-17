@@ -765,7 +765,7 @@ class AllianceBuilder():
         weights_weighted_d = self.cuda.device_array((n_samples_source_node,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
 
         # Define the thread and block dimensions
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(n_samples_source_node, n_samples_edge),TPB = TPB)
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(n_samples_source_node, n_samples_edge), TPB = TPB)
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
         self.weighted_spatial_random_walk[blockspergrid,threadsperblock](
             n_samples_source_node,
@@ -799,18 +799,22 @@ class AllianceBuilder():
             n_samples_edge,
             walk_length,
             TPB,
+            stream = None,
             testing = False
         ):
+        
+        stream_id = 0 if stream is None else stream
+        stream = self.cuda if stream is None else stream
 
         #################################
         # merge values
         edge_counts_h = np.zeros((self.n_unique_edges,self.n_communities), dtype=np.int32)
-        edge_counts_d = self.cuda.to_device(edge_counts_h)
+        edge_counts_d = self.cuda.to_device(edge_counts_h,stream=stream_id)
 
         cum_weight_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
-        cum_weight_d = self.cuda.to_device(cum_weight_h)
+        cum_weight_d = self.cuda.to_device(cum_weight_h,stream=stream_id)
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
 
         self.edge_postprocess[blockspergrid,threadsperblock](
             community_i,
@@ -822,9 +826,9 @@ class AllianceBuilder():
             membership_pairs_d
         )
 
-        self.cuda.synchronize()
+        stream.synchronize()
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
 
         self.attr_postprocess[blockspergrid,threadsperblock](
             community_i,
@@ -838,16 +842,16 @@ class AllianceBuilder():
             membership_pairs_d
         )
 
-        self.cuda.synchronize()
+        stream.synchronize()
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
 
         self.elementwise_divide[blockspergrid,threadsperblock](
             cum_weight_d,
             source_counts_d
         )
 
-        self.cuda.synchronize()
+        stream.synchronize()
 
         edge_samples_h = edge_samples_d.copy_to_host()
 
@@ -873,7 +877,8 @@ class AllianceBuilder():
             self,
             n_samples_edge,
             walk_length,
-            TPB,
+            TPB_2D,
+            TPB_3D,
             testing = False
         ):
 
@@ -894,7 +899,7 @@ class AllianceBuilder():
         weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
         
         # Define the thread and block dimensions
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB_2D)
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
 
         self.edge_sampler[blockspergrid,threadsperblock](
@@ -906,7 +911,7 @@ class AllianceBuilder():
         )
 
         # Define the thread and block dimensions
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge),TPB = (TPB, TPB))
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge), TPB = TPB_2D)
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
 
         self.spatial_random_walk[blockspergrid,threadsperblock](
@@ -924,7 +929,7 @@ class AllianceBuilder():
 
         self.cuda.synchronize()
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge, walk_length-1),TPB = (TPB, TPB, TPB))
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge, walk_length-1), TPB = TPB_3D)
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
 
         self.attr_sampler[blockspergrid,threadsperblock](
@@ -940,7 +945,7 @@ class AllianceBuilder():
 
         self.cuda.synchronize()
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge),TPB = (TPB, TPB))
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge), TPB = TPB_2D)
         self.attr_source_postprocess[blockspergrid,threadsperblock](
             n_samples_edge,
             walks_nodes_d,
@@ -964,7 +969,7 @@ class AllianceBuilder():
         membership_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.int8)
         membership_pairs_d = self.cuda.to_device(membership_pairs_h)
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_communities, self.n_communities, self.n_nodes),TPB = (TPB, TPB, TPB))
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_communities, self.n_communities, self.n_nodes), TPB = TPB)
         self.set_membership[blockspergrid,threadsperblock](
             communities_d,
             membership_d,
@@ -981,7 +986,9 @@ class AllianceBuilder():
             max_iterations: Optional[int]=1000,
             n_samples_edge: Optional[int] = 100,
             walk_length: Optional[int] = 10,
-            threads_per_block: Optional[Union[int,Tuple[int,int,int]]] = 8,
+            threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 24,
+            threads_per_block_3D: Optional[Union[int,Tuple[int,int,int]]] = 8,
+            num_streams: Optional[int] = 1,
             testing_opt: Optional[bool] = False
         ) -> Tuple[Dict[int,int], float]:
 
@@ -1010,19 +1017,24 @@ class AllianceBuilder():
                 max_increase = 0
                 best_pair = None
 
-                TPB = threads_per_block
+                TPB_2D = threads_per_block_2D
+                TPB_3D = threads_per_block_3D
 
                 if testing_opt:
                     hhi_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_unique_edges), dtype=np.float32)
                     weights_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.float32)
 
-                membership_pairs_d = self._calculate_members_gpu(TPB)
+                membership_pairs_d = self._calculate_members_gpu(TPB_3D)
 
                 edge_samples_d, walks_nodes_d, walks_nodes_weights_d, source_counts_d = self._randomwalk_gpu(
                     n_samples_edge,
                     walk_length,
-                    TPB
+                    TPB_2D,
+                    TPB_3D
                 )
+
+                # Create streams
+                streams = [self.cuda.stream() for _ in range(num_streams)]
 
                 num_total_batches = self.n_communities * self.n_communities
                 with tqdm(total=num_total_batches, desc="merges processed") as pbar_inner:
@@ -1031,7 +1043,10 @@ class AllianceBuilder():
                         community_i = batch_index // self.n_communities
                         community_j = batch_index % self.n_communities
 
-                        if community_i != community_j:
+                        if community_i > community_j:
+                            
+                            # Select a stream for this batch
+                            stream = streams[(community_i * num_total_batches + community_j) % num_streams]
 
                             hhi_estimate, mai_estimate, log_mai = self._stochastic_eval_gpu(
                                 community_i, 
@@ -1043,7 +1058,8 @@ class AllianceBuilder():
                                 membership_pairs_d,
                                 n_samples_edge,
                                 walk_length,
-                                TPB
+                                stream = stream,
+                                TPB = TPB_2D
                             )
 
                             f1 = -np.mean(hhi_estimate) * 100
@@ -1062,7 +1078,11 @@ class AllianceBuilder():
                                 hhi_pairs_h[community_i,community_j,:] = hhi_estimate
                                 weights_pairs_h[community_i,community_j,:] = mai_estimate
 
-                            pbar_inner.update(1)
+                        pbar_inner.update(1)
+
+                # Synchronize all streams
+                for stream in streams:
+                    stream.synchronize()
 
                 # If the maximum increase is greater than 0, merge these two communities and update the mean HHI
                 if max_increase > 0:

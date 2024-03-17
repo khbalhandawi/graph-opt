@@ -7,6 +7,7 @@ import os
 from sklearn.covariance import log_likelihood
 from ..community_detection.alliance_builder import AllianceBuilder
 from ..community_detection.utilities import resort_communities, same_community
+from ..utilities import cuda_blocks
 # from ..utilities_cpu import searchsorted, cumsum
 
 import numpy as np
@@ -672,7 +673,6 @@ def test_reorder(input_dict, test_dict, test_unique, test_n_communities):
     assert unique_list == test_unique
     assert same_community(input_dict,reorder_dict) # check community structure is preserved
 
-
 @pytest.mark.parametrize("test_vector, threshold, expected", [
     (np.array([0, 0, 0, 40, 60]), 0.3, 3),
     (np.array([0, 40, 0, 0, 60]), 0.3, 1),
@@ -723,6 +723,17 @@ def test_sampler(test_vector, expected):
     assert np.allclose(p,expected,rtol=1e-1)
 
     os.environ['NUMBA_ENABLE_CUDASIM'] = numba_sim # reset environment to default
+
+def test_cuda_blocks():
+
+    dims = (500, 500, 500)
+    TPB = (8, 8, 8)
+    dims = (5000, 50)
+    TPB = (32, 32)
+
+    nstates, threadsperblock, blockspergrid = cuda_blocks(dims=dims, TPB=TPB)
+
+    return
 
 class TestAllianceBuilder:
 
@@ -809,7 +820,8 @@ class TestAllianceBuilder:
                 source_counts = test_class._randomwalk_gpu(
             n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length,
-            TPB = 8,
+            TPB_2D = (self.threads_per_block, ) * 2,
+            TPB_3D = (self.threads_per_block, ) * 3,
             testing=True
         )
 
@@ -941,14 +953,15 @@ class TestAllianceBuilder:
         cum_weight_baseline, hhi_estimate_baseline, \
             mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic
 
-        membership_pairs = test_class._calculate_members_gpu(TPB = self.threads_per_block)
+        membership_pairs = test_class._calculate_members_gpu(TPB = (self.threads_per_block, ) * 3)
 
         edge_samples, walks_spatial, walks_edges_spatial, \
             walks_nodes, walks_nodes_weights, \
                 source_counts = test_class._randomwalk_gpu(
             n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length,
-            TPB = 8,
+            TPB_2D = (self.threads_per_block, ) * 2,
+            TPB_3D = (self.threads_per_block, ) * 3,
             testing=True
         )
 
@@ -962,7 +975,7 @@ class TestAllianceBuilder:
             membership_pairs,
             self.n_samples_edge,
             self.walk_length,
-            TPB = self.threads_per_block,
+            TPB = (self.threads_per_block, ) * 2,
             testing = True
         )
 
@@ -996,7 +1009,8 @@ class TestAllianceBuilder:
                 weights=weights,
                 n_samples_edge=self.n_samples_edge,
                 walk_length=self.walk_length,
-                threads_per_block=self.threads_per_block,
+                threads_per_block_2D=self.threads_per_block,
+                threads_per_block_3D=self.threads_per_block,
                 testing_opt=True
             )
 
@@ -1045,14 +1059,15 @@ class TestAllianceBuilder:
         assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
         assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
 
-        membership_pairs_h = test_class._calculate_members_gpu(TPB = 8)
+        membership_pairs_h = test_class._calculate_members_gpu(TPB = (self.threads_per_block, ) * 3)
 
         edge_samples_h, walks_spatial_h, walks_edges_spatial_h, \
             walks_nodes_h, walks_nodes_weights_h, \
                 source_counts_h = test_class._randomwalk_gpu(
             n_samples_edge=n_samples_edge,
             walk_length=self.walk_length,
-            TPB = 8,
+            TPB_2D = (self.threads_per_block, ) * 2,
+            TPB_3D = (self.threads_per_block, ) * 3,
             testing=True
         )
 
@@ -1066,7 +1081,7 @@ class TestAllianceBuilder:
             membership_pairs_h,
             n_samples_edge,
             self.walk_length,
-            TPB = self.threads_per_block,
+            TPB = (self.threads_per_block, ) * 2,
             testing = True
         )
 
