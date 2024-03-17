@@ -741,7 +741,8 @@ class TestAllianceBuilder:
     walk_length=10
     threads_per_block=8
     n_samples_source_node = 50
-    
+    num_streams = 4
+
     @pytest.mark.dependency()
     def test_initialization(self,example_case):
 
@@ -836,6 +837,7 @@ class TestAllianceBuilder:
             self.n_samples_edge,
             self.walk_length,
             TPB = self.threads_per_block,
+            stream = test_class.cuda.stream(),
             testing = True
         )
 
@@ -976,6 +978,7 @@ class TestAllianceBuilder:
             self.n_samples_edge,
             self.walk_length,
             TPB = (self.threads_per_block, ) * 2,
+            stream = test_class.cuda.stream(),
             testing = True
         )
 
@@ -1011,7 +1014,8 @@ class TestAllianceBuilder:
                 walk_length=self.walk_length,
                 threads_per_block_2D=self.threads_per_block,
                 threads_per_block_3D=self.threads_per_block,
-                testing_opt=True
+                testing_opt=True,
+                num_streams=self.num_streams
             )
 
         assert same_community(test_class.communities_dict, test_communities_dict)
@@ -1082,6 +1086,7 @@ class TestAllianceBuilder:
             n_samples_edge,
             self.walk_length,
             TPB = (self.threads_per_block, ) * 2,
+            stream = test_class.cuda.stream(),
             testing = True
         )
 

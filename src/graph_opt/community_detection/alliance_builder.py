@@ -13,6 +13,7 @@ import math
 from pdb import set_trace
 from scipy.sparse import spmatrix
 from typing import Callable, Dict, Any, Union
+from concurrent.futures import ThreadPoolExecutor
 
 # Check if the code is running in a Jupyter notebook
 if 'ipykernel' in sys.modules:
@@ -29,6 +30,9 @@ from ..random_settings import random_state
 type_share = NewType('type_share', Dict[int,float])
 type_shares = NewType('type_shares', Dict[Tuple[int, int], type_share])
 type_scores = NewType('type_scores', Dict[Tuple[int, int], Dict[int, float]])
+
+def multiobjective(f1: Union[float,np.ndarray], f2: Union[float,np.ndarray], weights: Optional[Tuple[float,float]]=(0.5,0.5)):
+    return weights[0]*f1 + weights[1]*f2
 
 
 class AllianceBuilder():
@@ -349,9 +353,6 @@ class AllianceBuilder():
             debug: bool = False
         ) -> Tuple[Dict[int,int], float]:
 
-        def multiobjective(f1: Union[float,np.ndarray], f2: Union[float,np.ndarray], weights: Optional[Tuple[float,float]]=(0.5,0.5)):
-            return weights[0]*f1 + weights[1]*f2
-
         # Calculate the initial mean HHI over all routes
         f1 = -(sum(self._HHI.values())*100) / (len(self._HHI)*10000)
         f2 = sum(self._airline_score.values()) / len(self._airline_score)
@@ -628,9 +629,6 @@ class AllianceBuilder():
 
         self.random_state = _default_if_none(self.random_state, random_state(self.seed), "rng_state")
 
-        def multiobjective(f1, f2, weights: Optional[Tuple[float,float]]=(0.5,0.5)):
-            return weights[0]*f1 + weights[1]*f2
-
         rng = self.random_state[0]
         rng_np = self.random_state[1]
 
@@ -799,24 +797,21 @@ class AllianceBuilder():
             n_samples_edge,
             walk_length,
             TPB,
-            stream = None,
+            stream,
             testing = False
         ):
-        
-        stream_id = 0 if stream is None else stream
-        stream = self.cuda if stream is None else stream
 
         #################################
         # merge values
         edge_counts_h = np.zeros((self.n_unique_edges,self.n_communities), dtype=np.int32)
-        edge_counts_d = self.cuda.to_device(edge_counts_h,stream=stream_id)
+        edge_counts_d = self.cuda.to_device(edge_counts_h,stream=stream)
 
         cum_weight_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
-        cum_weight_d = self.cuda.to_device(cum_weight_h,stream=stream_id)
+        cum_weight_d = self.cuda.to_device(cum_weight_h,stream=stream)
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
 
-        self.edge_postprocess[blockspergrid,threadsperblock](
+        self.edge_postprocess[blockspergrid,threadsperblock,stream](
             community_i,
             community_j,
             n_samples_edge,
@@ -830,7 +825,7 @@ class AllianceBuilder():
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
 
-        self.attr_postprocess[blockspergrid,threadsperblock](
+        self.attr_postprocess[blockspergrid,threadsperblock,stream](
             community_i,
             community_j,
             n_samples_edge,
@@ -846,7 +841,7 @@ class AllianceBuilder():
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
 
-        self.elementwise_divide[blockspergrid,threadsperblock](
+        self.elementwise_divide[blockspergrid,threadsperblock,stream](
             cum_weight_d,
             source_counts_d
         )
@@ -980,6 +975,53 @@ class AllianceBuilder():
 
         return membership_pairs_d
 
+    def _process_batch(
+            self, 
+            batch_index, 
+            streams, 
+            edge_samples_d, 
+            walks_nodes_weights_d, 
+            walks_nodes_d, 
+            source_counts_d, 
+            membership_pairs_d, 
+            n_samples_edge, 
+            walk_length, 
+            TPB_2D, 
+            weights, 
+            f
+        ):
+
+        community_i = batch_index // self.n_communities
+        community_j = batch_index % self.n_communities
+
+        if community_i > community_j:
+            stream = streams[batch_index % len(streams)]
+
+            # Perform stochastic evaluation using the selected stream
+            hhi_estimate, mai_estimate, log_mai = self._stochastic_eval_gpu(
+                community_i,
+                community_j,
+                edge_samples_d,
+                walks_nodes_weights_d,
+                walks_nodes_d,
+                source_counts_d,
+                membership_pairs_d,
+                n_samples_edge,
+                walk_length,
+                stream=stream,
+                TPB=TPB_2D
+            )
+
+            f1 = -np.mean(hhi_estimate) * 100
+            f2 = np.mean(log_mai)
+            f_new = multiobjective(f1, f2, weights=weights)
+
+            increase = f_new - f
+
+            return increase, community_i, community_j, hhi_estimate, mai_estimate
+
+        return 0, community_i, community_j, None, None
+
     def greedy_optimize_stochastic(
             self,
             weights: Optional[Tuple[float,float]]=(0.5,0.5),
@@ -991,9 +1033,6 @@ class AllianceBuilder():
             num_streams: Optional[int] = 1,
             testing_opt: Optional[bool] = False
         ) -> Tuple[Dict[int,int], float]:
-
-        def multiobjective(f1: Union[float,np.ndarray], f2: Union[float,np.ndarray], weights: Optional[Tuple[float,float]]=(0.5,0.5)):
-            return weights[0]*f1 + weights[1]*f2
 
         # Calculate the initial mean HHI over all routes
         f1 = -(sum(self._HHI.values())*100) / (len(self._HHI)*10000)
@@ -1019,7 +1058,7 @@ class AllianceBuilder():
 
                 TPB_2D = threads_per_block_2D
                 TPB_3D = threads_per_block_3D
-
+                
                 if testing_opt:
                     hhi_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_unique_edges), dtype=np.float32)
                     weights_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.float32)
@@ -1035,8 +1074,8 @@ class AllianceBuilder():
 
                 # Create streams
                 streams = [self.cuda.stream() for _ in range(num_streams)]
-
                 num_total_batches = self.n_communities * self.n_communities
+
                 with tqdm(total=num_total_batches, desc="merges processed") as pbar_inner:
                     for batch_index in range(num_total_batches):
 
@@ -1045,29 +1084,22 @@ class AllianceBuilder():
 
                         if community_i > community_j:
                             
-                            # Select a stream for this batch
-                            stream = streams[(community_i * num_total_batches + community_j) % num_streams]
+                            stream = streams[batch_index % len(streams)]
 
-                            hhi_estimate, mai_estimate, log_mai = self._stochastic_eval_gpu(
-                                community_i, 
-                                community_j, 
-                                edge_samples_d,
-                                walks_nodes_weights_d,
-                                walks_nodes_d,
-                                source_counts_d,
-                                membership_pairs_d,
-                                n_samples_edge,
-                                walk_length,
-                                stream = stream,
-                                TPB = TPB_2D
+                            increase, community_i, community_j, hhi_estimate, mai_estimate = self._process_batch(
+                                batch_index, 
+                                streams, 
+                                edge_samples_d, 
+                                walks_nodes_weights_d, 
+                                walks_nodes_d, 
+                                source_counts_d, 
+                                membership_pairs_d, 
+                                n_samples_edge, 
+                                walk_length, 
+                                TPB_2D, 
+                                weights, 
+                                f
                             )
-
-                            f1 = -np.mean(hhi_estimate) * 100
-                            f2 = np.mean(log_mai)
-                            f_new = multiobjective(f1,f2,weights=weights)
-
-                            # Calculate the increase in mean HHI
-                            increase = f_new - f
 
                             # If this pair gives a better increase, update max_increase and best_pair
                             if increase > max_increase:
