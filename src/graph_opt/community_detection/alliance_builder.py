@@ -1076,41 +1076,39 @@ class AllianceBuilder():
                 streams = [self.cuda.stream() for _ in range(num_streams)]
                 num_total_batches = self.n_communities * self.n_communities
 
-                with tqdm(total=num_total_batches, desc="merges processed") as pbar_inner:
+                # Use ThreadPoolExecutor to parallelize the loop
+                with ThreadPoolExecutor(max_workers=num_streams) as executor:
+                    futures = []
                     for batch_index in range(num_total_batches):
+                        future = executor.submit(
+                            self._process_batch, 
+                            batch_index, 
+                            streams, 
+                            edge_samples_d, 
+                            walks_nodes_weights_d, 
+                            walks_nodes_d, 
+                            source_counts_d, 
+                            membership_pairs_d, 
+                            n_samples_edge, 
+                            walk_length, 
+                            TPB_2D, 
+                            weights, 
+                            f
+                        )
+                        futures.append(future)
 
-                        community_i = batch_index // self.n_communities
-                        community_j = batch_index % self.n_communities
+                    # Collect results and update max_increase and best_pair
+                    for future in tqdm(futures, total=num_total_batches, desc="merges processed"):
+                        increase, community_i, community_j, hhi_estimate, mai_estimate = future.result()
 
                         if community_i > community_j:
-                            
-                            stream = streams[batch_index % len(streams)]
-
-                            increase, community_i, community_j, hhi_estimate, mai_estimate = self._process_batch(
-                                batch_index, 
-                                streams, 
-                                edge_samples_d, 
-                                walks_nodes_weights_d, 
-                                walks_nodes_d, 
-                                source_counts_d, 
-                                membership_pairs_d, 
-                                n_samples_edge, 
-                                walk_length, 
-                                TPB_2D, 
-                                weights, 
-                                f
-                            )
-
-                            # If this pair gives a better increase, update max_increase and best_pair
                             if increase > max_increase:
                                 max_increase = increase
                                 best_pair = (community_i, community_j)
-
+        
                             if testing_opt:
                                 hhi_pairs_h[community_i,community_j,:] = hhi_estimate
                                 weights_pairs_h[community_i,community_j,:] = mai_estimate
-
-                        pbar_inner.update(1)
 
                 # Synchronize all streams
                 for stream in streams:
