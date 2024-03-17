@@ -13,10 +13,9 @@ import numpy as np
 import networkx as nx
 import json
 import os
+import math
 
 from typing import Optional, Tuple, Dict
-
-os.environ['NUMBA_ENABLE_CUDASIM'] = "0"
 
 seed = 1234
 
@@ -115,19 +114,28 @@ def get_node_bfs_probabilities(
 
     edges = test_class.edge_u2pairkey_list[source_u]
     total_weight = sum(test_class.edge_pairkey2atrr[edge]['weight'] for edge in edges)
+    target_community = test_class.communities_dict[target_node]
 
     for u, v, key in edges:
         curr_edge = (u, v, key)
         edge_prob = test_class.edge_pair2w[(u,v)] / total_weight
         edge_type_prob = test_class.edge_pairkey2atrr[curr_edge]['market_share_percent'] / 100.0
         edge_type = test_class.edge_pairkey2atrr[curr_edge]['edge_type']
+        current_community = test_class.communities_dict[edge_type]
 
         previous_edge_type = test_class.edge_pairkey2atrr[previous_edge]['edge_type'] if previous_edge is not None else None
+        previous_community = test_class.communities_dict.get(previous_edge_type,None)
 
-        if edge_type == target_node and (previous_edge_type is None or previous_edge_type == target_node):
-            new_prob = current_prob * edge_prob * edge_type_prob
+        if current_depth == 1:
+            if edge_type == target_node:
+                new_prob = current_prob * edge_prob * edge_type_prob
+            else:
+                new_prob = 0.0
         else:
-            new_prob = 0.0
+            if current_community == target_community:
+                new_prob = current_prob * edge_prob * edge_type_prob
+            else:
+                new_prob = 0.0
 
         probabilities[current_depth - 1] += new_prob
 
@@ -153,7 +161,7 @@ def get_bfs_probabilities(
 
     for i, source_node in enumerate(test_class.node_spatial_list):
         for j, target_node in enumerate(test_class.node_list):
-
+            
             p = get_node_bfs_probabilities(
                 test_class,
                 source_node,
@@ -248,11 +256,14 @@ def get_estimate_node_bfs_probabilities(
 
             i = sample_walk_spatial_nodes[0]
             j_target = sample_walk_nodes[0] # sample node for the chain
+            j_node = test_class.node_i2key.get(j_target,None)
+            j_target_community = test_class.communities_dict.get(j_node,None)
             for k in range(walk_length-1):
                 j = sample_walk_nodes[k]
                 if j in test_class.node_i2key.keys():
+                    community_j = test_class.communities_dict[test_class.node_i2key[j]]
                     counts_spatial[i,k] += 1
-                    if j==j_target:
+                    if community_j==j_target_community:
                         counts_bfs[i,j,k] += 1
                     else:
                         break
@@ -525,7 +536,7 @@ def example_merge(request, example_case):
     return MG, \
            community_to_merge, new_community, \
            merge_communities_test, test_HHI, \
-           test_weights_dict
+           test_weights_dict, test_weights_individual_dict
 
 @pytest.fixture(scope="class",
     params=[
@@ -681,7 +692,8 @@ def test_sampler_deterministic(test_vector, threshold, expected):
 
     assert chosen == expected
 
-    os.environ['NUMBA_ENABLE_CUDASIM'] = numba_sim # reset environment to default
+    if numba_sim is not None:
+        os.environ['NUMBA_ENABLE_CUDASIM'] = numba_sim # reset environment to default
     
 @pytest.mark.parametrize("test_vector, expected", [
     (np.array([0, 0, 0, 40, 60]), np.array([0,0,0,0.4,0.6])),
@@ -714,6 +726,11 @@ def test_sampler(test_vector, expected):
 
 class TestAllianceBuilder:
 
+    n_samples_edge=500
+    walk_length=10
+    threads_per_block=8
+    n_samples_source_node = 50
+    
     @pytest.mark.dependency()
     def test_initialization(self,example_case):
 
@@ -775,7 +792,52 @@ class TestAllianceBuilder:
             debug=True
         )
 
-        return test_class, membership_pairs, hhi_pairs, weights_pairs, score_pairs
+        return test_class, membership_pairs, hhi_pairs, weights_pairs
+
+    @pytest.fixture(scope="class")
+    def baseline_stochastic(self, example_case) -> Tuple[np.ndarray, np.ndarray]:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
+
+        membership_pairs = test_class._calculate_members_gpu(TPB = self.threads_per_block)
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_nodes, walks_nodes_weights, \
+                source_counts = test_class._randomwalk_gpu(
+            n_samples_edge=self.n_samples_edge,
+            walk_length=self.walk_length,
+            TPB = 8,
+            testing=True
+        )
+
+        _, _, _, _, cum_weight, hhi_estimate, mai_estimate, _ = test_class._stochastic_eval_gpu(
+            0, 
+            0, 
+            edge_samples,
+            walks_nodes_weights,
+            walks_nodes,
+            source_counts,
+            membership_pairs,
+            self.n_samples_edge,
+            self.walk_length,
+            TPB = self.threads_per_block,
+            testing = True
+        )
+
+        estimate_bfs = get_estimate_node_bfs_probabilities(
+            test_class,
+            n_samples_edge=self.n_samples_edge,
+            walk_length=self.walk_length,
+            walks_nodes=walks_nodes,
+            walks_nodes_spatial=walks_spatial
+        )
+
+        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
+
+        return cum_weight, hhi_estimate, mai_estimate, bfs, estimate_bfs
 
     def test_probabilities(self, init_class: AllianceBuilder, example_case, example_conditionals):
         MG, _, _, _, _, _ = example_case
@@ -811,7 +873,7 @@ class TestAllianceBuilder:
         _, \
         community_to_merge, new_community, \
         merge_communities_test, test_HHI, \
-        test_weights_dict = example_merge
+        test_weights_dict, _ = example_merge
 
         test_class.update_scores(community_to_merge,new_community)
 
@@ -846,12 +908,12 @@ class TestAllianceBuilder:
             example_merge
         ):
 
-        test_class, membership_pairs, hhi_pairs, weights_pairs, score_pairs = init_class_gpu_iteration
+        test_class, membership_pairs, hhi_pairs, weights_pairs = init_class_gpu_iteration
 
         _, \
         community_to_merge, new_community, \
         merge_communities_test, test_HHI, \
-        test_weights_dict = example_merge
+        test_weights_dict, _ = example_merge
 
         for key,value in zip(test_class.node_list,membership_pairs[community_to_merge,new_community]):
             assert value == merge_communities_test[key]
@@ -861,6 +923,87 @@ class TestAllianceBuilder:
 
         for key,value in zip(test_class.node_list,weights_pairs[community_to_merge,new_community]):
             assert test_weights_dict[key] == value
+
+    def test_merge_gpu_stochastic(
+            self,
+            init_class_gpu: AllianceBuilder,
+            example_merge,
+            baseline_stochastic
+        ):
+
+        _, \
+        community_to_merge, new_community, \
+        merge_communities_test, test_HHI, \
+        test_weights_dict, test_weights_individual_dict = example_merge
+
+        test_class = init_class_gpu
+
+        cum_weight_baseline, hhi_estimate_baseline, \
+            mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic
+
+        membership_pairs = test_class._calculate_members_gpu(TPB = self.threads_per_block)
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_nodes, walks_nodes_weights, \
+                source_counts = test_class._randomwalk_gpu(
+            n_samples_edge=self.n_samples_edge,
+            walk_length=self.walk_length,
+            TPB = 8,
+            testing=True
+        )
+
+        edge_samples, walks_nodes, walks_nodes_weights, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_gpu(
+            community_to_merge, 
+            new_community, 
+            edge_samples,
+            walks_nodes_weights,
+            walks_nodes,
+            source_counts,
+            membership_pairs,
+            self.n_samples_edge,
+            self.walk_length,
+            TPB = self.threads_per_block,
+            testing = True
+        )
+
+        test_class.update_scores(community_to_merge, new_community)
+        test_class.communities_dict = test_class._communities_dict
+
+        estimate_bfs = get_estimate_node_bfs_probabilities(
+            test_class,
+            n_samples_edge = self.n_samples_edge,
+            walk_length = self.walk_length,
+            walks_nodes = walks_nodes,
+            walks_nodes_spatial=walks_spatial
+        )
+
+        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
+
+        for key,value in zip(test_class.node_list,membership_pairs[community_to_merge,new_community]):
+            assert value == merge_communities_test[key]
+
+        for key,value in zip(test_class.edge_unique_list,hhi_estimate):
+            assert math.isclose(test_HHI[key]/(100**2),value,rel_tol=1e-1)
+
+        assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
+
+    def test_optimize_gpu_stochastic(self, init_class_gpu: AllianceBuilder, optimization_cases):
+        _, weights, n_samples, test_communities_dict = optimization_cases
+
+        test_class = init_class_gpu
+
+        membership_pairs, hhi_pairs, weights_pairs = test_class.greedy_optimize_stochastic(
+                weights=weights,
+                n_samples_edge=self.n_samples_edge,
+                walk_length=self.walk_length,
+                threads_per_block=self.threads_per_block,
+                testing_opt=True
+            )
+
+        assert same_community(test_class.communities_dict, test_communities_dict)
+
+        print(test_class.f_history)
+        print(test_class.communities_history)
 
     def test_optimize_gpu(self, init_class_gpu: AllianceBuilder, optimization_cases):
 
@@ -881,15 +1024,12 @@ class TestAllianceBuilder:
         test_class = init_class_gpu
 
         n_samples_edge = 5000
-        n_samples_source_node = 50
-        walk_length = 10
-        TPB = (8,8,8)
-
+        
         walks_spatial_weighted_h, walks_edges_spatial_weighted_h = test_class.weighted_sampling(
                 n_samples_edge=n_samples_edge,
-                n_samples_source_node=n_samples_source_node,
-                walk_length=walk_length,
-                TPB = (8,8),
+                n_samples_source_node=self.n_samples_source_node,
+                walk_length=self.walk_length,
+                TPB = self.threads_per_block,
                 testing=True
             )
 
@@ -897,32 +1037,50 @@ class TestAllianceBuilder:
         estimate_edge_p, estimate_cond_edge_p = get_estimate_edge_weighted_prob(
             test_class,
             n_samples_edge=n_samples_edge,
-            n_samples_source_node=n_samples_source_node,
+            n_samples_source_node=self.n_samples_source_node,
             walks_nodes_spatial=walks_spatial_weighted_h,
             walks_edges_spatial=walks_edges_spatial_weighted_h
         )
+        
+        assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
+        assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
+
+        membership_pairs_h = test_class._calculate_members_gpu(TPB = 8)
 
         edge_samples_h, walks_spatial_h, walks_edges_spatial_h, \
             walks_nodes_h, walks_nodes_weights_h, \
-            edge_counts_h, cum_weight_h = test_class.greedy_optimize_stochastic(
-                n_samples_edge=n_samples_edge,
-                walk_length=walk_length,
-                threads_per_block = 8,
-                testing=True
-            )
+                source_counts_h = test_class._randomwalk_gpu(
+            n_samples_edge=n_samples_edge,
+            walk_length=self.walk_length,
+            TPB = 8,
+            testing=True
+        )
 
-        bfs = get_bfs_probabilities(test_class,walk_length-1)
+        edge_samples_h, walks_nodes_h, walks_nodes_weights_h, edge_counts_h, cum_weight_h, _, _, _ = test_class._stochastic_eval_gpu(
+            0, 
+            0, 
+            edge_samples_h,
+            walks_nodes_weights_h,
+            walks_nodes_h,
+            source_counts_h,
+            membership_pairs_h,
+            n_samples_edge,
+            self.walk_length,
+            TPB = self.threads_per_block,
+            testing = True
+        )
+
+
+        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
         estimate_bfs = get_estimate_node_bfs_probabilities(
             test_class,
             n_samples_edge=n_samples_edge,
-            walk_length=walk_length,
+            walk_length=self.walk_length,
             walks_nodes=walks_nodes_h,
             walks_nodes_spatial=walks_spatial_h
         )
         
         assert np.allclose(test_class._adj3/100,edge_counts_h,rtol=1e-1)
-        assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
-        assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
         assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
 
 if __name__ == "__main__":

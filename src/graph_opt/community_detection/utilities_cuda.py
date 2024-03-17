@@ -263,7 +263,7 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
                     community2 = communities[j]
                     if community1 == community2:
                         membership_pairs[i,j,k] = membership[k]
-                    elif community1 < community2:
+                    elif community1 != community2:
                         cur_member = membership[k] if membership[k] != community1 else community2
                         membership_pairs[i,j,k] = cur_member
 
@@ -428,7 +428,7 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             for j in range(y, n_samples, dy):
 
                 source_node = samples[i,j,0]
-                if not math.isnan(source_node) or source_node >= 0:
+                if not math.isnan(source_node) and source_node >= 0:
                     cuda.atomic.add(source_counts[i], source_node, 1)
 
     @cuda.jit

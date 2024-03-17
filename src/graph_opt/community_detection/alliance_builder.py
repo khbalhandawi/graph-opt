@@ -787,6 +787,194 @@ class AllianceBuilder():
         if testing:
             return walks_weighted_h, walks_weighted_edges_h
 
+    def _stochastic_eval_gpu(
+            self, 
+            community_i, 
+            community_j, 
+            edge_samples_d,
+            walks_nodes_weights_d,
+            walks_nodes_d,
+            source_counts_d,
+            membership_pairs_d,
+            n_samples_edge,
+            walk_length,
+            TPB,
+            testing = False
+        ):
+
+        #################################
+        # merge values
+        edge_counts_h = np.zeros((self.n_unique_edges,self.n_communities), dtype=np.int32)
+        edge_counts_d = self.cuda.to_device(edge_counts_h)
+
+        cum_weight_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
+        cum_weight_d = self.cuda.to_device(cum_weight_h)
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+
+        self.edge_postprocess[blockspergrid,threadsperblock](
+            community_i,
+            community_j,
+            n_samples_edge,
+            self.n_unique_edges,
+            edge_samples_d,
+            edge_counts_d,
+            membership_pairs_d
+        )
+
+        self.cuda.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+
+        self.attr_postprocess[blockspergrid,threadsperblock](
+            community_i,
+            community_j,
+            n_samples_edge,
+            walk_length,
+            walks_nodes_weights_d,
+            walks_nodes_d,
+            source_counts_d,
+            cum_weight_d,
+            membership_pairs_d
+        )
+
+        self.cuda.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+
+        self.elementwise_divide[blockspergrid,threadsperblock](
+            cum_weight_d,
+            source_counts_d
+        )
+
+        self.cuda.synchronize()
+
+        edge_samples_h = edge_samples_d.copy_to_host()
+
+        walks_nodes_h = walks_nodes_d.copy_to_host()
+        walks_nodes_weights_h = walks_nodes_weights_d.copy_to_host()
+
+        edge_counts_h = edge_counts_d.copy_to_host() / n_samples_edge
+        cum_weight_h = cum_weight_d.copy_to_host()
+
+        hhi_estimate = edge_counts_h**2
+        hhi_estimate = np.nansum(hhi_estimate,axis=1)
+
+        mai_estimate = cum_weight_h
+        mai_estimate = np.nansum(mai_estimate,axis=0)
+        log_mai = np.where(mai_estimate > 0.0, np.log(mai_estimate), 0.0)
+
+        if testing:
+            return edge_samples_h, walks_nodes_h, walks_nodes_weights_h, edge_counts_h, cum_weight_h, hhi_estimate, mai_estimate, log_mai
+        else:
+            return hhi_estimate, mai_estimate, log_mai
+
+    def _randomwalk_gpu(
+            self,
+            n_samples_edge,
+            walk_length,
+            TPB,
+            testing = False
+        ):
+
+        #################################
+        # perform random walks
+        edge_samples_d = self.cuda.device_array((self.n_unique_edges,n_samples_edge), dtype=np.int32)
+
+        walks_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length), dtype=np.int32)
+        walks_edges_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.int32)
+
+        walks_nodes_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.int32)
+        walks_nodes_weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.float32)
+
+        source_counts_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
+        source_counts_d = self.cuda.to_device(source_counts_h)
+
+        cumsum_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
+        weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
+        
+        # Define the thread and block dimensions
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+        cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
+
+        self.edge_sampler[blockspergrid,threadsperblock](
+            n_samples_edge,
+            self.n_unique_edges,
+            self._adj3_d,
+            edge_samples_d,
+            cuda_random_state,
+        )
+
+        # Define the thread and block dimensions
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge),TPB = (TPB, TPB))
+        cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
+
+        self.spatial_random_walk[blockspergrid,threadsperblock](
+            n_samples_edge,
+            walk_length,
+            self._node_spatial_list_d,
+            self._adj_dense_d,
+            self._adj_dense_index_d,
+            walks_d,
+            walks_edges_d,
+            cuda_random_state,
+            cumsum_d,
+            weights_d
+        )
+
+        self.cuda.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge, walk_length-1),TPB = (TPB, TPB, TPB))
+        cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
+
+        self.attr_sampler[blockspergrid,threadsperblock](
+            n_samples_edge,
+            walk_length,
+            walks_edges_d,
+            self._adj_d,
+            self._adj3_d,
+            walks_nodes_weights_d,
+            walks_nodes_d,
+            cuda_random_state
+        )
+
+        self.cuda.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge),TPB = (TPB, TPB))
+        self.attr_source_postprocess[blockspergrid,threadsperblock](
+            n_samples_edge,
+            walks_nodes_d,
+            source_counts_d
+        )
+
+        self.cuda.synchronize()
+
+        if testing:
+            return edge_samples_d, walks_d, walks_edges_d, walks_nodes_d, walks_nodes_weights_d, source_counts_d
+        else:
+            return edge_samples_d, walks_nodes_d, walks_nodes_weights_d, source_counts_d
+
+    def _calculate_members_gpu(self,TPB):
+        
+        # iteration constants
+        communities_d = self.cuda.to_device(self._distinct_communities)
+        membership_d = self.cuda.to_device(list((self._communities_dict.values())))
+
+        # iteration values
+        membership_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.int8)
+        membership_pairs_d = self.cuda.to_device(membership_pairs_h)
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_communities, self.n_communities, self.n_nodes),TPB = (TPB, TPB, TPB))
+        self.set_membership[blockspergrid,threadsperblock](
+            communities_d,
+            membership_d,
+            membership_pairs_d,
+        )
+
+        self.cuda.synchronize()
+
+        return membership_pairs_d
+
     def greedy_optimize_stochastic(
             self,
             weights: Optional[Tuple[float,float]]=(0.5,0.5),
@@ -794,7 +982,7 @@ class AllianceBuilder():
             n_samples_edge: Optional[int] = 100,
             walk_length: Optional[int] = 10,
             threads_per_block: Optional[Union[int,Tuple[int,int,int]]] = 8,
-            testing: Optional[bool] = False
+            testing_opt: Optional[bool] = False
         ) -> Tuple[Dict[int,int], float]:
 
         def multiobjective(f1: Union[float,np.ndarray], f2: Union[float,np.ndarray], weights: Optional[Tuple[float,float]]=(0.5,0.5)):
@@ -824,94 +1012,17 @@ class AllianceBuilder():
 
                 TPB = threads_per_block
 
-                # iteration constants
-                communities_d = self.cuda.to_device(self._distinct_communities)
-                membership_d = self.cuda.to_device(list((self._communities_dict.values())))
+                if testing_opt:
+                    hhi_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_unique_edges), dtype=np.float32)
+                    weights_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.float32)
 
-                # iteration values
-                membership_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.int8)
-                membership_pairs_d = self.cuda.to_device(membership_pairs_h)
+                membership_pairs_d = self._calculate_members_gpu(TPB)
 
-                nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge, walk_length-1),TPB = (TPB, TPB, TPB))
-                self.set_membership[blockspergrid,threadsperblock](
-                    communities_d,
-                    membership_d,
-                    membership_pairs_d,
-                )
-
-                self.cuda.synchronize()
-
-                #################################
-                # perform random walks
-                edge_samples_d = self.cuda.device_array((self.n_unique_edges,n_samples_edge), dtype=np.int32)
-
-                walks_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length), dtype=np.int32)
-                walks_edges_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.int32)
-
-                walks_nodes_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.int32)
-                walks_nodes_weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,walk_length-1), dtype=np.float32)
-
-                source_counts_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
-                source_counts_d = self.cuda.to_device(source_counts_h)
-
-                cumsum_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
-                weights_d = self.cuda.device_array((self.n_nodes_spatial,n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
-                
-                # Define the thread and block dimensions
-                nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
-                cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
-
-                self.edge_sampler[blockspergrid,threadsperblock](
-                    n_samples_edge,
-                    self.n_unique_edges,
-                    self._adj3_d,
-                    edge_samples_d,
-                    cuda_random_state,
-                )
-
-                # Define the thread and block dimensions
-                nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge),TPB = (TPB, TPB))
-                cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
-
-                self.spatial_random_walk[blockspergrid,threadsperblock](
+                edge_samples_d, walks_nodes_d, walks_nodes_weights_d, source_counts_d = self._randomwalk_gpu(
                     n_samples_edge,
                     walk_length,
-                    self._node_spatial_list_d,
-                    self._adj_dense_d,
-                    self._adj_dense_index_d,
-                    walks_d,
-                    walks_edges_d,
-                    cuda_random_state,
-                    cumsum_d,
-                    weights_d
+                    TPB
                 )
-
-                self.cuda.synchronize()
-
-                nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge, walk_length-1),TPB = (TPB, TPB, TPB))
-                cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
-
-                self.attr_sampler[blockspergrid,threadsperblock](
-                    n_samples_edge,
-                    walk_length,
-                    walks_edges_d,
-                    self._adj_d,
-                    self._adj3_d,
-                    walks_nodes_weights_d,
-                    walks_nodes_d,
-                    cuda_random_state
-                )
-
-                self.cuda.synchronize()
-
-                nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, n_samples_edge),TPB = (TPB, TPB))
-                self.attr_source_postprocess[blockspergrid,threadsperblock](
-                    n_samples_edge,
-                    walks_nodes_d,
-                    source_counts_d
-                )
-
-                self.cuda.synchronize()
 
                 num_total_batches = self.n_communities * self.n_communities
                 with tqdm(total=num_total_batches, desc="merges processed") as pbar_inner:
@@ -920,86 +1031,38 @@ class AllianceBuilder():
                         community_i = batch_index // self.n_communities
                         community_j = batch_index % self.n_communities
 
-                        #################################
-                        # merge values
-                        edge_counts_h = np.zeros((self.n_unique_edges,self.n_communities), dtype=np.int32)
-                        edge_counts_d = self.cuda.to_device(edge_counts_h)
+                        if community_i != community_j:
 
-                        cum_weight_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
-                        cum_weight_d = self.cuda.to_device(cum_weight_h)
-                        source_counts_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
-                        source_counts_d = self.cuda.to_device(source_counts_h)
+                            hhi_estimate, mai_estimate, log_mai = self._stochastic_eval_gpu(
+                                community_i, 
+                                community_j, 
+                                edge_samples_d,
+                                walks_nodes_weights_d,
+                                walks_nodes_d,
+                                source_counts_d,
+                                membership_pairs_d,
+                                n_samples_edge,
+                                walk_length,
+                                TPB
+                            )
 
+                            f1 = -np.mean(hhi_estimate) * 100
+                            f2 = np.mean(log_mai)
+                            f_new = multiobjective(f1,f2,weights=weights)
 
-                        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
+                            # Calculate the increase in mean HHI
+                            increase = f_new - f
 
-                        self.edge_postprocess[blockspergrid,threadsperblock](
-                            community_i,
-                            community_j,
-                            n_samples_edge,
-                            self.n_unique_edges,
-                            edge_samples_d,
-                            edge_counts_d,
-                            membership_pairs_d
-                        )
+                            # If this pair gives a better increase, update max_increase and best_pair
+                            if increase > max_increase:
+                                max_increase = increase
+                                best_pair = (community_i, community_j)
 
-                        self.cuda.synchronize()
+                            if testing_opt:
+                                hhi_pairs_h[community_i,community_j,:] = hhi_estimate
+                                weights_pairs_h[community_i,community_j,:] = mai_estimate
 
-                        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
-
-                        self.attr_postprocess[blockspergrid,threadsperblock](
-                            community_i,
-                            community_j,
-                            n_samples_edge,
-                            walk_length,
-                            walks_nodes_weights_d,
-                            walks_nodes_d,
-                            source_counts_d,
-                            cum_weight_d,
-                            membership_pairs_d,
-                        )
-
-                        self.cuda.synchronize()
-
-                        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge),TPB = (TPB, TPB))
-
-                        self.elementwise_divide[blockspergrid,threadsperblock](
-                            cum_weight_d,
-                            source_counts_d
-                        )
-
-                        self.cuda.synchronize()
-
-                        edge_samples_h = edge_samples_d.copy_to_host()
-
-                        walks_h = walks_d.copy_to_host()
-                        walks_edges_h = walks_edges_d.copy_to_host()
-
-                        walks_nodes_h = walks_nodes_d.copy_to_host()
-                        walks_nodes_weights_h = walks_nodes_weights_d.copy_to_host()
-
-                        edge_counts_h = edge_counts_d.copy_to_host() / n_samples_edge
-                        cum_weight_h = cum_weight_d.copy_to_host()
-
-                        hhi_estimate = edge_counts_h**2
-                        hhi_estimate = np.nansum(hhi_estimate,axis=1)
-
-                        mai_estimate = cum_weight_h
-                        mai_estimate = np.nansum(mai_estimate,axis=0)
-
-                        f1 = -np.mean(hhi_estimate) * 100
-                        f2 = np.mean(mai_estimate)
-                        f_new = multiobjective(f1,f2,weights=weights)
-
-                        # Calculate the increase in mean HHI
-                        increase = f_new - f
-
-                        # If this pair gives a better increase, update max_increase and best_pair
-                        if increase > max_increase:
-                            max_increase = increase
-                            best_pair = (community_i, community_j)
-
-                        pbar_inner.update(1)
+                            pbar_inner.update(1)
 
                 # If the maximum increase is greater than 0, merge these two communities and update the mean HHI
                 if max_increase > 0:
@@ -1015,10 +1078,11 @@ class AllianceBuilder():
                     self.f_history.append(f)
                     self.multi_history.append((f1,f2))
                 
+                n_iterations += 1
                 pbar_outer.update(1)
 
-        if testing:
-            return edge_samples_h, walks_h, walks_edges_h, walks_nodes_h, walks_nodes_weights_h, edge_counts_h, cum_weight_h
+        if testing_opt:
+            return membership_pairs_d.copy_to_host(), hhi_pairs_h, weights_pairs_h
 
     def _update_communities(self, community_to_merge, new_community, update_communities=True):
         # Find the nodes in the community to merge
@@ -1110,17 +1174,18 @@ class AllianceBuilder():
             self._airline_score[node] = airline_score[node]
 
     def __del__(self):
-        print("Destructor: Instance destroyed")
-        del self._adj_d
-        del self._adj_dense_d
-        del self._adj3_d
-        del self._adj_dense_index_
-        del self._edge_nodes_d
-        del self._edge_weights_d
-        del self._edges_neighbour_d
-        del self._edge_unique_index_d
-        del self._node_weight_individual
-        del self._market_shares_sparse_values_d
-        del self._market_shares_sparse_nodes_d
-        del self._node_spatial_list_d
-        del self._node_spatial_weights_d
+        if self.use_gpu:
+            print("Destructor: Instance destroyed")
+            del self._adj_d
+            del self._adj_dense_d
+            del self._adj3_d
+            del self._adj_dense_index_d
+            del self._edge_nodes_d
+            del self._edge_weights_d
+            del self._edges_neighbour_d
+            del self._edge_unique_index_d
+            del self._node_weight_individual
+            del self._market_shares_sparse_values_d
+            del self._market_shares_sparse_nodes_d
+            del self._node_spatial_list_d
+            del self._node_spatial_weights_d
