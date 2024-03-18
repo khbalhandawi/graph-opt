@@ -5,7 +5,7 @@ import numba
 import numpy as np
 from pandas import isna
 
-from ..utilities_cuda import replace_values, cuda, DeviceNDArray, float64, float32, \
+from ..utilities_cuda import replace_values, cuda, DeviceNDArray, float64, float32, int32, int16, \
     xoroshiro128p_uniform_float32, xoroshiro128p_uniform_float64, create_xoroshiro128p_states, \
     cumsum_d, searchsorted_d, cumsum_global_2d, searchsorted_global_2d,cumsum_global_3d, searchsorted_global_3d
 
@@ -27,16 +27,16 @@ def set_membership(
         score_pairs
     ):
 
-    # Compute flattened index inside the array  
-    x, y, z = cuda.grid(3)  
+    # Compute flattened index inside the array
+    x, y, z = cuda.grid(3)
 
-    # Compute the grid stride  
-    dx, dy, dz = cuda.gridsize(3)  
+    # Compute the grid stride
+    dx, dy, dz = cuda.gridsize(3)
 
     batch_size_i = end_idx_i - start_idx_i
     batch_size_j = end_idx_j - start_idx_j
 
-    # Grid stride loop  
+    # Grid stride loop
     for i in range(x, batch_size_i, dx):
         for j in range(y, batch_size_j, dy):
             for k in range(z, n_nodes, dz):
@@ -73,16 +73,16 @@ def calc_hhi(
         local_array,
     ):
 
-    # Compute flattened index inside the array  
-    x, y = cuda.grid(2)  
+    # Compute flattened index inside the array
+    x, y = cuda.grid(2)
 
-    # Compute the grid stride  
-    dx, dy = cuda.gridsize(2)  
+    # Compute the grid stride
+    dx, dy = cuda.gridsize(2)
 
     batch_size_i = end_idx_i - start_idx_i
     batch_size_j = end_idx_j - start_idx_j
 
-    # Grid stride loop  
+    # Grid stride loop
     for i in range(x, batch_size_i, dx):
         for j in range(y, batch_size_j, dy):
 
@@ -95,7 +95,7 @@ def calc_hhi(
             if community1 == community2:
                 for i_edge in range(n_edges):
                     hhi_pairs[i,j,i_edge] = edge_HHI[i_edge]
-            elif community1 < community2: 
+            elif community1 < community2:
                 for k in range(n_communities):
                     for i_m in range(n_edges):
                         local_array[i,j,i_m] = 0.0
@@ -123,17 +123,17 @@ def calc_ami(
         weights_pairs,
         score_pairs
     ):
-        
-    # Compute flattened index inside the array  
-    x, y, z = cuda.grid(3)  
 
-    # Compute the grid stride  
-    dx, dy, dz = cuda.gridsize(3)  
+    # Compute flattened index inside the array
+    x, y, z = cuda.grid(3)
+
+    # Compute the grid stride
+    dx, dy, dz = cuda.gridsize(3)
 
     batch_size_i = end_idx_i - start_idx_i
     batch_size_j = end_idx_j - start_idx_j
 
-    # Grid stride loop  
+    # Grid stride loop
     for i in range(x, batch_size_i, dx):
         for j in range(y, batch_size_j, dy):
             i_global = i + start_idx_i
@@ -165,11 +165,11 @@ def spatial_random_walk(
         cumsum:DeviceNDArray,
         weights:DeviceNDArray
     ):
-    # Compute flattened index inside the array  
-    x, y = cuda.grid(2)  
+    # Compute flattened index inside the array
+    x, y = cuda.grid(2)
 
-    # Compute the grid stride 
-    dx, dy = cuda.gridsize(2)  
+    # Compute the grid stride
+    dx, dy = cuda.gridsize(2)
 
     for i in range(x, n_nodes, dx):
         for j in range(y, n_samples, dy):
@@ -212,11 +212,11 @@ def attr_sampler(
         cumsum:DeviceNDArray,
         weights:DeviceNDArray
     ):
-    # Compute flattened index inside the array  
-    x, y, z = cuda.grid(3)  
+    # Compute flattened index inside the array
+    x, y, z = cuda.grid(3)
 
-    # Compute the grid stride 
-    dx, dy, dz = cuda.gridsize(3)  
+    # Compute the grid stride
+    dx, dy, dz = cuda.gridsize(3)
 
     for i in range(x, n_nodes_spatial, dx):
         for j in range(y, n_samples, dy):
@@ -247,13 +247,13 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             membership_pairs:DeviceNDArray,
         ):
 
-        # Compute flattened index inside the array  
-        x, y, z = cuda.grid(3)  
+        # Compute flattened index inside the array
+        x, y, z = cuda.grid(3)
 
-        # Compute the grid stride  
-        dx, dy, dz = cuda.gridsize(3)  
+        # Compute the grid stride
+        dx, dy, dz = cuda.gridsize(3)
 
-        # Grid stride loop  
+        # Grid stride loop
         for i in range(x, communities.shape[0], dx):
             for j in range(y, communities.shape[0], dy):
                 for k in range(z, n_nodes, dz):
@@ -281,11 +281,11 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             cumsum:DeviceNDArray,
             weights:DeviceNDArray
         ):
-        # Compute flattened index inside the array  
-        x, y = cuda.grid(2)  
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
 
-        # Compute the grid stride 
-        dx, dy = cuda.gridsize(2)  
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
 
         cumsum_init = cuda.local.array((n_nodes,),dtype=float32)
 
@@ -336,10 +336,10 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             cumsum:DeviceNDArray,
             weights:DeviceNDArray
         ):
-        # Compute flattened index inside the array  
+        # Compute flattened index inside the array
         x, y = cuda.grid(2)
 
-        # Compute the grid stride 
+        # Compute the grid stride
         dx, dy = cuda.gridsize(2)
 
         for i in range(x, n_nodes, dx):
@@ -381,11 +381,11 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             samples:DeviceNDArray,
             rng_states:DeviceNDArray,
         ):
-        # Compute flattened index inside the array  
-        x, y, z = cuda.grid(3)  
+        # Compute flattened index inside the array
+        x, y, z = cuda.grid(3)
 
-        # Compute the grid stride 
-        dx, dy, dz = cuda.gridsize(3)  
+        # Compute the grid stride
+        dx, dy, dz = cuda.gridsize(3)
 
         cumsum = cuda.local.array((n_nodes,),dtype=float32)
         weights = cuda.local.array((n_nodes,),dtype=float32)
@@ -418,10 +418,10 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             samples:DeviceNDArray,
             source_counts:DeviceNDArray
         ):
-        # Compute flattened index inside the array  
+        # Compute flattened index inside the array
         x, y = cuda.grid(2)
 
-        # Compute the grid stride 
+        # Compute the grid stride
         dx, dy = cuda.gridsize(2)
 
         for i in range(x, n_nodes_spatial, dx):
@@ -439,12 +439,12 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             samples:DeviceNDArray,
             rng_states:DeviceNDArray,
         ):
-        
-        # Compute flattened index inside the array  
-        x, y = cuda.grid(2)  
 
-        # Compute the grid stride 
-        dx, dy = cuda.gridsize(2)  
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
 
         cumsum = cuda.local.array((n_nodes,),dtype=float32)
         weights = cuda.local.array((n_nodes,),dtype=float32)
@@ -463,6 +463,22 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
                     chosen = searchsorted_d(cumsum,threshold)
 
                     samples[i,j] = chosen
+
+    @cuda.jit
+    def init_edge_counts(
+            n_bins,
+            n_unique_edges,
+            counts:DeviceNDArray,
+        ):
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_bins, dy):
+                counts[i,j] = 0
 
     @cuda.jit
     def edge_postprocess(
@@ -488,6 +504,118 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
                 cuda.atomic.add(counts[i], item, 1)  # Pass the array and index separately
 
     @cuda.jit
+    def load_counts(
+            ci,
+            cj,
+            n_bins,
+            n_samples,
+            n_unique_edges,
+            samples:DeviceNDArray,
+            counts:DeviceNDArray,
+            membership:DeviceNDArray,
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_samples, dy):
+                for k in range(n_bins):
+                    counts[i][j][k] = 0
+
+        cuda.syncthreads()
+
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_samples, dy):
+                item = membership[ci, cj, samples[i, j]]
+                counts[i][j][item] += 1
+
+    @cuda.jit
+    def edge_histogram(
+            n_bins,
+            n_samples,
+            n_unique_edges,
+            counts:DeviceNDArray,
+            output:DeviceNDArray
+        ):
+        # Assuming max_value is the maximum value that 'item' can take
+        shared_counts = cuda.shared.array(shape=(4, 4, n_nodes), dtype=int16)
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        # Initialize shared memory
+        tx = cuda.threadIdx.x
+        ty = cuda.threadIdx.y
+        Mx = cuda.blockDim.x
+        My = cuda.blockDim.y
+
+        for k in range(n_bins):
+            shared_counts[tx][ty][k] = 0
+
+        cuda.syncthreads()
+
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_samples, dy):
+
+                for k in range(n_bins):
+                    shared_counts[tx][ty][k] = counts[i][j][k]
+
+                cuda.syncthreads()
+
+                # Reduction in shared memory
+                stride = 1
+                while stride < My:
+                    if ty % (2*stride) == 0:
+                        for k in range(n_bins):
+                            shared_counts[tx][ty][k] += shared_counts[tx][ty+stride][k]
+                    stride *= 2
+                    cuda.syncthreads()
+
+                # Write result to global memory
+                if cuda.threadIdx.y == 0:
+                    for k in range(n_bins):
+                        output[i][cuda.blockIdx.y][k] = shared_counts[tx][0][k]
+
+    @cuda.jit
+    def copy_reduced_counts(
+            n_communities,
+            n_unique_edges,
+            counts:DeviceNDArray,
+            output:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_communities, dy):
+                output[i][j] = counts[i][0][j]
+
+    @cuda.jit
+    def init_attr(
+            cum_weight:DeviceNDArray,
+        ):
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        for i in range(x, n_nodes_spatial, dx):
+            for j in range(y, n_nodes, dy):
+                cum_weight[i,j] = 0
+
+    @cuda.jit
     def attr_postprocess(
             ci,
             cj,
@@ -499,15 +627,15 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             cum_weight:DeviceNDArray,
             membership:DeviceNDArray,
         ):
-        # Compute flattened index inside the array  
-        x, y = cuda.grid(2)  
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
 
-        # Compute the grid stride 
-        dx, dy = cuda.gridsize(2)  
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
 
         for i in range(x, n_nodes_spatial, dx):
             for j in range(y, n_samples, dy):
-                
+
                 source_node = samples[i,j,0]
                 if not math.isnan(source_node) and source_node >= 0:
                     source_c = membership[ci,cj,source_node]
@@ -529,4 +657,6 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
                             break
 
     return set_membership, spatial_random_walk, weighted_spatial_random_walk, \
-        attr_sampler, attr_source_postprocess, edge_sampler, edge_postprocess, attr_postprocess
+        attr_sampler, attr_source_postprocess, edge_sampler, \
+        init_edge_counts, edge_postprocess, load_counts, edge_histogram, copy_reduced_counts, \
+        init_attr, attr_postprocess

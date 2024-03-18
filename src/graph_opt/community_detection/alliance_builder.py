@@ -167,7 +167,9 @@ class AllianceBuilder():
 
             self.set_membership, self.spatial_random_walk, self.weighted_spatial_random_walk, \
                 self.attr_sampler, self.attr_source_postprocess, self.edge_sampler, \
-                self.edge_postprocess, self.attr_postprocess = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial)
+                self.init_edge_counts, self.edge_postprocess, \
+                self.load_counts, self.edge_histogram, self.copy_reduced_counts, \
+                self.init_attr, self.attr_postprocess = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial)
 
         else:
             self.cuda = None
@@ -803,11 +805,20 @@ class AllianceBuilder():
 
         #################################
         # merge values
-        edge_counts_h = np.zeros((self.n_unique_edges,self.n_communities), dtype=np.int32)
-        edge_counts_d = self.cuda.to_device(edge_counts_h,stream=stream)
 
-        cum_weight_h = np.zeros((self.n_nodes_spatial,self.n_nodes), dtype=np.int32)
-        cum_weight_d = self.cuda.to_device(cum_weight_h,stream=stream)
+        # edge_counts_d = self.cuda.device_array((self.n_unique_edges,n_samples_edge,self.n_communities), dtype=np.int16, stream=stream)
+        reduced_counts_d = self.cuda.device_array((self.n_unique_edges,self.n_communities), dtype=np.int32, stream=stream)
+        cum_weight_d = self.cuda.device_array((self.n_nodes_spatial,self.n_nodes), dtype=np.float32, stream=stream)
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_communities), TPB = TPB)
+
+        self.init_edge_counts[blockspergrid,threadsperblock,stream](
+            self.n_communities,
+            self.n_unique_edges,
+            reduced_counts_d,
+        )
+
+        stream.synchronize()
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
 
@@ -817,9 +828,67 @@ class AllianceBuilder():
             n_samples_edge,
             self.n_unique_edges,
             edge_samples_d,
-            edge_counts_d,
+            reduced_counts_d,
             membership_pairs_d
         )
+
+        # nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
+
+        # self.load_counts[blockspergrid,threadsperblock,stream](
+        #     community_i,
+        #     community_j,
+        #     self.n_communities,
+        #     n_samples_edge,
+        #     self.n_unique_edges,
+        #     edge_samples_d,
+        #     edge_counts_d,
+        #     membership_pairs_d
+        # )
+
+        # stream.synchronize()
+
+        # # Kernel launch  
+        # self.edge_histogram[blockspergrid,threadsperblock,stream](
+        #     self.n_communities,
+        #     n_samples_edge,
+        #     self.n_unique_edges,
+        #     edge_counts_d,
+        #     edge_counts_d
+        # )
+        
+        # # Reduction part
+        # while blockspergrid[1] > 1:  
+        #     n_samples_edge_r = blockspergrid[1]
+        #     blockspergrid = list(blockspergrid)
+        #     blockspergrid[1] = math.ceil(blockspergrid[1] / threadsperblock[1])
+        #     blockspergrid = tuple(blockspergrid)
+
+        #     # Kernel launch  
+        #     self.edge_histogram[blockspergrid,threadsperblock,stream](
+        #         self.n_communities,
+        #         n_samples_edge_r,
+        #         self.n_unique_edges,
+        #         edge_counts_d,
+        #         edge_counts_d
+        #     )
+
+        # stream.synchronize()
+
+        # # Transfer the first row of the matrix to the vector  
+        # nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_communities), TPB = TPB)
+
+        # self.copy_reduced_counts[blockspergrid,threadsperblock,stream](
+        #     self.n_communities,
+        #     self.n_unique_edges,
+        #     edge_counts_d,
+        #     reduced_counts_d
+        # )
+
+        # stream.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_nodes), TPB = TPB)
+
+        self.init_attr[blockspergrid,threadsperblock,stream](cum_weight_d,)
 
         stream.synchronize()
 
@@ -853,7 +922,7 @@ class AllianceBuilder():
         walks_nodes_h = walks_nodes_d.copy_to_host()
         walks_nodes_weights_h = walks_nodes_weights_d.copy_to_host()
 
-        edge_counts_h = edge_counts_d.copy_to_host() / n_samples_edge
+        edge_counts_h = reduced_counts_d.copy_to_host() / n_samples_edge
         cum_weight_h = cum_weight_d.copy_to_host()
 
         hhi_estimate = edge_counts_h**2
@@ -961,8 +1030,7 @@ class AllianceBuilder():
         membership_d = self.cuda.to_device(list((self._communities_dict.values())))
 
         # iteration values
-        membership_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_nodes), dtype=np.int8)
-        membership_pairs_d = self.cuda.to_device(membership_pairs_h)
+        membership_pairs_d = self.cuda.device_array((self.n_communities, self.n_communities, self.n_nodes), dtype=np.int16)
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_communities, self.n_communities, self.n_nodes), TPB = TPB)
         self.set_membership[blockspergrid,threadsperblock](

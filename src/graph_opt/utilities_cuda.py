@@ -4,7 +4,7 @@
 # Adopted from stellargraph
 
 import os
-from numba import cuda, errors, config, float64, float32
+from numba import cuda, errors, config, float64, float32, int32, int16
 from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32, xoroshiro128p_uniform_float64
 
 if os.environ.get('NUMBA_ENABLE_CUDASIM','0') == '1':
