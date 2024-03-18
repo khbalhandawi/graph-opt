@@ -42,7 +42,7 @@ class AllianceBuilder():
             MG: MultiDiGraph,
             communities_dict: Dict[str,List[str]] = None,
             seed: int = None,
-            use_gpu: Optional[bool] = False
+            use_gpu: Optional[bool] = False,
         ) -> None:
 
         self._communities_dict = {}
@@ -132,52 +132,7 @@ class AllianceBuilder():
         self._market_shares_sparse_values = np.array(self._market_shares_sparse_values, dtype=np.float32)
         self._market_shares_sparse_nodes = np.array(self._market_shares_sparse_nodes, dtype=np.int32)
 
-        if self.use_gpu:
-            from .utilities_cuda import cuda, set_membership, calc_ami, calc_hhi, \
-                create_xoroshiro128p_states, define_cuda_kernels
-            
-            from ..utilities_cuda import elementwise_divide
-
-            self.cuda = cuda
-            # self.DeviceNDArray = DeviceNDArray
-            self.set_batch_membership: Callable = set_membership
-            self.calc_ami: Callable = calc_ami
-            self.calc_hhi: Callable = calc_hhi
-            self.create_xoroshiro128p_states: Callable = create_xoroshiro128p_states
-            self.elementwise_divide: Callable = elementwise_divide
-
-            # move constants to memory
-            self._adj_d = self.cuda.to_device(self._adj)
-            self._adj_dense_d = self.cuda.to_device(self._adj_dense)
-            self._adj3_d = self.cuda.to_device(self._adj3)
-            self._adj_dense_index_d = self.cuda.to_device(self._adj_dense_index)
-            self._edge_nodes_d = self.cuda.to_device(self._edge_nodes)
-            self._edge_weights_d = self.cuda.to_device(self._edge_weights)
-            self._edges_neighbour_d = self.cuda.to_device(self._edges_neighbour)
-            self._edge_unique_index_d = self.cuda.to_device(self._edge_unique_index)
-            self._node_weight_individual = np.array(list(self._weights_individual_dict.values()),dtype=np.float32)
-            self._market_shares_sparse_values_d = self.cuda.to_device(self._market_shares_sparse_values)
-            self._market_shares_sparse_nodes_d = self.cuda.to_device(self._market_shares_sparse_nodes)
-            
-            node_spatial_list = np.array(list(self.node_spatial_list),np.int32)
-            node_spatial_weights = np.array(list(self.node_spatial_weights),np.float32)
-
-            self._node_spatial_list_d = self.cuda.to_device(node_spatial_list)
-            self._node_spatial_weights_d = self.cuda.to_device(node_spatial_weights)
-
-            self.set_membership, self.spatial_random_walk, self.weighted_spatial_random_walk, \
-                self.attr_sampler, self.attr_source_postprocess, self.edge_sampler, \
-                self.init_edge_counts, self.edge_postprocess, \
-                self.load_counts, self.edge_histogram, self.copy_reduced_counts, \
-                self.init_attr, self.attr_postprocess = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial)
-
-        else:
-            self.cuda = None
-            self.merge_score_kernel: Callable = None
-
-            self._adj_d = None
-            self._edge_nodes_d = None
-            self._edge_weights_d = None
+        self.cuda = None
 
     @property
     def communities_dict(self)->Dict[str,int]:
@@ -749,6 +704,53 @@ class AllianceBuilder():
         """
         pass
     
+    def init_gpu(
+            self,
+            tile_size: Optional[int] = 42, 
+            block_size: Optional[int] = 24
+        ):
+
+        assert self.use_gpu, "error: use_gpu flag set to False"
+
+        from .utilities_cuda import cuda, set_membership, calc_ami, calc_hhi, \
+            create_xoroshiro128p_states, define_cuda_kernels
+        
+        from ..utilities_cuda import elementwise_divide
+
+        self.cuda = cuda
+        # self.DeviceNDArray = DeviceNDArray
+        self.set_batch_membership: Callable = set_membership
+        self.calc_ami: Callable = calc_ami
+        self.calc_hhi: Callable = calc_hhi
+        self.create_xoroshiro128p_states: Callable = create_xoroshiro128p_states
+        self.elementwise_divide: Callable = elementwise_divide
+
+        # move constants to memory
+        self._adj_d = self.cuda.to_device(self._adj)
+        self._adj_dense_d = self.cuda.to_device(self._adj_dense)
+        self._adj3_d = self.cuda.to_device(self._adj3)
+        self._adj_dense_index_d = self.cuda.to_device(self._adj_dense_index)
+        self._edge_nodes_d = self.cuda.to_device(self._edge_nodes)
+        self._edge_weights_d = self.cuda.to_device(self._edge_weights)
+        self._edges_neighbour_d = self.cuda.to_device(self._edges_neighbour)
+        self._edge_unique_index_d = self.cuda.to_device(self._edge_unique_index)
+        self._node_weight_individual = np.array(list(self._weights_individual_dict.values()),dtype=np.float32)
+        self._market_shares_sparse_values_d = self.cuda.to_device(self._market_shares_sparse_values)
+        self._market_shares_sparse_nodes_d = self.cuda.to_device(self._market_shares_sparse_nodes)
+        
+        node_spatial_list = np.array(list(self.node_spatial_list),np.int32)
+        node_spatial_weights = np.array(list(self.node_spatial_weights),np.float32)
+
+        self._node_spatial_list_d = self.cuda.to_device(node_spatial_list)
+        self._node_spatial_weights_d = self.cuda.to_device(node_spatial_weights)
+
+
+        self.set_membership, self.spatial_random_walk, self.weighted_spatial_random_walk, \
+            self.attr_sampler, self.attr_source_postprocess, self.edge_sampler, \
+            self.init_edge_counts, self.edge_postprocess, \
+            self.load_counts, self.edge_histogram, self.copy_reduced_counts, \
+            self.init_attr, self.attr_postprocess = define_cuda_kernels(self.n_nodes,self.n_nodes_spatial, tile_size, block_size)
+
     def weighted_sampling(
             self,
             n_samples_source_node: Optional[int] = 20,
@@ -800,91 +802,97 @@ class AllianceBuilder():
             walk_length,
             TPB,
             stream,
-            testing = False
+            testing = False,
+            parallel_reduce = False
         ):
 
         #################################
         # merge values
 
-        # edge_counts_d = self.cuda.device_array((self.n_unique_edges,n_samples_edge,self.n_communities), dtype=np.int16, stream=stream)
         reduced_counts_d = self.cuda.device_array((self.n_unique_edges,self.n_communities), dtype=np.int32, stream=stream)
         cum_weight_d = self.cuda.device_array((self.n_nodes_spatial,self.n_nodes), dtype=np.float32, stream=stream)
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_communities), TPB = TPB)
+        if parallel_reduce:
 
-        self.init_edge_counts[blockspergrid,threadsperblock,stream](
-            self.n_communities,
-            self.n_unique_edges,
-            reduced_counts_d,
-        )
+            edge_counts_d = self.cuda.device_array((self.n_unique_edges,n_samples_edge,self.n_communities), dtype=np.int16, stream=stream)
 
-        stream.synchronize()
+            nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
+            self.load_counts[blockspergrid,threadsperblock,stream](
+                community_i,
+                community_j,
+                self.n_communities,
+                n_samples_edge,
+                self.n_unique_edges,
+                edge_samples_d,
+                edge_counts_d,
+                membership_pairs_d
+            )
 
-        self.edge_postprocess[blockspergrid,threadsperblock,stream](
-            community_i,
-            community_j,
-            n_samples_edge,
-            self.n_unique_edges,
-            edge_samples_d,
-            reduced_counts_d,
-            membership_pairs_d
-        )
+            stream.synchronize()
 
-        # nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
+            # Kernel launch  
+            self.edge_histogram[blockspergrid,threadsperblock,stream](
+                self.n_communities,
+                n_samples_edge,
+                self.n_unique_edges,
+                edge_counts_d,
+                edge_counts_d
+            )
+            
+            # Reduction part
+            while blockspergrid[1] > 1:  
+                n_samples_edge_r = blockspergrid[1]
+                blockspergrid = list(blockspergrid)
+                blockspergrid[1] = math.ceil(blockspergrid[1] / threadsperblock[1])
+                blockspergrid = tuple(blockspergrid)
 
-        # self.load_counts[blockspergrid,threadsperblock,stream](
-        #     community_i,
-        #     community_j,
-        #     self.n_communities,
-        #     n_samples_edge,
-        #     self.n_unique_edges,
-        #     edge_samples_d,
-        #     edge_counts_d,
-        #     membership_pairs_d
-        # )
+                # Kernel launch  
+                self.edge_histogram[blockspergrid,threadsperblock,stream](
+                    self.n_communities,
+                    n_samples_edge_r,
+                    self.n_unique_edges,
+                    edge_counts_d,
+                    edge_counts_d
+                )
 
-        # stream.synchronize()
+            stream.synchronize()
 
-        # # Kernel launch  
-        # self.edge_histogram[blockspergrid,threadsperblock,stream](
-        #     self.n_communities,
-        #     n_samples_edge,
-        #     self.n_unique_edges,
-        #     edge_counts_d,
-        #     edge_counts_d
-        # )
-        
-        # # Reduction part
-        # while blockspergrid[1] > 1:  
-        #     n_samples_edge_r = blockspergrid[1]
-        #     blockspergrid = list(blockspergrid)
-        #     blockspergrid[1] = math.ceil(blockspergrid[1] / threadsperblock[1])
-        #     blockspergrid = tuple(blockspergrid)
+            # Transfer the first row of the matrix to the vector  
+            nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_communities), TPB = TPB)
 
-        #     # Kernel launch  
-        #     self.edge_histogram[blockspergrid,threadsperblock,stream](
-        #         self.n_communities,
-        #         n_samples_edge_r,
-        #         self.n_unique_edges,
-        #         edge_counts_d,
-        #         edge_counts_d
-        #     )
+            self.copy_reduced_counts[blockspergrid,threadsperblock,stream](
+                self.n_communities,
+                self.n_unique_edges,
+                edge_counts_d,
+                reduced_counts_d
+            )
 
-        # stream.synchronize()
+            stream.synchronize()
 
-        # # Transfer the first row of the matrix to the vector  
-        # nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_communities), TPB = TPB)
+        else:
 
-        # self.copy_reduced_counts[blockspergrid,threadsperblock,stream](
-        #     self.n_communities,
-        #     self.n_unique_edges,
-        #     edge_counts_d,
-        #     reduced_counts_d
-        # )
+            nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_communities), TPB = TPB)
 
-        # stream.synchronize()
+            self.init_edge_counts[blockspergrid,threadsperblock,stream](
+                self.n_communities,
+                self.n_unique_edges,
+                reduced_counts_d,
+            )
+
+            stream.synchronize()
+
+            nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, n_samples_edge), TPB = TPB)
+
+            self.edge_postprocess[blockspergrid,threadsperblock,stream](
+                community_i,
+                community_j,
+                n_samples_edge,
+                self.n_unique_edges,
+                edge_samples_d,
+                reduced_counts_d,
+                membership_pairs_d
+            )
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_nodes), TPB = TPB)
 
@@ -1056,7 +1064,8 @@ class AllianceBuilder():
             walk_length, 
             TPB_2D, 
             weights, 
-            f
+            f,
+            parallel_reduce
         ):
 
         community_i = batch_index // self.n_communities
@@ -1077,7 +1086,8 @@ class AllianceBuilder():
                 n_samples_edge,
                 walk_length,
                 stream=stream,
-                TPB=TPB_2D
+                TPB=TPB_2D,
+                parallel_reduce = parallel_reduce
             )
 
             f1 = -np.mean(hhi_estimate) * 100
@@ -1099,7 +1109,8 @@ class AllianceBuilder():
             threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 24,
             threads_per_block_3D: Optional[Union[int,Tuple[int,int,int]]] = 8,
             num_streams: Optional[int] = 1,
-            testing_opt: Optional[bool] = False
+            testing_opt: Optional[bool] = False,
+            parallel_reduce: Optional[bool] = False
         ) -> Tuple[Dict[int,int], float]:
 
         # Calculate the initial mean HHI over all routes
@@ -1161,7 +1172,8 @@ class AllianceBuilder():
                             walk_length, 
                             TPB_2D, 
                             weights, 
-                            f
+                            f,
+                            parallel_reduce
                         )
                         futures.append(future)
 

@@ -238,7 +238,12 @@ def attr_sampler(
 
                     samples[i,j,k] = chosen
 
-def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Callable, Callable, Callable]:
+def define_cuda_kernels(
+        n_nodes:int,
+        n_nodes_spatial:int,
+        tile_size:int,
+        max_size:int
+    ) -> Tuple[Callable, Callable, Callable, Callable]:
 
     @cuda.jit
     def set_membership(
@@ -490,12 +495,12 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             counts:DeviceNDArray,
             membership:DeviceNDArray,
         ):
-        
-        # Compute flattened index inside the array  
-        x, y = cuda.grid(2)  
 
-        # Compute the grid stride 
-        dx, dy = cuda.gridsize(2)  
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
 
         for i in range(x, n_unique_edges, dx):
             for j in range(y, n_samples, dy):
@@ -541,47 +546,42 @@ def define_cuda_kernels(n_nodes:int,n_nodes_spatial:int) -> Tuple[Callable, Call
             counts:DeviceNDArray,
             output:DeviceNDArray
         ):
-        # Assuming max_value is the maximum value that 'item' can take
-        shared_counts = cuda.shared.array(shape=(4, 4, n_nodes), dtype=int16)
+        # Size of shared_counts is now determined by tile_size
+        shared_counts = cuda.shared.array(shape=(max_size, max_size, tile_size), dtype=int16)
 
-        # Compute flattened index inside the array
         x, y = cuda.grid(2)
-
-        # Compute the grid stride
         dx, dy = cuda.gridsize(2)
 
-        # Initialize shared memory
         tx = cuda.threadIdx.x
         ty = cuda.threadIdx.y
-        Mx = cuda.blockDim.x
-        My = cuda.blockDim.y
 
-        for k in range(n_bins):
-            shared_counts[tx][ty][k] = 0
+        for tile_start in range(0, n_bins, tile_size):  # loop over tiles
+            # Initialize shared memory for this tile
+            for k in range(tile_size):
+                shared_counts[tx][ty][k] = 0
 
-        cuda.syncthreads()
+            cuda.syncthreads()
 
-        for i in range(x, n_unique_edges, dx):
-            for j in range(y, n_samples, dy):
+            for i in range(x, n_unique_edges, dx):
+                for j in range(y, n_samples, dy):
+                    for k in range(tile_size):
+                        if tile_start + k < n_bins:  # check we're not out of bounds
+                            shared_counts[tx][ty][k] = counts[i][j][tile_start + k]
 
-                for k in range(n_bins):
-                    shared_counts[tx][ty][k] = counts[i][j][k]
-
-                cuda.syncthreads()
-
-                # Reduction in shared memory
-                stride = 1
-                while stride < My:
-                    if ty % (2*stride) == 0:
-                        for k in range(n_bins):
-                            shared_counts[tx][ty][k] += shared_counts[tx][ty+stride][k]
-                    stride *= 2
                     cuda.syncthreads()
 
-                # Write result to global memory
-                if cuda.threadIdx.y == 0:
-                    for k in range(n_bins):
-                        output[i][cuda.blockIdx.y][k] = shared_counts[tx][0][k]
+                    stride = 1
+                    while stride < max_size:
+                        if ty % (2*stride) == 0:
+                            for k in range(tile_size):
+                                shared_counts[tx][ty][k] += shared_counts[tx][ty+stride][k]
+                        stride *= 2
+                        cuda.syncthreads()
+
+                    if cuda.threadIdx.y == 0:
+                        for k in range(tile_size):
+                            if tile_start + k < n_bins:  # check we're not out of bounds
+                                output[i][cuda.blockIdx.y][tile_start + k] = shared_counts[tx][0][k]
 
     @cuda.jit
     def copy_reduced_counts(

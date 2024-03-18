@@ -742,6 +742,7 @@ class TestAllianceBuilder:
     threads_per_block=8
     n_samples_source_node = 50
     num_streams = 4
+    tile_size = 2
 
     @pytest.mark.dependency()
     def test_initialization(self,example_case):
@@ -787,6 +788,7 @@ class TestAllianceBuilder:
         MG, _, _, _, _, _ = example_case
 
         test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
+        test_class.init_gpu(tile_size=self.tile_size)
 
         return test_class
 
@@ -797,6 +799,8 @@ class TestAllianceBuilder:
         MG, _, _, _, _, _ = example_case
 
         test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
+        test_class.init_gpu(tile_size=self.tile_size)
+
         membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(
             max_iterations=1,
             num_streams=test_class.n_communities,
@@ -813,6 +817,7 @@ class TestAllianceBuilder:
         MG, _, _, _, _, _ = example_case
 
         test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
+        test_class.init_gpu(tile_size=self.tile_size)
 
         membership_pairs = test_class._calculate_members_gpu(TPB = self.threads_per_block)
 
@@ -1102,29 +1107,3 @@ class TestAllianceBuilder:
         
         assert np.allclose(test_class._adj3/100,edge_counts_h,rtol=1e-1)
         assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
-
-if __name__ == "__main__":
-    MG, nodes_airlines_dict, \
-    test_HHI, test_weights_dict, \
-    test_weights_individual_dict, \
-    init_communities_test = example_case
-
-    param = {
-        "weights": (1.0,0.0),
-        "test_communities_dict": {
-            'AT': 0,
-            'BT': 1,
-            'CT': 2,
-            'HT': 3,
-            'VT': 4
-        },
-        "n_samples": None
-    }
-
-    weights = param["weights"]
-    n_samples = param["n_samples"]
-    test_communities_dict = param["test_communities_dict"]
-
-    test_class = AllianceBuilder(MG,seed=seed, use_gpu=True)
-
-    test_class.greedy_optimize(weights=weights,n_samples=n_samples)
