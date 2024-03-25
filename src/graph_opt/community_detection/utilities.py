@@ -6,14 +6,14 @@ def resort_communities(community_dict: Dict[str,int]) -> Tuple[Dict[int,int], Di
     distinct_communities_set = set(community_dict.values())
     reordered_communities_list = list(range(len(distinct_communities_set)))
 
-    reordered_communities_key = dict(zip(sorted(distinct_communities_set),reordered_communities_list))
-    n_communities = len(reordered_communities_key)
+    orig2sorted = dict(zip(sorted(distinct_communities_set),reordered_communities_list))
+    n_communities = len(orig2sorted)
 
-    reordered_communities_dict = {key:reordered_communities_key[value] for key,value in community_dict.items()}
+    reordered_communities_dict = {key:orig2sorted[value] for key,value in community_dict.items()}
 
-    original_communities_key = dict(zip(reordered_communities_list,sorted(distinct_communities_set)))
+    sorted2orig = dict(zip(reordered_communities_list,sorted(distinct_communities_set)))
 
-    return original_communities_key, reordered_communities_dict, reordered_communities_list, n_communities
+    return sorted2orig, reordered_communities_dict, reordered_communities_list, n_communities
 
 def same_community(dict1: Dict[str,int], dict2: Dict[str,int]) -> bool:
     # Create a mapping from dict1 values to dict2 values

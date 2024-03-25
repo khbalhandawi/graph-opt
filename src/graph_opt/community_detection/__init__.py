@@ -1,1 +1,1 @@
-from .alliance_builder import AllianceBuilder
+from .alliance_builder import DeterministicCommunity, StochasticCommunity

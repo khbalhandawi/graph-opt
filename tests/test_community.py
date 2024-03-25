@@ -5,10 +5,9 @@ import pytest
 import os
 
 from sklearn.covariance import log_likelihood
-from ..community_detection.alliance_builder import AllianceBuilder
+from ..community_detection.alliance_builder import DeterministicCommunity, StochasticCommunity
 from ..community_detection.utilities import resort_communities, same_community
 from ..utilities import cuda_blocks
-# from ..utilities_cpu import searchsorted, cumsum
 
 import numpy as np
 import networkx as nx
@@ -20,40 +19,40 @@ from typing import Optional, Tuple, Dict
 
 seed = 1234
 
-def get_conditional_prob(test_class: AllianceBuilder):
+def get_conditional_prob(test_class: StochasticCommunity):
 
-    cond_prob_node_edge = np.zeros((test_class.n_unique_edges,test_class.n_nodes))
+    cond_prob_attr_edge = np.zeros((test_class.n_unique_edges,test_class.n_attr))
     for i, (u,v) in enumerate(test_class.edge_unique_list):
 
-        for j,node in enumerate(test_class.node_list):
-            cond_prob_node_edge[i,j] = test_class._cond_probs_nodes[(u,v)].get(node,0.0)/100
+        for j,attr in enumerate(test_class.attr_list):
+            cond_prob_attr_edge[i,j] = test_class._cond_probs_attr[(u,v)].get(attr,0.0)/100
 
-    return cond_prob_node_edge
+    return cond_prob_attr_edge
 
-def get_likelihood_prob(test_class: AllianceBuilder):
+def get_likelihood_prob(test_class: StochasticCommunity):
 
-    likelihood_edge_node = np.zeros((test_class.n_nodes,test_class.n_unique_edges))
-    for i,node in enumerate(test_class.node_list):
-        node_weight = test_class.node_key2w[node]
+    likelihood_edge_attr = np.zeros((test_class.n_attr,test_class.n_unique_edges))
+    for i,attr in enumerate(test_class.attr_list):
+        attr_weight = test_class.attr_key2w[attr]
 
-        for u,v,key in test_class.edge_node2keypair_list[node]:
+        for u,v,key in test_class.edge_attr2keypair_list[attr]:
             j = test_class.edge_pairkey2ui[(u,v,key)]
             edge_weight = test_class.edge_pairkey2atrr[(u,v,key)]["weight"]
-            likelihood_edge_node[i,j] += edge_weight / node_weight
+            likelihood_edge_attr[i,j] += edge_weight / attr_weight
 
-    return likelihood_edge_node
+    return likelihood_edge_attr
 
-def get_prior(test_class: AllianceBuilder):
+def get_prior(test_class: StochasticCommunity):
 
-    prior_node = np.zeros(test_class.n_nodes)
-    node_weights = list(test_class.node_key2w.values())
-    for i,node in enumerate(test_class.node_list):
-        node_weight = test_class.node_key2w[node]
-        prior_node[i] = node_weight / sum(node_weights)
+    prior_attr = np.zeros(test_class.n_attr)
+    attr_weights = list(test_class.attr_key2w.values())
+    for i,attr in enumerate(test_class.attr_list):
+        attr_weight = test_class.attr_key2w[attr]
+        prior_attr[i] = attr_weight / sum(attr_weights)
 
-    return prior_node
+    return prior_attr
 
-def get_marginal(test_class: AllianceBuilder):
+def get_marginal(test_class: StochasticCommunity):
 
     marginal_edge = np.zeros(test_class.n_unique_edges)
     edge_weights = list(test_class.edge_pair2w.values())
@@ -63,7 +62,7 @@ def get_marginal(test_class: AllianceBuilder):
 
     return marginal_edge
 
-def get_source_prob(test_class:AllianceBuilder):
+def get_source_prob(test_class:StochasticCommunity):
 
     source_p = np.array(list(test_class.node_spatial_key2w.values()),dtype=np.float64)
     total = source_p.sum()
@@ -71,7 +70,7 @@ def get_source_prob(test_class:AllianceBuilder):
 
     return source_p
 
-def get_edge_prob(test_class: AllianceBuilder):
+def get_edge_prob(test_class: StochasticCommunity):
 
     # get sampled edge probabilities (marginal)
     cond_edge_p = np.zeros((test_class.n_nodes_spatial,test_class.n_unique_edges))
@@ -96,10 +95,10 @@ def get_edge_prob(test_class: AllianceBuilder):
 
     return edge_p, cond_edge_p
 
-def get_node_bfs_probabilities(
-        test_class: AllianceBuilder,
+def get_attr_bfs_probabilities(
+        test_class: StochasticCommunity,
         source_u: str,
-        target_node: str,
+        target_attr: str,
         max_depth:Optional[int] = 3,
         current_depth:Optional[int]=1,
         current_prob:Optional[int]=1,
@@ -115,7 +114,7 @@ def get_node_bfs_probabilities(
 
     edges = test_class.edge_u2pairkey_list[source_u]
     total_weight = sum(test_class.edge_pairkey2atrr[edge]['weight'] for edge in edges)
-    target_community = test_class.communities_dict[target_node]
+    target_community = test_class.communities_dict[target_attr]
 
     for u, v, key in edges:
         curr_edge = (u, v, key)
@@ -128,7 +127,7 @@ def get_node_bfs_probabilities(
         previous_community = test_class.communities_dict.get(previous_edge_type,None)
 
         if current_depth == 1:
-            if edge_type == target_node:
+            if edge_type == target_attr:
                 new_prob = current_prob * edge_prob * edge_type_prob
             else:
                 new_prob = 0.0
@@ -140,10 +139,10 @@ def get_node_bfs_probabilities(
 
         probabilities[current_depth - 1] += new_prob
 
-        get_node_bfs_probabilities(
+        get_attr_bfs_probabilities(
             test_class,
             v,
-            target_node,
+            target_attr,
             max_depth,
             current_depth + 1,
             new_prob,
@@ -154,27 +153,27 @@ def get_node_bfs_probabilities(
     return probabilities
 
 def get_bfs_probabilities(
-        test_class: AllianceBuilder,
+        test_class: StochasticCommunity,
         max_depth:Optional[int] = 3,
     ):
 
-    node_bfs_p = np.zeros((test_class.n_nodes_spatial,test_class.n_nodes,max_depth))
+    attr_bfs_p = np.zeros((test_class.n_nodes_spatial,test_class.n_attr,max_depth))
 
     for i, source_node in enumerate(test_class.node_spatial_list):
-        for j, target_node in enumerate(test_class.node_list):
+        for j, target_attr in enumerate(test_class.attr_list):
             
-            p = get_node_bfs_probabilities(
+            p = get_attr_bfs_probabilities(
                 test_class,
                 source_node,
-                target_node,
+                target_attr,
                 max_depth
             )
 
-            node_bfs_p[i,j,:] = p
+            attr_bfs_p[i,j,:] = p
 
-    return node_bfs_p
+    return attr_bfs_p
 
-def get_estimate_edge_prob(test_class: AllianceBuilder, walks_edges_spatial: np.ndarray):
+def get_estimate_edge_prob(test_class: StochasticCommunity, walks_edges_spatial: np.ndarray):
 
     # get sampled edge probabilities (marginal)
     cond_edge_p = np.zeros((test_class.n_nodes_spatial,test_class.n_unique_edges))
@@ -196,7 +195,7 @@ def get_estimate_edge_prob(test_class: AllianceBuilder, walks_edges_spatial: np.
     return edge_p, cond_edge_p
 
 def get_estimate_edge_weighted_prob(
-        test_class: AllianceBuilder,
+        test_class: StochasticCommunity,
         n_samples_edge: int,
         n_samples_source_node: int,
         walks_nodes_spatial: np.ndarray,
@@ -237,32 +236,32 @@ def get_estimate_edge_weighted_prob(
         return edge_p, cond_edge_p
 
 def get_estimate_node_bfs_probabilities(
-        test_class: AllianceBuilder,
+        test_class: StochasticCommunity,
         n_samples_edge: int,
         walk_length: int,
-        walks_nodes: np.ndarray,
+        walks_attr: np.ndarray,
         walks_nodes_spatial: np.ndarray,
     ):
 
     # get sampled edge probabilities (marginal)
-    bfs = np.zeros((test_class.n_nodes_spatial,test_class.n_nodes,walk_length-1))
-    bfs_compound = np.zeros((test_class.n_nodes_spatial,test_class.n_nodes,walk_length-1))
-    counts_bfs = np.zeros((test_class.n_nodes_spatial,test_class.n_nodes,walk_length-1))
+    bfs = np.zeros((test_class.n_nodes_spatial,test_class.n_attr,walk_length-1))
+    bfs_compound = np.zeros((test_class.n_nodes_spatial,test_class.n_attr,walk_length-1))
+    counts_bfs = np.zeros((test_class.n_nodes_spatial,test_class.n_attr,walk_length-1))
     counts_spatial = np.zeros((test_class.n_nodes_spatial,walk_length-1))
 
     for i_sample in range(test_class.n_nodes_spatial):
         for j_sample in range(n_samples_edge):
             sample_walk_spatial_nodes = walks_nodes_spatial[i_sample, j_sample, :]
-            sample_walk_nodes = walks_nodes[i_sample, j_sample, :]
+            sample_walk_attr = walks_attr[i_sample, j_sample, :]
 
             i = sample_walk_spatial_nodes[0]
-            j_target = sample_walk_nodes[0] # sample node for the chain
-            j_node = test_class.node_i2key.get(j_target,None)
-            j_target_community = test_class.communities_dict.get(j_node,None)
+            j_target = sample_walk_attr[0] # sample node for the chain
+            j_attr = test_class.attr_i2key.get(j_target,None)
+            j_target_community = test_class.communities_dict.get(j_attr,None)
             for k in range(walk_length-1):
-                j = sample_walk_nodes[k]
-                if j in test_class.node_i2key.keys():
-                    community_j = test_class.communities_dict[test_class.node_i2key[j]]
+                j = sample_walk_attr[k]
+                if j in test_class.attr_i2key.keys():
+                    community_j = test_class.communities_dict[test_class.attr_i2key[j]]
                     counts_spatial[i,k] += 1
                     if community_j==j_target_community:
                         counts_bfs[i,j,k] += 1
@@ -550,7 +549,6 @@ def example_merge(request, example_case):
                 'HT': 3,
                 'VT': 4
             },
-            "n_samples": None
         },
         {
             "weights": (-1.0,0.0),
@@ -561,7 +559,6 @@ def example_merge(request, example_case):
                 'HT': 2,
                 'VT': 2
             },
-            "n_samples": None
         },
         {
             "weights": (0.0,1.0),
@@ -572,25 +569,12 @@ def example_merge(request, example_case):
                 'HT': 0,
                 'VT': 0
             },
-            "n_samples": None
         },
-        # {
-        #     "weights": (0.5,0.5),
-        #     "test_communities_dict": {
-        #         'AT': 0,
-        #         'BT': 1,
-        #         'CT': 0,
-        #         'HT': 1,
-        #         'VT': 0
-        #     },
-        #     "n_samples": 5
-        # },
     ],
     ids=[
         'minimize HHI',
         'maximize HHI',
         'maximize MAI',
-        # 'test sampling',
     ]
 )
 def optimization_cases(request, example_case):
@@ -601,10 +585,9 @@ def optimization_cases(request, example_case):
 
     param = request.param
     weights = param["weights"]
-    n_samples = param["n_samples"]
     test_communities_dict = param["test_communities_dict"]
 
-    return MG, weights, n_samples, test_communities_dict
+    return MG, weights, test_communities_dict
 
 @pytest.mark.parametrize("dict1, dict2, expected", [
     ({'AT': 0, 'BT': 1, 'CT': 0, 'HT': 1, 'VT': 0}, {'AT': 1, 'BT': 0, 'CT': 1, 'HT': 0, 'VT': 1}, True),
@@ -735,7 +718,8 @@ def test_cuda_blocks():
 
     return
 
-class TestAllianceBuilder:
+
+class TestDeterministic:
 
     n_samples_edge=500
     walk_length=10
@@ -752,54 +736,51 @@ class TestAllianceBuilder:
         test_weights_individual_dict, \
         init_communities_test = example_case
 
-        test_class = AllianceBuilder(MG)
+        test_class = DeterministicCommunity(MG)
 
         # check all keys in test dictionary are present
-        assert all(key in test_HHI.keys() for key in test_class.HHI)
+        assert all(key in test_HHI.keys() for key in test_class.hhi)
 
-        for key,value in test_class.HHI.items():
+        for key,value in test_class.hhi.items():
             assert test_HHI[key] == value
 
-        assert all(key in test_weights_dict.keys() for key in test_class.weights_dict)
+        assert all(key in test_weights_dict.keys() for key in test_class.bfs_degree)
 
-        for key,value in test_class.weights_dict.items():
-            assert value == test_weights_dict[key]
-
-        for key,value in test_class.weights_individual_dict.items():
-            assert value == test_weights_individual_dict[key]
+        for key,value in test_class.bfs_degree.items():
+            assert value == test_weights_dict[key] + test_weights_individual_dict[key]
 
         for key,value in test_class.communities_dict.items():
             assert value == init_communities_test[key]
 
     @pytest.fixture(scope="function")
-    def init_class(self, example_case) -> AllianceBuilder:
+    def init_class(self, example_case) -> DeterministicCommunity:
         # This setup will run once for the entire class
 
         MG, _, _, _, _, _ = example_case
 
-        test_class = AllianceBuilder(MG, seed=seed)
+        test_class = DeterministicCommunity(MG, seed=seed)
 
         return test_class
 
     @pytest.fixture(scope="function")
-    def init_class_gpu(self, example_case) -> AllianceBuilder:
+    def init_class_gpu(self, example_case) -> DeterministicCommunity:
         # This setup will run once for the entire class
 
         MG, _, _, _, _, _ = example_case
 
-        test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
-        test_class.init_gpu(tile_size=self.tile_size)
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True)
+        test_class.init_gpu()
 
         return test_class
 
     @pytest.fixture(scope="class")
-    def init_class_gpu_iteration(self, example_case) -> AllianceBuilder:
+    def init_class_gpu_iteration(self, example_case) -> DeterministicCommunity:
         # This setup will run once for the entire class
 
         MG, _, _, _, _, _ = example_case
 
-        test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
-        test_class.init_gpu(tile_size=self.tile_size)
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True)
+        test_class.init_gpu()
 
         membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(
             max_iterations=1,
@@ -810,47 +791,203 @@ class TestAllianceBuilder:
 
         return test_class, membership_pairs, hhi_pairs, weights_pairs
 
+    def test_merge(self, init_class: DeterministicCommunity, example_merge):
+
+        test_class = init_class
+
+        _, \
+        community_to_merge, new_community, \
+        merge_communities_test, test_HHI, \
+        test_weights_dict, test_weights_individual_dict = example_merge
+
+        test_class.update_scores(community_to_merge,new_community)
+
+        # check all keys in test dictionary are present
+        assert all(key in test_HHI.keys() for key in test_class.hhi)
+
+        for key,value in test_class.communities_dict.items():
+            assert value == merge_communities_test[key]
+
+        for key,value in test_class.hhi.items():
+            assert test_HHI[key] == value
+
+        for key,value in test_class.bfs_degree.items():
+            assert value == test_weights_dict[key] + test_weights_individual_dict[key]
+
+    def test_optimize(self, init_class: DeterministicCommunity, optimization_cases):
+
+        MG, weights, test_communities_dict = optimization_cases
+
+        test_class = init_class
+
+        test_class.greedy_optimize(weights=weights)
+
+        assert same_community(test_class.communities_dict, test_communities_dict)
+
+        print(test_class.f_history)
+        print(test_class.communities_history)
+
+    def test_merge_gpu(
+            self,
+            init_class_gpu_iteration: Tuple[DeterministicCommunity,np.ndarray,np.ndarray,np.ndarray,np.ndarray],
+            example_merge
+        ):
+
+        test_class, membership_pairs, hhi_pairs, weights_pairs = init_class_gpu_iteration
+
+        _, \
+        community_to_merge, new_community, \
+        merge_communities_test, test_HHI, \
+        test_weights_dict, _ = example_merge
+
+        for key,value in zip(test_class.attr_list,membership_pairs[community_to_merge,new_community]):
+            assert value == merge_communities_test[key]
+
+        for key,value in zip(test_class.edge_unique_list,hhi_pairs[community_to_merge,new_community]):
+            assert test_HHI[key] == value
+
+        for key,value in zip(test_class.attr_list,weights_pairs[community_to_merge,new_community]):
+            assert test_weights_dict[key] == value
+
+    def test_optimize_gpu(self, init_class_gpu: DeterministicCommunity, optimization_cases):
+
+        _, weights, test_communities_dict = optimization_cases
+
+        test_class = init_class_gpu
+
+        test_class.greedy_optimize(weights=weights)
+
+        assert same_community(test_class.communities_dict, test_communities_dict)
+
+        print(test_class.f_history)
+        print(test_class.communities_history)
+
+
+class TestStochastic:
+
+    n_samples_edge=500
+    n_samples_edge_high = 5000
+    walk_length=10
+    threads_per_block=8
+    n_samples_source_node = 50
+    num_streams = 4
+    tile_size = 2
+    parallel_reduce = False
+
+    @pytest.mark.dependency()
+    def test_initialization(self,example_case):
+
+        MG, nodes_airlines_dict, \
+        test_HHI, test_weights_dict, \
+        test_weights_individual_dict, \
+        init_communities_test = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed, 
+            use_gpu=True, 
+            n_samples_edge=self.n_samples_edge, 
+            walk_length=self.walk_length
+        )
+
+        # check all keys in test dictionary are present
+        assert all(key in test_HHI.keys() for key in test_class.hhi)
+
+        for key,value in test_class.hhi.items():
+            assert test_HHI[key] == value
+
+        assert all(key in test_weights_dict.keys() for key in test_class.bfs_degree)
+
+        for key,value in test_class.bfs_degree.items():
+            assert value == test_weights_dict[key] + test_weights_individual_dict[key]
+
+        for key,value in test_class.communities_dict.items():
+            assert value == init_communities_test[key]
+
+    @pytest.fixture(scope="function")
+    def init_class(self, example_case) -> StochasticCommunity:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed, 
+            use_gpu=True, 
+            n_samples_edge=self.n_samples_edge, 
+            walk_length=self.walk_length
+        )
+
+        return test_class
+
+    @pytest.fixture(scope="function")
+    def init_class_gpu(self, example_case) -> StochasticCommunity:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed, 
+            use_gpu=True, 
+            n_samples_edge=self.n_samples_edge, 
+            walk_length=self.walk_length
+        )
+        test_class.init_gpu(tile_size=self.tile_size)
+
+        return test_class
+
+    @pytest.fixture(scope="function")
+    def init_class_gpu_many_samples(self, example_case) -> StochasticCommunity:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed, 
+            use_gpu=True, 
+            n_samples_edge=self.n_samples_edge_high, 
+            walk_length=self.walk_length
+        )
+        test_class.init_gpu(tile_size=self.tile_size)
+
+        return test_class
+
     @pytest.fixture(scope="class")
     def baseline_stochastic(self, example_case) -> Tuple[np.ndarray, np.ndarray]:
         # This setup will run once for the entire class
 
         MG, _, _, _, _, _ = example_case
 
-        test_class = AllianceBuilder(MG, seed=seed, use_gpu=True)
+        test_class = StochasticCommunity(
+            MG, seed=seed, 
+            use_gpu=True, 
+            n_samples_edge=self.n_samples_edge, 
+            walk_length=self.walk_length
+        )
         test_class.init_gpu(tile_size=self.tile_size)
 
-        membership_pairs = test_class._calculate_members_gpu(TPB = self.threads_per_block)
+        membership_pairs = test_class._calculate_members_gpu()
 
         edge_samples, walks_spatial, walks_edges_spatial, \
-            walks_nodes, walks_nodes_weights, \
-                source_counts = test_class._randomwalk_gpu(
-            n_samples_edge=self.n_samples_edge,
-            walk_length=self.walk_length,
-            TPB_2D = (self.threads_per_block, ) * 2,
-            TPB_3D = (self.threads_per_block, ) * 3,
-            testing=True
-        )
+            walks_attr, walks_attr_cp, \
+                source_attr_counts = test_class._randomwalk_gpu(testing=True)
 
         _, _, _, _, cum_weight, hhi_estimate, mai_estimate, _ = test_class._stochastic_eval_gpu(
             0, 
             0, 
             edge_samples,
-            walks_nodes_weights,
-            walks_nodes,
-            source_counts,
+            walks_attr_cp,
+            walks_attr,
+            source_attr_counts,
             membership_pairs,
-            self.n_samples_edge,
-            self.walk_length,
-            TPB = self.threads_per_block,
             stream = test_class.cuda.stream(),
-            testing = True
+            testing = True,
+            parallel_reduce=self.parallel_reduce
         )
 
         estimate_bfs = get_estimate_node_bfs_probabilities(
             test_class,
             n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length,
-            walks_nodes=walks_nodes,
+            walks_attr=walks_attr,
             walks_nodes_spatial=walks_spatial
         )
 
@@ -858,7 +995,7 @@ class TestAllianceBuilder:
 
         return cum_weight, hhi_estimate, mai_estimate, bfs, estimate_bfs
 
-    def test_probabilities(self, init_class: AllianceBuilder, example_case, example_conditionals):
+    def test_probabilities(self, init_class: StochasticCommunity, example_case, example_conditionals):
         MG, _, _, _, _, _ = example_case
         test_posterior, test_likelihood, test_prior, test_marginal, \
             test_source, test_edge_source_cond, test_bfs = example_conditionals
@@ -885,67 +1022,9 @@ class TestAllianceBuilder:
         assert np.allclose(test_source, source_p, 1e-3)
         assert np.allclose(test_bfs, bfs, 1e-3)
 
-    def test_merge(self, init_class: AllianceBuilder, example_merge):
-
-        test_class = init_class
-
-        _, \
-        community_to_merge, new_community, \
-        merge_communities_test, test_HHI, \
-        test_weights_dict, _ = example_merge
-
-        test_class.update_scores(community_to_merge,new_community)
-
-        # check all keys in test dictionary are present
-        assert all(key in test_HHI.keys() for key in test_class.HHI)
-
-        for key,value in test_class.communities_dict.items():
-            assert value == merge_communities_test[key]
-
-        for key,value in test_class.HHI.items():
-            assert test_HHI[key] == value
-
-        for key,value in test_class.weights_dict.items():
-            assert value == test_weights_dict[key]
-
-    def test_optimize(self, init_class: AllianceBuilder, optimization_cases):
-
-        MG, weights, n_samples, test_communities_dict = optimization_cases
-
-        test_class = init_class
-
-        test_class.greedy_optimize(weights=weights,n_samples=n_samples)
-
-        assert same_community(test_class.communities_dict, test_communities_dict)
-
-        print(test_class.f_history)
-        print(test_class.communities_history)
-
     def test_merge_gpu(
             self,
-            init_class_gpu_iteration: Tuple[AllianceBuilder,np.ndarray,np.ndarray,np.ndarray,np.ndarray],
-            example_merge
-        ):
-
-        test_class, membership_pairs, hhi_pairs, weights_pairs = init_class_gpu_iteration
-
-        _, \
-        community_to_merge, new_community, \
-        merge_communities_test, test_HHI, \
-        test_weights_dict, _ = example_merge
-
-        for key,value in zip(test_class.node_list,membership_pairs[community_to_merge,new_community]):
-            assert value == merge_communities_test[key]
-
-        for key,value in zip(test_class.edge_unique_list,hhi_pairs[community_to_merge,new_community]):
-            assert test_HHI[key] == value
-
-        for key,value in zip(test_class.node_list,weights_pairs[community_to_merge,new_community]):
-            assert test_weights_dict[key] == value
-
-    def test_merge_gpu_stochastic(
-            self,
-            init_class_gpu: AllianceBuilder,
+            init_class_gpu: StochasticCommunity,
             example_merge,
             baseline_stochastic
         ):
@@ -960,31 +1039,23 @@ class TestAllianceBuilder:
         cum_weight_baseline, hhi_estimate_baseline, \
             mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic
 
-        membership_pairs = test_class._calculate_members_gpu(TPB = (self.threads_per_block, ) * 3)
+        membership_pairs = test_class._calculate_members_gpu()
 
         edge_samples, walks_spatial, walks_edges_spatial, \
-            walks_nodes, walks_nodes_weights, \
-                source_counts = test_class._randomwalk_gpu(
-            n_samples_edge=self.n_samples_edge,
-            walk_length=self.walk_length,
-            TPB_2D = (self.threads_per_block, ) * 2,
-            TPB_3D = (self.threads_per_block, ) * 3,
-            testing=True
-        )
+            walks_attr, walks_attr_cp, \
+                source_attr_counts = test_class._randomwalk_gpu(testing=True)
 
-        edge_samples, walks_nodes, walks_nodes_weights, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_gpu(
+        edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_gpu(
             community_to_merge, 
             new_community, 
             edge_samples,
-            walks_nodes_weights,
-            walks_nodes,
-            source_counts,
+            walks_attr_cp,
+            walks_attr,
+            source_attr_counts,
             membership_pairs,
-            self.n_samples_edge,
-            self.walk_length,
-            TPB = (self.threads_per_block, ) * 2,
             stream = test_class.cuda.stream(),
-            testing = True
+            testing = True,
+            parallel_reduce = self.parallel_reduce
         )
 
         test_class.update_scores(community_to_merge, new_community)
@@ -994,13 +1065,13 @@ class TestAllianceBuilder:
             test_class,
             n_samples_edge = self.n_samples_edge,
             walk_length = self.walk_length,
-            walks_nodes = walks_nodes,
+            walks_attr = walks_attr,
             walks_nodes_spatial=walks_spatial
         )
 
         bfs = get_bfs_probabilities(test_class,self.walk_length-1)
 
-        for key,value in zip(test_class.node_list,membership_pairs[community_to_merge,new_community]):
+        for key,value in zip(test_class.attr_list,membership_pairs[community_to_merge,new_community]):
             assert value == merge_communities_test[key]
 
         for key,value in zip(test_class.edge_unique_list,hhi_estimate):
@@ -1008,17 +1079,13 @@ class TestAllianceBuilder:
 
         assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
 
-    def test_optimize_gpu_stochastic(self, init_class_gpu: AllianceBuilder, optimization_cases):
-        _, weights, n_samples, test_communities_dict = optimization_cases
+    def test_optimize_gpu(self, init_class_gpu: StochasticCommunity, optimization_cases):
+        _, weights, test_communities_dict = optimization_cases
 
         test_class = init_class_gpu
 
-        membership_pairs, hhi_pairs, weights_pairs = test_class.greedy_optimize_stochastic(
+        membership_pairs, hhi_pairs, weights_pairs = test_class.greedy_optimize(
                 weights=weights,
-                n_samples_edge=self.n_samples_edge,
-                walk_length=self.walk_length,
-                threads_per_block_2D=self.threads_per_block,
-                threads_per_block_3D=self.threads_per_block,
                 testing_opt=True,
                 num_streams=self.num_streams
             )
@@ -1028,28 +1095,13 @@ class TestAllianceBuilder:
         print(test_class.f_history)
         print(test_class.communities_history)
 
-    def test_optimize_gpu(self, init_class_gpu: AllianceBuilder, optimization_cases):
-
-        _, weights, n_samples, test_communities_dict = optimization_cases
-
-        test_class = init_class_gpu
-
-        test_class.greedy_optimize(weights=weights)
-
-        assert same_community(test_class.communities_dict, test_communities_dict)
-
-        print(test_class.f_history)
-        print(test_class.communities_history)
-
-    def test_randomwalker(self, example_case, init_class_gpu: AllianceBuilder):
+    def test_randomwalker(self, example_case, init_class_gpu_many_samples: StochasticCommunity):
 
         MG, _, _, _, _, _ = example_case
-        test_class = init_class_gpu
+        test_class = init_class_gpu_many_samples
 
-        n_samples_edge = 5000
-        
-        walks_spatial_weighted_h, walks_edges_spatial_weighted_h = test_class.weighted_sampling(
-                n_samples_edge=n_samples_edge,
+        walks_spatial_weighted, walks_edges_spatial_weighted = test_class.weighted_sampling(
+                n_samples_edge=self.n_samples_edge_high,
                 n_samples_source_node=self.n_samples_source_node,
                 walk_length=self.walk_length,
                 TPB = self.threads_per_block,
@@ -1059,51 +1111,43 @@ class TestAllianceBuilder:
         edge_p, cond_edge_p = get_edge_prob(test_class)
         estimate_edge_p, estimate_cond_edge_p = get_estimate_edge_weighted_prob(
             test_class,
-            n_samples_edge=n_samples_edge,
+            n_samples_edge=self.n_samples_edge_high,
             n_samples_source_node=self.n_samples_source_node,
-            walks_nodes_spatial=walks_spatial_weighted_h,
-            walks_edges_spatial=walks_edges_spatial_weighted_h
+            walks_nodes_spatial=walks_spatial_weighted,
+            walks_edges_spatial=walks_edges_spatial_weighted
         )
         
         assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
         assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
 
-        membership_pairs_h = test_class._calculate_members_gpu(TPB = (self.threads_per_block, ) * 3)
+        membership_pairs = test_class._calculate_members_gpu()
 
-        edge_samples_h, walks_spatial_h, walks_edges_spatial_h, \
-            walks_nodes_h, walks_nodes_weights_h, \
-                source_counts_h = test_class._randomwalk_gpu(
-            n_samples_edge=n_samples_edge,
-            walk_length=self.walk_length,
-            TPB_2D = (self.threads_per_block, ) * 2,
-            TPB_3D = (self.threads_per_block, ) * 3,
-            testing=True
-        )
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_attr, walks_attr_cp, \
+                source_counts = test_class._randomwalk_gpu(testing=True)
 
-        edge_samples_h, walks_nodes_h, walks_nodes_weights_h, edge_counts_h, cum_weight_h, _, _, _ = test_class._stochastic_eval_gpu(
+        edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, _, _, _ = test_class._stochastic_eval_gpu(
             0, 
             0, 
-            edge_samples_h,
-            walks_nodes_weights_h,
-            walks_nodes_h,
-            source_counts_h,
-            membership_pairs_h,
-            n_samples_edge,
-            self.walk_length,
-            TPB = (self.threads_per_block, ) * 2,
+            edge_samples,
+            walks_attr_cp,
+            walks_attr,
+            source_counts,
+            membership_pairs,
             stream = test_class.cuda.stream(),
-            testing = True
+            testing = True,
+            parallel_reduce = self.parallel_reduce
         )
 
 
         bfs = get_bfs_probabilities(test_class,self.walk_length-1)
         estimate_bfs = get_estimate_node_bfs_probabilities(
             test_class,
-            n_samples_edge=n_samples_edge,
+            n_samples_edge=self.n_samples_edge_high,
             walk_length=self.walk_length,
-            walks_nodes=walks_nodes_h,
-            walks_nodes_spatial=walks_spatial_h
+            walks_attr=walks_attr,
+            walks_nodes_spatial=walks_spatial
         )
         
-        assert np.allclose(test_class._adj3/100,edge_counts_h,rtol=1e-1)
+        assert np.allclose(test_class._adj3/100,edge_counts,rtol=1e-1)
         assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
