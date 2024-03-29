@@ -14,6 +14,7 @@ from pdb import set_trace
 from scipy.sparse import spmatrix
 from typing import Callable, Dict, Any, Union
 from concurrent.futures import ThreadPoolExecutor
+import itertools
 
 from abc import ABC
 
@@ -83,6 +84,8 @@ class BaseCommunity(ABC):
 
         self._log_bfs_degree = {}
         self._bfs_degree = defaultdict(list)
+        self.bfs_degree_community = np.empty(0)
+        self._sampled_communities_pairs = set()
 
         self.communities_history = []
         self.f_history = []
@@ -118,23 +121,23 @@ class BaseCommunity(ABC):
         key, self._communities_dict, self._distinct_communities, self.n_communities = resort_communities(value)
 
     @property
-    def market_shares_community(self):
+    def market_shares_community(self) -> type_cps:
         return {edge: self._cond_probs_community[edge].copy() for edge in self._cond_probs_community.keys()}
 
     @property
-    def hhi(self):
+    def hhi(self) -> Dict[str,float]:
         return {edge: self._hhi[edge] for edge in self._hhi.keys()}
 
     @property
-    def bfs_degree(self):
+    def bfs_degree(self) -> Dict[str,float]:
         return {attr: self._bfs_degree[attr] for attr in self._bfs_degree.keys()}
 
     @property
-    def log_bfs_degree(self):
+    def log_bfs_degree(self) -> Dict[str,float]:
         return {attr: self._log_bfs_degree[attr] for attr in self._log_bfs_degree.keys()}
 
     @log_bfs_degree.setter
-    def log_bfs_degree(self, value):
+    def log_bfs_degree(self, value: Dict[str,float]):
         self._log_bfs_degree = value
 
     @cpu_gpu_dispatcher('_greedy_optimize_cpu', '_greedy_optimize_gpu')
@@ -171,6 +174,11 @@ class BaseCommunity(ABC):
 
     def update_scores(self, community_to_merge: int, new_community: int) -> Tuple[List[Tuple[str,str]], List[str]]:
         return self._update_communities(community_to_merge,new_community)
+    
+    def _update_scores_community(self):
+        self.bfs_degree_community = np.zeros(self.n_communities)
+        for i, v in self.bfs_degree.items():
+            self.bfs_degree_community[self.communities_dict[i]] += v
 
     def _parse_graph(self):
         """
@@ -308,6 +316,32 @@ class BaseCommunity(ABC):
             self._bfs_degree[attr] = bfs_degree[attr]
             self._log_bfs_degree[attr] = log_bfs_degree[attr]
 
+    def _sample_community_pairs(self, n_samples: int = 5, replace: Optional[bool] = False) -> Union[list,bool]:
+        
+        rng_np = self.random_state[1]
+        all_samples = list(itertools.product(range(self.n_communities), range(self.n_communities)))  
+
+        sample_set = set(all_samples) - self._sampled_communities_pairs
+        sample_list = list(sample_set)  # convert set to list  
+
+        if not replace:
+            n_samples = min(len(sample_list),n_samples)
+
+        diag_mask = np.array([True if i==j else False for i,j in sample_list])
+
+        probabilities = self.bfs_degree_community[sample_list] / np.sum(self.bfs_degree_community)
+        probabilities_pairs = probabilities[:,0] * probabilities[:,1]
+        probabilities_pairs[diag_mask] = 0.0
+        probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
+
+        if len(sample_list) > 0:
+            random_indices = rng_np.choice(len(sample_list), n_samples, p=probabilities_pairs, replace=replace)
+            sample_pairs = [sample_list[i] for i in random_indices]
+            if not replace:
+                self._sampled_communities_pairs |= set(sample_pairs)
+            return sample_pairs
+
+        return False
 
 class DeterministicCommunity(BaseCommunity):
 
@@ -316,6 +350,7 @@ class DeterministicCommunity(BaseCommunity):
 
         self._update_hhi_scores()
         self._update_bfs_scores()
+        self._update_scores_community()
 
     def init_gpu(
             self,
@@ -325,7 +360,7 @@ class DeterministicCommunity(BaseCommunity):
         super().init_gpu(threads_per_block_2D,threads_per_block_3D)
 
         from .utilities_cuda import define_cuda_kernels_deterministic
-        
+
         # Populate the adjacency matrix
         edge_attr = []
         edge_weights = []
@@ -342,7 +377,7 @@ class DeterministicCommunity(BaseCommunity):
                     edges_neighbour.append((self.edge_pairkey2i[(u, v, key)], self.edge_pairkey2i[(u_link, v_link, key_link)]))
                 processed_edges.add((v, key))
 
-        # dense adjacency        
+        # dense adjacency
         self._edge_attr = np.array(edge_attr,dtype=np.int32)
         self._edge_weights = np.array(edge_weights,dtype=np.float32)
         self._edges_neighbour = np.array(edges_neighbour,dtype=np.int32)
@@ -376,6 +411,7 @@ class DeterministicCommunity(BaseCommunity):
         edges_to_update, attr_to_update = super().update_scores(community_to_merge, new_community)
         self._update_hhi_scores(edges_to_update)
         self._update_bfs_scores(attr_to_update)
+        self._update_scores_community()
 
     def _greedy_optimize_gpu(
             self,
@@ -438,7 +474,7 @@ class DeterministicCommunity(BaseCommunity):
                 bfs_pairs = np.zeros((num_batches_i, num_batches_j, self.n_attr), dtype=np.float32)
                 score_pairs = np.zeros((num_batches_i, num_batches_j, self.n_attr), dtype=np.float32)
                 membership_pairs = np.zeros((num_batches_i, num_batches_j, self.n_attr), dtype=np.int32)
-                
+
                 # Batch processing with streams
                 num_total_batches = num_batches_i * num_batches_j
                 with tqdm(total=num_total_batches, desc="Batches processed") as pbar_inner:
@@ -504,7 +540,7 @@ class DeterministicCommunity(BaseCommunity):
                                 hhi_pairs_d,
                                 local_array_d
                             )
-                        
+
                         # stream.synchronize()
                         # print('hhi done')
 
@@ -533,7 +569,7 @@ class DeterministicCommunity(BaseCommunity):
                         bfs_pairs_h = bfs_pairs_d.copy_to_host(stream=stream)
                         score_pairs_h = np.where(bfs_pairs_h > 0.0, np.log(bfs_pairs_h), 0.0)
                         membership_pairs_h = membership_pairs_d.copy_to_host(stream=stream)
-                        
+
                         # free memory
                         membership_pairs_d = None
                         local_array_d = None
@@ -699,7 +735,7 @@ class DeterministicCommunity(BaseCommunity):
         return self.communities_dict, f
 
     def _update_hhi_scores(self, edges_to_update: Optional[List[Tuple[str,str]]] = None):
-        
+
         if edges_to_update is None:
             edges_to_update = self.edge_unique_list
 
@@ -748,10 +784,10 @@ class DeterministicCommunity(BaseCommunity):
 class StochasticCommunity(BaseCommunity):
 
     def __init__(
-            self, 
-            MG: MultiDiGraph, 
-            communities_dict: Dict[str, List[str]] = None, 
-            seed: int = None, 
+            self,
+            MG: MultiDiGraph,
+            communities_dict: Dict[str, List[str]] = None,
+            seed: int = None,
             use_gpu: bool | None = False,
             n_samples_edge: Optional[int] = 100,
             walk_length: Optional[int] = 10,
@@ -760,32 +796,33 @@ class StochasticCommunity(BaseCommunity):
 
         self.n_samples_edge = n_samples_edge
         self.walk_length = walk_length
-         
+
     def init_gpu(
             self,
             threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 22,
             threads_per_block_3D: Optional[Union[int,Tuple[int,int,int]]] = 8,
-            tile_size: Optional[int] = 42, 
+            tile_size: Optional[int] = 42,
             block_size: Optional[int] = 24
         ):
         super().init_gpu(threads_per_block_2D,threads_per_block_3D)
 
         from .utilities_cuda import define_cuda_kernels_stochastic
-        from ..utilities_cuda import elementwise_divide, create_xoroshiro128p_states
+        from ..utilities_cuda import pairwise_product, elementwise_divide, create_xoroshiro128p_states
 
-        self.elementwise_divide = elementwise_divide
+        self.pairwise_product: Callable = pairwise_product
+        self.elementwise_divide: Callable = elementwise_divide
 
         # move constants to memory
         self._adj_dense_d = self.cuda.to_device(self._adj_dense)
         self._adj3_d = self.cuda.to_device(self._adj3)
         self._adj_dense_index_d = self.cuda.to_device(self._adj_dense_index)
-        
+
         node_spatial_list = np.array(list(self.node_spatial_list),np.int32)
         node_spatial_degree = np.array(list(self.node_spatial_degree),np.float32)
 
         self._node_spatial_list_d = self.cuda.to_device(node_spatial_list)
         self._node_spatial_degree_d = self.cuda.to_device(node_spatial_degree)
-        
+
         kernels = define_cuda_kernels_stochastic(self.n_attr,self.n_nodes_spatial, tile_size, block_size)
 
         self.set_membership                     : Callable = kernels[0]
@@ -801,7 +838,7 @@ class StochasticCommunity(BaseCommunity):
         self.copy_reduced_counts                : Callable = kernels[10]
         self.init_attr                          : Callable = kernels[11]
         self.attr_postprocess                   : Callable = kernels[12]
-        
+
         self.create_xoroshiro128p_states: Callable = create_xoroshiro128p_states
 
         # random walk data
@@ -811,11 +848,12 @@ class StochasticCommunity(BaseCommunity):
         self._walks_attr_d = self.cuda.device_array((self.n_nodes_spatial,self.n_samples_edge,self.walk_length-1), dtype=np.int32)
         self._walks_attr_cp_d = self.cuda.device_array((self.n_nodes_spatial,self.n_samples_edge,self.walk_length-1), dtype=np.float32)
         self._source_attr_counts_d = self.cuda.device_array((self.n_nodes_spatial,self.n_attr), dtype=np.int32)
-        
+
         self._randomwalk_gpu()
 
         # Calculate the initial mean hhi over all routes
         self._update_scores_gpu(0,0)
+        self._update_scores_community()
 
     def _randomwalk_gpu(self,testing = False):
 
@@ -825,7 +863,7 @@ class StochasticCommunity(BaseCommunity):
 
         cumsum_d = self.cuda.device_array((self.n_nodes_spatial,self.n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
         weights_d = self.cuda.device_array((self.n_nodes_spatial,self.n_samples_edge,self.n_nodes_spatial,),dtype=np.float32)
-        
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, self.n_attr), TPB = self.TPB_2D)
 
         self.init_attr[blockspergrid,threadsperblock](self._source_attr_counts_d,)
@@ -885,7 +923,7 @@ class StochasticCommunity(BaseCommunity):
         )
 
         self.cuda.synchronize()
-        
+
         if testing:
             return self._edge_samples_d, self._walks_d, self._walks_edges_d, self._walks_attr_d, self._walks_attr_cp_d, self._source_attr_counts_d
 
@@ -928,9 +966,9 @@ class StochasticCommunity(BaseCommunity):
             return walks_weighted_h, walks_weighted_edges_h
 
     def _stochastic_eval_gpu(
-            self, 
-            community_i, 
-            community_j, 
+            self,
+            community_i,
+            community_j,
             edge_samples_d,
             walks_nodes_weights_d,
             walks_nodes_d,
@@ -966,22 +1004,22 @@ class StochasticCommunity(BaseCommunity):
 
             stream.synchronize()
 
-            # Kernel launch  
+            # Kernel launch
             self.edge_histogram[blockspergrid,threadsperblock,stream](
                 self.n_communities,
                 self.n_samples_edge,
                 self.n_unique_edges,
                 edge_counts_d
             )
-            
+
             # Reduction part
-            while blockspergrid[1] > 1:  
+            while blockspergrid[1] > 1:
                 n_samples_edge_r = blockspergrid[1]
                 blockspergrid = list(blockspergrid)
                 blockspergrid[1] = math.ceil(blockspergrid[1] / threadsperblock[1])
                 blockspergrid = tuple(blockspergrid)
 
-                # Kernel launch  
+                # Kernel launch
                 self.edge_histogram[blockspergrid,threadsperblock,stream](
                     self.n_communities,
                     n_samples_edge_r,
@@ -991,7 +1029,7 @@ class StochasticCommunity(BaseCommunity):
 
             stream.synchronize()
 
-            # Transfer the first row of the matrix to the vector  
+            # Transfer the first row of the matrix to the vector
             nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_communities), TPB = self.TPB_2D)
 
             self.copy_reduced_counts[blockspergrid,threadsperblock,stream](
@@ -1079,7 +1117,7 @@ class StochasticCommunity(BaseCommunity):
             return hhi_estimate, bfs_estimate, log_bfs
 
     def _calculate_members_gpu(self):
-        
+
         # iteration constants
         communities_d = self.cuda.to_device(self._distinct_communities)
         membership_d = self.cuda.to_device(list((self._communities_dict.values())))
@@ -1099,15 +1137,15 @@ class StochasticCommunity(BaseCommunity):
         return membership_pairs_d
 
     def _process_batch(
-            self, 
-            batch_index, 
-            streams, 
-            edge_samples_d, 
-            walks_nodes_weights_d, 
-            walks_nodes_d, 
-            source_counts_d, 
-            membership_pairs_d, 
-            weights, 
+            self,
+            batch_index,
+            streams,
+            edge_samples_d,
+            walks_nodes_weights_d,
+            walks_nodes_d,
+            source_counts_d,
+            membership_pairs_d,
+            weights,
             f,
             parallel_reduce
         ):
@@ -1142,14 +1180,14 @@ class StochasticCommunity(BaseCommunity):
         return 0, community_i, community_j, None, None
 
     def _update_scores_gpu(self,community_i,community_j):
-        
+
         stream = self.cuda.stream()
 
         membership_pairs_d = self._calculate_members_gpu()
 
         hhi_estimate, bfs_estimate, log_bfs = self._stochastic_eval_gpu(
-            community_i, 
-            community_j, 
+            community_i,
+            community_j,
             self._edge_samples_d,
             self._walks_attr_cp_d,
             self._walks_attr_d,
@@ -1198,7 +1236,7 @@ class StochasticCommunity(BaseCommunity):
                 improvement = False
                 max_increase = 0
                 best_pair = None
-                
+
                 if testing_opt:
                     hhi_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_unique_edges), dtype=np.float32)
                     bfs_pairs_h = np.zeros((self.n_communities, self.n_communities, self.n_attr), dtype=np.float32)
@@ -1214,15 +1252,15 @@ class StochasticCommunity(BaseCommunity):
                     futures = []
                     for batch_index in range(num_total_batches):
                         future = executor.submit(
-                            self._process_batch, 
-                            batch_index, 
-                            streams, 
-                            self._edge_samples_d, 
-                            self._walks_attr_cp_d, 
-                            self._walks_attr_d, 
-                            self._source_attr_counts_d, 
-                            membership_pairs_d, 
-                            weights, 
+                            self._process_batch,
+                            batch_index,
+                            streams,
+                            self._edge_samples_d,
+                            self._walks_attr_cp_d,
+                            self._walks_attr_d,
+                            self._source_attr_counts_d,
+                            membership_pairs_d,
+                            weights,
                             f,
                             parallel_reduce
                         )
@@ -1236,7 +1274,7 @@ class StochasticCommunity(BaseCommunity):
                             if increase > max_increase:
                                 max_increase = increase
                                 best_pair = (community_i, community_j)
-        
+
                             if testing_opt:
                                 hhi_pairs_h[community_i,community_j,:] = hhi_estimate
                                 bfs_pairs_h[community_i,community_j,:] = bfs_estimate
@@ -1259,7 +1297,7 @@ class StochasticCommunity(BaseCommunity):
                     self.communities_history.append(self.communities_dict)
                     self.f_history.append(f)
                     self.multi_history.append((f1,f2))
-                
+
                 n_iterations += 1
                 pbar_outer.update(1)
 
@@ -1287,4 +1325,3 @@ class StochasticCommunity(BaseCommunity):
             del self._walks_attr_d
             del self._walks_attr_cp_d
             del self._source_attr_counts_d
-        

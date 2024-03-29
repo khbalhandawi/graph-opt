@@ -91,3 +91,19 @@ def elementwise_divide(A, B):
         for j in range(y, A.shape[1], dy):
             if B[i,j] > 0:
                 A[i,j] /= B[i,j]
+
+@cuda.jit()
+def pairwise_product(A, a):
+
+    # Compute flattened index inside the array  
+    x, y = cuda.grid(2)  
+
+    # Compute the grid stride 
+    dx, dy = cuda.gridsize(2)  
+
+    for i in range(x, a.shape[-1], dx):
+        for j in range(y, a.shape[-1], dy):
+            if i == j:
+                A[i,j] /= 0.0
+            else:
+                A[i,j] /= a[i]*a[j]

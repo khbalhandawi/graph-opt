@@ -5,7 +5,7 @@ import pytest
 import os
 
 from sklearn.covariance import log_likelihood
-from ..community_detection.alliance_builder import DeterministicCommunity, StochasticCommunity
+from ..community_detection.alliance_builder import DeterministicCommunity, StochasticCommunity, BaseCommunity
 from ..community_detection.utilities import resort_communities, same_community
 from ..utilities import cuda_blocks
 
@@ -14,6 +14,9 @@ import networkx as nx
 import json
 import os
 import math
+import itertools
+from scipy.stats import chisquare
+from scipy.special import kl_div
 
 from typing import Optional, Tuple, Dict
 
@@ -161,7 +164,7 @@ def get_bfs_probabilities(
 
     for i, source_node in enumerate(test_class.node_spatial_list):
         for j, target_attr in enumerate(test_class.attr_list):
-            
+
             p = get_attr_bfs_probabilities(
                 test_class,
                 source_node,
@@ -267,7 +270,7 @@ def get_estimate_node_bfs_probabilities(
                         counts_bfs[i,j,k] += 1
                     else:
                         break
-                    
+
     for i in range(test_class.n_nodes_spatial):
         for k in range(walk_length-1):
 
@@ -386,6 +389,138 @@ def example_conditionals():
 
     return posterior, likelihood, prior, marginal, source, edge_source_cond, bfs_source_nodal_probabilities
 
+@pytest.fixture(scope="class",
+    params=[
+        {
+            "merge_communities_test": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 2,
+                'HT': 3,
+                'VT': 4
+            },
+            "test_HHI": {
+                ('0', '1'): 5200.0,
+                ('0', '2'): 10000.0,
+                ('0', '4'): 10000.0,
+                ('1', '2'): 10000.0,
+                ('3', '4'): 6800.0,
+                ('4', '0'): 10000.0
+            },
+            "test_weights_dict": {
+                'AT': 0,
+                'BT': 0,
+                'CT': 0,
+                'HT': 0,
+                'VT': 4800
+            }
+        },
+        {
+            "merge_communities_test": {
+                'AT': 1,
+                'BT': 1,
+                'CT': 2,
+                'HT': 3,
+                'VT': 4
+            },
+            "test_HHI": {
+                ('0', '1'): 5200.0,
+                ('0', '2'): 10000.0,
+                ('0', '4'): 10000.0,
+                ('1', '2'): 10000.0,
+                ('3', '4'): 6800.0,
+                ('4', '0'): 10000.0
+            },
+            "test_weights_dict": {
+                'AT': 0,
+                'BT': 0,
+                'CT': 0,
+                'HT': 0,
+                'VT': 4800
+            }
+        },
+        {
+            "merge_communities_test": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 4,
+                'HT': 3,
+                'VT': 4
+            },
+            "test_HHI": {
+                ('0', '1'): 5200.0,
+                ('0', '2'): 10000.0,
+                ('0', '4'): 10000.0,
+                ('1', '2'): 10000.0,
+                ('3', '4'): 6800.0,
+                ('4', '0'): 10000.0
+            },
+            "test_weights_dict": {
+                'AT': 0,
+                'BT': 0,
+                'CT': 7000,
+                'HT': 0,
+                'VT': 6800 # 4800 + 2000
+            }
+        },
+        {
+            "merge_communities_test": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 2,
+                'HT': 4,
+                'VT': 4
+            },
+            "test_HHI": {
+                ('0', '1'): 10000.0,
+                ('0', '2'): 10000.0,
+                ('0', '4'): 10000.0,
+                ('1', '2'): 10000.0,
+                ('3', '4'): 6800.0,
+                ('4', '0'): 10000.0
+            },
+            "test_weights_dict": {
+                'AT': 0,
+                'BT': 0,
+                'CT': 0,
+                'HT': 7000,
+                'VT': 8000
+            }
+        },
+    ],
+    ids=[
+        'default init',
+        'nondefault init 1',
+        'nondefault init 2',
+        'nondefault init 3'
+    ]
+)
+def example_case_param(request):
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
+    data_dir = os.path.join('..','test_data')
+    MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir,data_dir,'test_DG_AP_AL.graphml')) # store graph
+    with open(os.path.join(script_dir,data_dir,'test_airline_nodes.json'),'r') as file:
+        nodes_airlines_dict = json.load(file)
+
+    test_weights_individual_dict = {
+        'AT': 8789,
+        'BT': 6000,
+        'CT': 6800,
+        'HT': 4400,
+        'VT': 11800
+    }
+
+    param = request.param
+    communities_test = param["merge_communities_test"]
+    test_HHI = param["test_HHI"]
+    test_weights_dict = param["test_weights_dict"]
+
+    return MG, nodes_airlines_dict, \
+        test_HHI, \
+        test_weights_dict, test_weights_individual_dict, \
+        communities_test
+
 @pytest.fixture(scope="class")
 def example_case():
 
@@ -394,6 +529,14 @@ def example_case():
     MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir,data_dir,'test_DG_AP_AL.graphml')) # store graph
     with open(os.path.join(script_dir,data_dir,'test_airline_nodes.json'),'r') as file:
         nodes_airlines_dict = json.load(file)
+
+    communities_test = {
+        'AT': 0,
+        'BT': 1,
+        'CT': 2,
+        'HT': 3,
+        'VT': 4
+    }
 
     test_HHI = {
         ('0', '1'): 5200.0,
@@ -418,14 +561,6 @@ def example_case():
         'CT': 6800,
         'HT': 4400,
         'VT': 11800
-    }
-
-    communities_test = {
-        'AT': 0,
-        'BT': 1,
-        'CT': 2,
-        'HT': 3,
-        'VT': 4
     }
 
     return MG, nodes_airlines_dict, \
@@ -667,7 +802,7 @@ def test_sampler_deterministic(test_vector, threshold, expected):
     os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
 
     from ..utilities_cuda import cumsum_d, searchsorted_d
-    
+
     cumsum = np.zeros_like(test_vector)
 
     cumsum_d(test_vector,cumsum)
@@ -677,7 +812,7 @@ def test_sampler_deterministic(test_vector, threshold, expected):
 
     if numba_sim is not None:
         os.environ['NUMBA_ENABLE_CUDASIM'] = numba_sim # reset environment to default
-    
+
 @pytest.mark.parametrize("test_vector, expected", [
     (np.array([0, 0, 0, 40, 60]), np.array([0,0,0,0.4,0.6])),
     (np.array([0, 40, 0, 0, 60]), np.array([0,0.4,0,0.0,0.6])),
@@ -690,12 +825,12 @@ def test_sampler(test_vector, expected):
     import random
     random.seed(seed)
     n_samples = 50
-    
+
     cumsum = np.zeros_like(test_vector)
     counts = np.zeros_like(test_vector)
 
     cumsum_d(test_vector,cumsum)
-    
+
     for _ in range(n_samples):
         threshold = random.random()
         chosen = searchsorted_d(cumsum,threshold)
@@ -719,7 +854,7 @@ def test_cuda_blocks():
     return
 
 
-class TestDeterministic:
+class TestDeterministic():
 
     n_samples_edge=500
     walk_length=10
@@ -729,14 +864,14 @@ class TestDeterministic:
     tile_size = 2
 
     @pytest.mark.dependency()
-    def test_initialization(self,example_case):
+    def test_initialization(self,example_case_param):
 
         MG, nodes_airlines_dict, \
         test_HHI, test_weights_dict, \
         test_weights_individual_dict, \
-        init_communities_test = example_case
+        init_communities_test = example_case_param
 
-        test_class = DeterministicCommunity(MG)
+        test_class = DeterministicCommunity(MG, communities_dict=init_communities_test)
 
         # check all keys in test dictionary are present
         assert all(key in test_HHI.keys() for key in test_class.hhi)
@@ -749,8 +884,59 @@ class TestDeterministic:
         for key,value in test_class.bfs_degree.items():
             assert value == test_weights_dict[key] + test_weights_individual_dict[key]
 
-        for key,value in test_class.communities_dict.items():
-            assert value == init_communities_test[key]
+        assert same_community(init_communities_test,test_class.communities_dict)
+
+    @pytest.mark.dependency()
+    def test_sampler(self,example_case_param):
+
+        MG, nodes_airlines_dict, \
+        test_HHI, test_weights_dict, \
+        test_weights_individual_dict, \
+        init_communities_test = example_case_param
+
+        test_class = DeterministicCommunity(MG, communities_dict=init_communities_test)
+
+        assert test_class._sample_community_pairs(3)
+        assert test_class._sample_community_pairs(3)
+        assert test_class._sample_community_pairs(3)
+
+
+    @pytest.mark.dependency()
+    def test_sampler_dist(self,example_case_param):
+
+        n_samples = 1000
+
+        MG, nodes_airlines_dict, \
+        test_HHI, test_weights_dict, \
+        test_weights_individual_dict, \
+        init_communities_test = example_case_param
+
+        test_class = DeterministicCommunity(MG, communities_dict=init_communities_test)
+
+        all_samples = list(itertools.product(range(test_class.n_communities), range(test_class.n_communities)))
+        all_samples_dict = {pair : i for i,pair in enumerate(all_samples)}
+        diag_mask = np.array([True if i==j else False for i,j in all_samples])
+
+        probabilities = test_class.bfs_degree_community[all_samples] / np.sum(test_class.bfs_degree_community)
+        probabilities_pairs = probabilities[:,0] * probabilities[:,1]
+        probabilities_pairs[diag_mask] = 0.0
+        probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
+
+
+        samples = test_class._sample_community_pairs(n_samples,replace=True)
+        samples_indices = [all_samples_dict[pair] for pair in samples]
+
+        # Compute the empirical PMF
+        unique, counts = np.unique(samples_indices, return_counts=True)
+        counts_full = np.zeros_like(probabilities_pairs)
+        counts_full[unique] = counts
+        empirical_pmf = counts_full / len(samples_indices)
+
+        kl_divergence = kl_div(empirical_pmf + 1e-10, probabilities_pairs + 1e-10)
+
+        assert np.mean(empirical_pmf - probabilities_pairs) <= 1e-3
+
+        return
 
     @pytest.fixture(scope="function")
     def init_class(self, example_case) -> DeterministicCommunity:
@@ -863,7 +1049,7 @@ class TestDeterministic:
         print(test_class.communities_history)
 
 
-class TestStochastic:
+class TestStochastic():
 
     n_samples_edge=500
     n_samples_edge_high = 5000
@@ -875,18 +1061,19 @@ class TestStochastic:
     parallel_reduce = False
 
     @pytest.mark.dependency()
-    def test_initialization(self,example_case):
+    def test_initialization(self,example_case_param):
 
         MG, nodes_airlines_dict, \
         test_HHI, test_weights_dict, \
         test_weights_individual_dict, \
-        init_communities_test = example_case
+        init_communities_test = example_case_param
 
         test_class = StochasticCommunity(
-            MG, seed=seed, 
-            use_gpu=True, 
-            n_samples_edge=self.n_samples_edge, 
-            walk_length=self.walk_length
+            MG, seed=seed,
+            use_gpu=True,
+            n_samples_edge=self.n_samples_edge,
+            walk_length=self.walk_length,
+            communities_dict=init_communities_test
         )
 
         # check all keys in test dictionary are present
@@ -900,8 +1087,7 @@ class TestStochastic:
         for key,value in test_class.bfs_degree.items():
             assert value == test_weights_dict[key] + test_weights_individual_dict[key]
 
-        for key,value in test_class.communities_dict.items():
-            assert value == init_communities_test[key]
+        assert same_community(init_communities_test,test_class.communities_dict)
 
     @pytest.fixture(scope="function")
     def init_class(self, example_case) -> StochasticCommunity:
@@ -910,9 +1096,9 @@ class TestStochastic:
         MG, _, _, _, _, _ = example_case
 
         test_class = StochasticCommunity(
-            MG, seed=seed, 
-            use_gpu=True, 
-            n_samples_edge=self.n_samples_edge, 
+            MG, seed=seed,
+            use_gpu=True,
+            n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length
         )
 
@@ -925,9 +1111,9 @@ class TestStochastic:
         MG, _, _, _, _, _ = example_case
 
         test_class = StochasticCommunity(
-            MG, seed=seed, 
-            use_gpu=True, 
-            n_samples_edge=self.n_samples_edge, 
+            MG, seed=seed,
+            use_gpu=True,
+            n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length
         )
         test_class.init_gpu(tile_size=self.tile_size)
@@ -941,9 +1127,9 @@ class TestStochastic:
         MG, _, _, _, _, _ = example_case
 
         test_class = StochasticCommunity(
-            MG, seed=seed, 
-            use_gpu=True, 
-            n_samples_edge=self.n_samples_edge_high, 
+            MG, seed=seed,
+            use_gpu=True,
+            n_samples_edge=self.n_samples_edge_high,
             walk_length=self.walk_length
         )
         test_class.init_gpu(tile_size=self.tile_size)
@@ -957,9 +1143,9 @@ class TestStochastic:
         MG, _, _, _, _, _ = example_case
 
         test_class = StochasticCommunity(
-            MG, seed=seed, 
-            use_gpu=True, 
-            n_samples_edge=self.n_samples_edge, 
+            MG, seed=seed,
+            use_gpu=True,
+            n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length
         )
         test_class.init_gpu(tile_size=self.tile_size)
@@ -971,8 +1157,8 @@ class TestStochastic:
                 source_attr_counts = test_class._randomwalk_gpu(testing=True)
 
         _, _, _, _, cum_weight, hhi_estimate, mai_estimate, _ = test_class._stochastic_eval_gpu(
-            0, 
-            0, 
+            0,
+            0,
             edge_samples,
             walks_attr_cp,
             walks_attr,
@@ -1046,8 +1232,8 @@ class TestStochastic:
                 source_attr_counts = test_class._randomwalk_gpu(testing=True)
 
         edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_gpu(
-            community_to_merge, 
-            new_community, 
+            community_to_merge,
+            new_community,
             edge_samples,
             walks_attr_cp,
             walks_attr,
@@ -1116,7 +1302,7 @@ class TestStochastic:
             walks_nodes_spatial=walks_spatial_weighted,
             walks_edges_spatial=walks_edges_spatial_weighted
         )
-        
+
         assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
         assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
 
@@ -1127,8 +1313,8 @@ class TestStochastic:
                 source_counts = test_class._randomwalk_gpu(testing=True)
 
         edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, _, _, _ = test_class._stochastic_eval_gpu(
-            0, 
-            0, 
+            0,
+            0,
             edge_samples,
             walks_attr_cp,
             walks_attr,
@@ -1148,6 +1334,6 @@ class TestStochastic:
             walks_attr=walks_attr,
             walks_nodes_spatial=walks_spatial
         )
-        
+
         assert np.allclose(test_class._adj3/100,edge_counts,rtol=1e-1)
         assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
