@@ -1139,6 +1139,8 @@ class StochasticCommunity(BaseCommunity):
     def _process_batch(
             self,
             batch_index,
+            community_i,
+            community_j,
             streams,
             edge_samples_d,
             walks_nodes_weights_d,
@@ -1149,9 +1151,6 @@ class StochasticCommunity(BaseCommunity):
             f,
             parallel_reduce
         ):
-
-        community_i = batch_index // self.n_communities
-        community_j = batch_index % self.n_communities
 
         if community_i > community_j:
             stream = streams[batch_index % len(streams)]
@@ -1245,15 +1244,18 @@ class StochasticCommunity(BaseCommunity):
 
                 # Create streams
                 streams = [self.cuda.stream() for _ in range(num_streams)]
-                num_total_batches = self.n_communities * self.n_communities
+                all_pairs = list(itertools.product(range(self.n_communities), range(self.n_communities)))  
+                num_total_batches = len(all_pairs)
 
                 # Use ThreadPoolExecutor to parallelize the loop
                 with ThreadPoolExecutor(max_workers=num_streams) as executor:
                     futures = []
-                    for batch_index in range(num_total_batches):
+                    for batch_index, (community_i, community_j) in enumerate(all_pairs):
                         future = executor.submit(
                             self._process_batch,
                             batch_index,
+                            community_i,
+                            community_j,
                             streams,
                             self._edge_samples_d,
                             self._walks_attr_cp_d,
