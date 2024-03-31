@@ -384,3 +384,9 @@ def cuda_blocks(
     nstates = int(total_threads * total_blocks)
 
     return nstates, threadsperblock, tuple(blockspergrid)
+
+def safe_log(a:np.ndarray) -> np.ndarray:
+    nonzero_mask = a > 0.0
+    out = np.zeros_like(a)
+    out[nonzero_mask] = np.log(a[nonzero_mask])
+    return out

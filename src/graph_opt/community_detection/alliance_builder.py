@@ -16,7 +16,7 @@ from typing import Callable, Dict, Any, Union
 from concurrent.futures import ThreadPoolExecutor
 import itertools
 
-from abc import ABC
+from abc import ABC, abstractmethod
 
 # Check if the code is running in a Jupyter notebook
 if 'ipykernel' in sys.modules:
@@ -25,7 +25,7 @@ else:
     from tqdm import tqdm
 
 from .utilities import resort_communities
-from ..utilities import _default_if_none, dict2array, cpu_gpu_dispatcher, cuda_blocks
+from ..utilities import _default_if_none, dict2array, cpu_gpu_dispatcher, cuda_blocks, safe_log
 
 from typing import Dict, List, Union, Tuple, Optional, NewType
 from ..random_settings import random_state
@@ -95,6 +95,7 @@ class BaseCommunity(ABC):
         self.random_state: Tuple[random.Random,np.random.RandomState] = random_state(self.seed)
 
         self.use_gpu = use_gpu
+        self._init_gpu = False
 
         self._parse_graph()
         self._initialize_communities(communities_dict)
@@ -111,6 +112,7 @@ class BaseCommunity(ABC):
 
         self.TPB_2D = threads_per_block_2D
         self.TPB_3D = threads_per_block_3D
+        self._init_gpu = True
 
     @property
     def communities_dict(self)->Dict[str,int]:
@@ -171,14 +173,45 @@ class BaseCommunity(ABC):
             and the objective function value
         """
         pass
-
-    def update_scores(self, community_to_merge: int, new_community: int) -> Tuple[List[Tuple[str,str]], List[str]]:
-        return self._update_communities(community_to_merge,new_community)
     
-    def _update_scores_community(self):
+    def update_scores(self, community_to_merge: int, new_community: int, update_communities: Optional[bool]=True) -> Tuple[List[Tuple[str,str]], List[str]]:
+        edges_to_update, attr_to_update = self._update_communities(community_to_merge,new_community,update_communities)
+        return edges_to_update, attr_to_update
+    
+    def _update_communities(self, community_to_merge: int, new_community: int, update_communities: bool) -> Tuple[List[Tuple[str,str]], List[str]]:
+        # Find the attr in the community to merge
+        attr_to_update_hhi = [k for k, v in self._communities_dict.items() if v in [community_to_merge,]]
+        attr_to_update_bfs_degree = [k for k, v in self._communities_dict.items() if v in [community_to_merge,new_community]]
+
+        # Update the community in communities_dict ands reset the market shares for this route
+        edges_to_update = set()
+        for attr in attr_to_update_hhi:
+            if update_communities:
+                self._communities_dict[attr] = new_community
+
+            edges_to_update.update(set(((u,v) for u,v,key in self.edge_attr2keypair_list[attr])))
+
+        return edges_to_update, attr_to_update_bfs_degree
+
+    def _update_community_weights(self):
         self.bfs_degree_community = np.zeros(self.n_communities)
         for i, v in self.bfs_degree.items():
-            self.bfs_degree_community[self.communities_dict[i]] += v
+            self.bfs_degree_community[self._communities_dict[i]] += v
+
+        self._sampled_communities_pairs = set()
+
+        # populate excluded pairs
+        for i in range(self.n_communities):
+            for j in range(self.n_communities):
+                if i >= j:
+                    self._sampled_communities_pairs.add((i,j)) 
+
+                weight_i = self.bfs_degree_community[i]
+                weight_j = self.bfs_degree_community[j]
+
+                # pop empty attributes
+                if weight_i == 0.0 or weight_j == 0.0:
+                    self._sampled_communities_pairs.add((i,j))
 
     def _parse_graph(self):
         """
@@ -265,57 +298,6 @@ class BaseCommunity(ABC):
         else:
             self.communities_dict = communities_dict
 
-    def _update_communities(self, community_to_merge: int, new_community: int, update_communities: Optional[bool]=True) -> Tuple[List[Tuple[str,str]], List[str]]:
-        # Find the attr in the community to merge
-        attr_to_update_hhi = [k for k, v in self._communities_dict.items() if v in [community_to_merge,]]
-        attr_to_update_bfs_degree = [k for k, v in self._communities_dict.items() if v in [community_to_merge,new_community]]
-
-        # Update the community in communities_dict ands reset the market shares for this route
-        edges_to_update = set()
-        for attr in attr_to_update_hhi:
-            if update_communities:
-                self._communities_dict[attr] = new_community
-
-            edges_to_update.update(set(((u,v) for u,v,key in self.edge_attr2keypair_list[attr])))
-
-        return edges_to_update, attr_to_update_bfs_degree
-
-    def _get_cache_hhi(self, edges:Optional[List[Tuple[int,int]]]=None) -> Tuple[type_cps, type_hhi]:
-
-        if edges is None:
-            edges = self._cond_probs_community.keys()
-
-        cond_probs_community = {}
-        hhi = {}
-        for edge in edges:
-            cond_probs_community[edge] = self._cond_probs_community[edge].copy()
-            hhi[edge] = self._hhi[edge]
-
-        return cond_probs_community, hhi
-
-    def _get_cache_bfs_degree(self, attr: List[int]=None) -> Tuple[type_bfs, type_bfs]:
-
-        if attr is None:
-            attr = self._bfs_degree.keys()
-
-        bfs_degree = {}
-        log_bfs_degree = {}
-        for attr in attr:
-            bfs_degree[attr] = self._bfs_degree[attr]
-            log_bfs_degree[attr] = self._log_bfs_degree[attr]
-
-        return bfs_degree, log_bfs_degree
-
-    def _set_cache_hhi(self, cond_probs_community: type_cps, hhi: type_hhi):
-        for edge in cond_probs_community.keys():
-            self._cond_probs_community[edge] = cond_probs_community[edge].copy()
-            self._hhi[edge] = hhi[edge]
-
-    def _set_cache_bfs_degree(self, bfs_degree: type_bfs, log_bfs_degree: type_bfs):
-        for attr in bfs_degree.keys():
-            self._bfs_degree[attr] = bfs_degree[attr]
-            self._log_bfs_degree[attr] = log_bfs_degree[attr]
-
     def _sample_community_pairs(self, n_samples: int = 5, replace: Optional[bool] = False) -> Union[list,bool]:
         
         rng_np = self.random_state[1]
@@ -324,24 +306,30 @@ class BaseCommunity(ABC):
         sample_set = set(all_samples) - self._sampled_communities_pairs
         sample_list = list(sample_set)  # convert set to list  
 
+        if len(sample_list) == 0:
+            return False
+    
+        probabilities = self.bfs_degree_community[sample_list] / np.sum(self.bfs_degree_community)
+        probabilities_pairs = probabilities[:,0] * probabilities[:,1]
+        probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
+
         if not replace:
             n_samples = min(len(sample_list),n_samples)
 
-        diag_mask = np.array([True if i==j else False for i,j in sample_list])
+        if len(sample_list) == 0:
+            return False
 
-        probabilities = self.bfs_degree_community[sample_list] / np.sum(self.bfs_degree_community)
-        probabilities_pairs = probabilities[:,0] * probabilities[:,1]
-        probabilities_pairs[diag_mask] = 0.0
-        probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
+        random_indices = rng_np.choice(len(sample_list), n_samples, p=probabilities_pairs, replace=replace)
+        sample_pairs = [sample_list[i] for i in random_indices]
+        if not replace:
+            self._sampled_communities_pairs |= set(sample_pairs)
+        return sample_pairs
+    
+    def __del__(self):
+        if self.use_gpu and self._init_gpu:
+            print("Destructor: Instance destroyed")
+            del self._adj_d
 
-        if len(sample_list) > 0:
-            random_indices = rng_np.choice(len(sample_list), n_samples, p=probabilities_pairs, replace=replace)
-            sample_pairs = [sample_list[i] for i in random_indices]
-            if not replace:
-                self._sampled_communities_pairs |= set(sample_pairs)
-            return sample_pairs
-
-        return False
 
 class DeterministicCommunity(BaseCommunity):
 
@@ -350,7 +338,7 @@ class DeterministicCommunity(BaseCommunity):
 
         self._update_hhi_scores()
         self._update_bfs_scores()
-        self._update_scores_community()
+        self._update_community_weights()
 
     def init_gpu(
             self,
@@ -407,11 +395,11 @@ class DeterministicCommunity(BaseCommunity):
         self._cp_sparse_values_d = self.cuda.to_device(self._cp_sparse_values)
         self._cp_sparse_attr_d = self.cuda.to_device(self._cp_sparse_attr)
 
-    def update_scores(self, community_to_merge: int, new_community: int):
-        edges_to_update, attr_to_update = super().update_scores(community_to_merge, new_community)
+    def update_scores(self, community_to_merge: int, new_community: int, update_communities: bool | None = True) -> Tuple[List[Tuple[str]] | List[str]]:
+        edges_to_update, attr_to_update = super().update_scores(community_to_merge, new_community, update_communities)
         self._update_hhi_scores(edges_to_update)
         self._update_bfs_scores(attr_to_update)
-        self._update_scores_community()
+        self._update_community_weights()
 
     def _greedy_optimize_gpu(
             self,
@@ -567,7 +555,7 @@ class DeterministicCommunity(BaseCommunity):
                         # Copy results from device to host for the current batch
                         hhi_pairs_h = hhi_pairs_d.copy_to_host(stream=stream)
                         bfs_pairs_h = bfs_pairs_d.copy_to_host(stream=stream)
-                        score_pairs_h = np.where(bfs_pairs_h > 0.0, np.log(bfs_pairs_h), 0.0)
+                        score_pairs_h = safe_log(bfs_pairs_h)
                         membership_pairs_h = membership_pairs_d.copy_to_host(stream=stream)
 
                         # free memory
@@ -631,8 +619,7 @@ class DeterministicCommunity(BaseCommunity):
                 del bfs_pairs_d
 
                 # If the maximum increase is greater than 0, merge these two communities and update the mean hhi
-                if max_increase > 0.0:
-
+                if max_increase > 0:
                     self.update_scores(*best_pair)
                     self.communities_dict = self._communities_dict
                     f += max_increase
@@ -641,6 +628,7 @@ class DeterministicCommunity(BaseCommunity):
                     # log history
                     f1 = -(sum(self._hhi.values())*100) / (len(self._hhi)*10000)
                     f2 = sum(self._log_bfs_degree.values()) / len(self._log_bfs_degree)
+
                     self.communities_history.append(self.communities_dict)
                     self.f_history.append(f)
                     self.multi_history.append((f1,f2))
@@ -721,6 +709,7 @@ class DeterministicCommunity(BaseCommunity):
                     # log history
                     f1 = -(sum(self._hhi.values())*100) / (len(self._hhi)*10000)
                     f2 = sum(self._log_bfs_degree.values()) / len(self._log_bfs_degree)
+
                     self.communities_history.append(communities_dict.copy())
                     self.f_history.append(f)
                     self.multi_history.append((f1,f2))
@@ -733,6 +722,42 @@ class DeterministicCommunity(BaseCommunity):
         print("Final objective:", f)
 
         return self.communities_dict, f
+
+    def _get_cache_hhi(self, edges:Optional[List[Tuple[int,int]]]=None) -> Tuple[type_cps, type_hhi]:
+
+        if edges is None:
+            edges = self._cond_probs_community.keys()
+
+        cond_probs_community = {}
+        hhi = {}
+        for edge in edges:
+            cond_probs_community[edge] = self._cond_probs_community[edge].copy()
+            hhi[edge] = self._hhi[edge]
+
+        return cond_probs_community, hhi
+
+    def _get_cache_bfs_degree(self, attr: List[int]=None) -> Tuple[type_bfs, type_bfs]:
+
+        if attr is None:
+            attr = self._bfs_degree.keys()
+
+        bfs_degree = {}
+        log_bfs_degree = {}
+        for attr in attr:
+            bfs_degree[attr] = self._bfs_degree[attr]
+            log_bfs_degree[attr] = self._log_bfs_degree[attr]
+
+        return bfs_degree, log_bfs_degree
+
+    def _set_cache_hhi(self, cond_probs_community: type_cps, hhi: type_hhi):
+        for edge in cond_probs_community.keys():
+            self._cond_probs_community[edge] = cond_probs_community[edge].copy()
+            self._hhi[edge] = hhi[edge]
+
+    def _set_cache_bfs_degree(self, bfs_degree: type_bfs, log_bfs_degree: type_bfs):
+        for attr in bfs_degree.keys():
+            self._bfs_degree[attr] = bfs_degree[attr]
+            self._log_bfs_degree[attr] = log_bfs_degree[attr]
 
     def _update_hhi_scores(self, edges_to_update: Optional[List[Tuple[str,str]]] = None):
 
@@ -779,6 +804,17 @@ class DeterministicCommunity(BaseCommunity):
 
                 if self.attr_key2w[attr] > 0:
                     self._log_bfs_degree[attr] = np.log(self._bfs_degree[attr])
+
+    def __del__(self):
+        super().__del__()
+
+        if self.use_gpu and self._init_gpu:
+            del self._edge_attr_d
+            del self._edge_weights_d
+            del self._edges_neighbour_d
+            del self._edge_unique_index_d
+            del self._cp_sparse_values_d
+            del self._cp_sparse_attr_d
 
 
 class StochasticCommunity(BaseCommunity):
@@ -852,8 +888,15 @@ class StochasticCommunity(BaseCommunity):
         self._randomwalk_gpu()
 
         # Calculate the initial mean hhi over all routes
-        self._update_scores_gpu(0,0)
-        self._update_scores_community()
+        self.update_scores(0,0)
+
+    def update_scores(self, community_to_merge: int, new_community: int):
+        super().update_scores(community_to_merge, new_community)
+        if self.use_gpu and self._init_gpu:
+            self._update_scores_gpu(community_to_merge, new_community)
+            self._update_community_weights()
+        else:
+            pass
 
     def _randomwalk_gpu(self,testing = False):
 
@@ -1109,7 +1152,7 @@ class StochasticCommunity(BaseCommunity):
 
         bfs_estimate = cum_weight_h
         bfs_estimate = np.nansum(bfs_estimate,axis=0)
-        log_bfs = np.where(bfs_estimate > 0.0, np.log(bfs_estimate), 0.0)
+        log_bfs = safe_log(bfs_estimate)
 
         if testing:
             return edge_samples_h, walks_nodes_h, walks_nodes_weights_h, edge_counts_h, cum_weight_h, hhi_estimate, bfs_estimate, log_bfs
@@ -1152,7 +1195,7 @@ class StochasticCommunity(BaseCommunity):
             parallel_reduce
         ):
 
-        if community_i > community_j:
+        if community_i < community_j:
             stream = streams[batch_index % len(streams)]
 
             # Perform stochastic evaluation using the selected stream
@@ -1201,21 +1244,23 @@ class StochasticCommunity(BaseCommunity):
         for i, hhi in enumerate(hhi_estimate):
             self._hhi[self.edge_ui2pair[i]] = hhi
 
-        for i, log_bfs in enumerate(log_bfs):
-            self._log_bfs_degree[self.attr_i2key[i]] = log_bfs
-
+        for i, (b, log_b) in enumerate(zip(bfs_estimate,log_bfs)):
+            self._bfs_degree[self.attr_i2key[i]] = b
+            self._log_bfs_degree[self.attr_i2key[i]] = log_b
+        
         return hhi_estimate, bfs_estimate, log_bfs
 
     def _greedy_optimize_gpu(
             self,
             weights: Optional[Tuple[float,float]]=(0.5,0.5),
             max_iterations: Optional[int]=1000,
+            n_sample_pairs: Optional[int]=None,
             num_streams: Optional[int] = 1,
             testing_opt: Optional[bool] = False,
             parallel_reduce: Optional[bool] = False
         ) -> Tuple[Dict[int,int], float]:
 
-        f1 = -(sum(self._hhi.values())*100) / (len(self._hhi)*10000)
+        f1 = -(sum(self._hhi.values())*100) / (len(self._hhi))
         f2 = sum(self._log_bfs_degree.values()) / len(self._log_bfs_degree)
         f = multiobjective(f1,f2,weights)
 
@@ -1244,50 +1289,62 @@ class StochasticCommunity(BaseCommunity):
 
                 # Create streams
                 streams = [self.cuda.stream() for _ in range(num_streams)]
-                all_pairs = list(itertools.product(range(self.n_communities), range(self.n_communities)))  
-                num_total_batches = len(all_pairs)
+                improvement_sample = False
+                n_feasible_pairs = self.n_communities**2 - len(self._sampled_communities_pairs)
+                n_sample_pairs = _default_if_none(n_sample_pairs,n_feasible_pairs,'n_sample_pairs')
 
-                # Use ThreadPoolExecutor to parallelize the loop
-                with ThreadPoolExecutor(max_workers=num_streams) as executor:
-                    futures = []
-                    for batch_index, (community_i, community_j) in enumerate(all_pairs):
-                        future = executor.submit(
-                            self._process_batch,
-                            batch_index,
-                            community_i,
-                            community_j,
-                            streams,
-                            self._edge_samples_d,
-                            self._walks_attr_cp_d,
-                            self._walks_attr_d,
-                            self._source_attr_counts_d,
-                            membership_pairs_d,
-                            weights,
-                            f,
-                            parallel_reduce
-                        )
-                        futures.append(future)
+                with tqdm(total=n_feasible_pairs, desc="Inner Loop") as pbar_inner:
+                    while True:
+                        sample_pairs = self._sample_community_pairs(n_sample_pairs)
+                        
+                        if not sample_pairs:
+                            break
 
-                    # Collect results and update max_increase and best_pair
-                    for future in tqdm(futures, total=num_total_batches, desc="merges processed"):
-                        increase, community_i, community_j, hhi_estimate, bfs_estimate = future.result()
+                        # Use ThreadPoolExecutor to parallelize the loop
+                        with ThreadPoolExecutor(max_workers=num_streams) as executor:
+                            futures = []
+                            for batch_index, (community_i, community_j) in enumerate(sample_pairs):
+                                future = executor.submit(
+                                    self._process_batch,
+                                    batch_index,
+                                    community_i,
+                                    community_j,
+                                    streams,
+                                    self._edge_samples_d,
+                                    self._walks_attr_cp_d,
+                                    self._walks_attr_d,
+                                    self._source_attr_counts_d,
+                                    membership_pairs_d,
+                                    weights,
+                                    f,
+                                    parallel_reduce
+                                )
+                                futures.append(future)
 
-                        if community_i > community_j:
-                            if increase > max_increase:
-                                max_increase = increase
-                                best_pair = (community_i, community_j)
+                            # Collect results and update max_increase and best_pair
+                            for future in futures:
+                                increase, community_i, community_j, hhi_estimate, bfs_estimate = future.result()
+                                pbar_inner.update(1)
+                                if community_i < community_j:
+                                    if increase > max_increase:
+                                        max_increase = increase
+                                        best_pair = (community_i, community_j)
+                                        improvement_sample = True
 
-                            if testing_opt:
-                                hhi_pairs_h[community_i,community_j,:] = hhi_estimate
-                                bfs_pairs_h[community_i,community_j,:] = bfs_estimate
+                                    if testing_opt:
+                                        hhi_pairs_h[community_i,community_j,:] = hhi_estimate
+                                        bfs_pairs_h[community_i,community_j,:] = bfs_estimate
+                        
+                        # Synchronize all streams
+                        for stream in streams:
+                            stream.synchronize()
 
-                # Synchronize all streams
-                for stream in streams:
-                    stream.synchronize()
+                        if improvement_sample:
+                            break
 
                 # If the maximum increase is greater than 0, merge these two communities and update the mean hhi
                 if max_increase > 0:
-                    self._update_scores_gpu(*best_pair)
+                    self.update_scores(*best_pair)
                     self.communities_dict = self._communities_dict
                     f += max_increase
                     improvement = True
@@ -1307,18 +1364,12 @@ class StochasticCommunity(BaseCommunity):
             return membership_pairs_d.copy_to_host(), hhi_pairs_h, bfs_pairs_h
 
     def __del__(self):
-        if self.use_gpu:
-            print("Destructor: Instance destroyed")
-            del self._adj_d
+        super().__del__()
+
+        if self.use_gpu and self._init_gpu:
             del self._adj_dense_d
             del self._adj3_d
             del self._adj_dense_index_d
-            del self._edge_attr_d
-            del self._edge_bfs_d
-            del self._edges_neighbour_d
-            del self._edge_unique_index_d
-            del self._cp_sparse_values_d
-            del self._cp_sparse_attr_d
             del self._node_spatial_list_d
             del self._node_spatial_degree_d
             del self._edge_samples_d

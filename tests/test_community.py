@@ -895,11 +895,13 @@ class TestDeterministic():
         init_communities_test = example_case_param
 
         test_class = DeterministicCommunity(MG, communities_dict=init_communities_test)
+        n_omit_samples = int(test_class.n_communities*(test_class.n_communities+1)/2)
+        n_test_samples = test_class.n_communities**2 - n_omit_samples
 
-        assert test_class._sample_community_pairs(3)
-        assert test_class._sample_community_pairs(3)
-        assert test_class._sample_community_pairs(3)
+        assert test_class.n_communities**2 - len(test_class._sampled_communities_pairs) == n_test_samples
 
+        while samples:=test_class._sample_community_pairs(3):
+            assert len(samples) <= n_test_samples
 
     @pytest.mark.dependency()
     def test_sampler_dist(self,example_case_param):
@@ -1048,7 +1050,7 @@ class TestDeterministic():
         print(test_class.f_history)
         print(test_class.communities_history)
 
-
+@pytest.mark.filterwarnings("ignore:NumbaPerformanceWarning")
 class TestStochastic():
 
     n_samples_edge=500
@@ -1265,7 +1267,8 @@ class TestStochastic():
 
         assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
 
-    def test_optimize_gpu(self, init_class_gpu: StochasticCommunity, optimization_cases):
+    @pytest.mark.parametrize("n_sample_pairs", [12, 4], ids=['no sampling', '8 samples'])
+    def test_optimize_gpu(self, init_class_gpu: StochasticCommunity, optimization_cases, n_sample_pairs):
         _, weights, test_communities_dict = optimization_cases
 
         test_class = init_class_gpu
@@ -1273,6 +1276,7 @@ class TestStochastic():
         membership_pairs, hhi_pairs, weights_pairs = test_class.greedy_optimize(
                 weights=weights,
                 testing_opt=True,
+                n_sample_pairs=n_sample_pairs,
                 num_streams=self.num_streams
             )
 
