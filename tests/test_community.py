@@ -21,7 +21,7 @@ from scipy.stats import chisquare
 from scipy.special import kl_div
 from numba import cuda
 
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 
 seed = 1234
 tolerance = 1e-6
@@ -862,21 +862,21 @@ def test_cuda_blocks():
     (
         np.array(
             [
-                [  0,   0,   0, 191, 309],        
-                [500,   0,   0,   0,   0],        
-                [  0,   0, 500,   0,   0],        
-                [  0, 500,   0,   0,   0],        
-                [  0,   0, 399, 101,   0],        
+                [  0,   0,   0, 191, 309],
+                [500,   0,   0,   0,   0],
+                [  0,   0, 500,   0,   0],
+                [  0, 500,   0,   0,   0],
+                [  0,   0, 399, 101,   0],
                 [  0,   0,   0,   0, 500]
             ], dtype = np.int32
         ),
         np.array(
             [
-                [  0,   0,   0, 191, 309],        
-                [500,   0,   0,   0,   0],        
-                [  0,   0, 500,   0,   0],        
-                [  0, 500,   0,   0,   0],        
-                [  0,   0,   0, 399, 101],        
+                [  0,   0,   0, 191, 309],
+                [500,   0,   0,   0,   0],
+                [  0,   0, 500,   0,   0],
+                [  0, 500,   0,   0,   0],
+                [  0,   0,   0, 399, 101],
                 [  0,   0,   0,   0, 500]
             ], dtype = np.int32
         )
@@ -884,21 +884,21 @@ def test_cuda_blocks():
     (
         np.array(
             [
-                [  0,   0,   0, 191, 309],        
-                [500,   0,   0,   0,   0],        
-                [  0,   0, 500,   0,   0],        
-                [  0, 500,   0,   0,   0],        
-                [  0,   0, 399, 101,   0],        
+                [  0,   0,   0, 191, 309],
+                [500,   0,   0,   0,   0],
+                [  0,   0, 500,   0,   0],
+                [  0, 500,   0,   0,   0],
+                [  0,   0, 399, 101,   0],
                 [  0,   0,   0,   0, 500]
             ], dtype = np.int32
         ),
         np.array(
             [
-                [  0,   0,   0, 191, 309],        
-                [500,   0,   0,   0,   0],        
-                [  0,   0, 500,   0,   0],        
-                [  0, 500,   0,   0,   0],        
-                [  0,   0,   0, 500,   0],        
+                [  0,   0,   0, 191, 309],
+                [500,   0,   0,   0,   0],
+                [  0,   0, 500,   0,   0],
+                [  0, 500,   0,   0,   0],
+                [  0,   0,   0, 500,   0],
                 [  0,   0,   0,   0, 500]
             ], dtype = np.int32
         )
@@ -918,10 +918,10 @@ def test_hist_diff(reduced_counts_base, reduced_counts):
 
     reduced_counts_base_h = reduced_counts_base
     reduced_counts_h = reduced_counts
-    # Assuming your matrices are named matrix1 and matrix2  
-    hhi_new = np.sort(reduced_counts_h, axis=1)  
-    hhi_base = np.sort(reduced_counts_base_h, axis=1)  
-    distributions_changed_test = np.any(hhi_new != hhi_base, axis=1) 
+    # Assuming your matrices are named matrix1 and matrix2
+    hhi_new = np.sort(reduced_counts_h, axis=1)
+    hhi_base = np.sort(reduced_counts_base_h, axis=1)
+    distributions_changed_test = np.any(hhi_new != hhi_base, axis=1)
 
     nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(reduced_counts.shape[0], ), TPB = 8)
 
@@ -961,7 +961,7 @@ class TestDeterministic():
         assert all(key in test_HHI.keys() for key in test_class.hhi)
 
         for key,value in test_class.hhi.items():
-            assert abs(test_HHI[key] - value) < tolerance 
+            assert abs(test_HHI[key] - value) < tolerance
 
         assert all(key in test_weights_dict.keys() for key in test_class.bfs_degree)
 
@@ -1114,7 +1114,7 @@ class TestDeterministic():
             assert value == merge_communities_test[key]
 
         for key,value in zip(test_class.edge_unique_list,hhi_pairs[community_to_merge,new_community]):
-            assert abs(test_HHI[key] - value) < tolerance 
+            assert abs(test_HHI[key] - value) < tolerance
 
         for key,value in zip(test_class.attr_list,weights_pairs[community_to_merge,new_community]):
             assert test_weights_dict[key] == value
@@ -1132,66 +1132,58 @@ class TestDeterministic():
         print(test_class.f_history)
         print(test_class.communities_history)
 
-    def test_memo(self, example_case, example_merge, init_class: DeterministicCommunity):
+    def test_save_load(init_class_gpu: DeterministicCommunity, example_case, tmp_path):
 
-        test_class = init_class
+        directory = tmp_path / "test_save"
+        directory.mkdir()
 
-        init_n_communities = test_class.n_communities
+        MG, _, _, _, _, _ = example_case
 
-        _, nodes_airlines_dict, \
-        test_HHI, test_weights_dict, \
-        test_weights_individual_dict, \
-        init_communities_test = example_case
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True)
+        test_class.init_gpu(num_streams=test_class.n_communities)
 
-        all_samples = list(itertools.product(range(init_n_communities), range(init_n_communities)))  
-        
-        init_memo = {}
-        for sample in all_samples:
-            test_class.update_scores(*sample, update_communities=False)
-            f1 = -(sum(test_class._hhi.values())*100) / (len(test_class._hhi)*10000)
-            f2 = sum(test_class._log_bfs_degree.values()) / len(test_class._log_bfs_degree)
-            f_new = multiobjective(f1,f2,weights=(0.5,0.5))
-            init_memo[sample] = {
-                "f1": f1,
-                "f2": f2,
-                "f": f_new,
-            }
+        test_class.greedy_optimize(
+            batch_size=1,
+            debug=False
+        )
 
-        _, \
-        community_to_merge, new_community, \
-        merge_communities_test, merge_HHI, \
-        merge_weights_dict, test_weights_individual_dict = example_merge
+        test_class.save(directory=directory)
 
-        test_class.update_scores(community_to_merge,new_community)
-        sorted2orig, orig2sorted, test_class._communities_dict, test_class._distinct_communities, test_class.n_communities = resort_communities(test_class._communities_dict)
-        merge_n_communities = test_class.n_communities
+        data_to_load = {
+            'communities_dict':     {"name" : '_communities_dict', "dtype" : dict},
+            'log_bfs_degree':       {"name" : '_log_bfs_degree', "dtype" : dict},
+            'bfs_degree':           {"name" : '_bfs_degree', "dtype" : dict},
+            'hhi':                  {"name" : '_hhi', "dtype" : Dict[Tuple[str,str],int]},
+            'bfs_degree_community': {"name" : 'bfs_degree_community', "dtype" : np.ndarray},
+            'communities_history':  {"name" : 'communities_history', "dtype" : List[Dict[str,int]]},
+            'f_history':            {"name" : 'f_history', "dtype" : list},
+            'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
+        }
 
-        all_samples = list(itertools.product(range(merge_n_communities), range(merge_n_communities)))  
-        
-        merge_memo = {}
-        for pair, value in init_memo.items():
-            if community_to_merge in pair or new_community in pair:
-                continue
-            new_pair = (orig2sorted[pair[0]], orig2sorted[pair[1]])
-            merge_memo[new_pair] = value
+        test_data = {}
+        for name, attr in data_to_load.items():
+            test_data[name] = getattr(test_class,attr["name"])
 
-        merge_memo_test = {}
-        for sample in all_samples:
-            test_class.update_scores(*sample, update_communities=False)
-            f1 = -(sum(test_class._hhi.values())*100) / (len(test_class._hhi)*10000)
-            f2 = sum(test_class._log_bfs_degree.values()) / len(test_class._log_bfs_degree)
-            f_new = multiobjective(f1,f2,weights=(0.5,0.5))
-            merge_memo_test[sample] = {
-                "f1": f1,
-                "f2": f2,
-                "f": f_new,
-            }
+        del test_class
 
-        for key,value in merge_memo_test.items():
-            assert merge_memo.get(key,value) == value
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True)
+        test_class.load(directory=directory)
 
-        return
-
+        for name, attr in data_to_load.items():
+            if attr["dtype"] == np.ndarray:
+                assert np.allclose(getattr(test_class,attr["name"]), test_data[name], rtol=1e-1)
+            elif attr["dtype"] == list:
+                for value, test_value in zip(getattr(test_class,attr["name"]), test_data[name]):
+                    assert abs(value - test_value) < 1e-6
+            elif attr["dtype"] == List[Dict[str,int]]:
+                for value, test_value in zip(getattr(test_class,attr["name"]), test_data[name]):
+                    assert value == test_value
+            elif attr["dtype"] == List[Tuple[float,float]]:
+                for value, test_value in zip(getattr(test_class,attr["name"]), test_data[name]):
+                    for value_i, test_value_i in zip(value, test_value):
+                        assert abs(value_i - test_value_i) < 1e-6
+            else:
+                assert getattr(test_class,attr["name"]) == test_data[name]
 
 class TestStochastic():
 
@@ -1454,7 +1446,7 @@ class TestStochastic():
 
         assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
         assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
-        
+
         membership_pairs = test_class._calculate_members_gpu()
 
         edge_samples, walks_spatial, walks_edges_spatial, \

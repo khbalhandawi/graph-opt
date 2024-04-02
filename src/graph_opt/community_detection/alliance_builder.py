@@ -38,7 +38,32 @@ type_bfs = NewType('type_bfs', Dict[int, float])
 def multiobjective(f1: Union[float,np.ndarray], f2: Union[float,np.ndarray], weights: Optional[Tuple[float,float]]=(0.5,0.5)):
     return weights[0]*f1 + weights[1]*f2
 
+def load_dict(data):
+    return data
+
+def load_tuple_dict(data):
+    return defaultdict(float, {tuple(k.strip('()').replace("'", "").split(', ')): v for k, v in data.items()})
+
+def load_np_array(data):
+    return np.array(data)
+
+dtype_load_func = {
+    Dict[Tuple[str,str],int]: load_tuple_dict,
+    np.ndarray: load_np_array,
+    # Add more dtype load functions as needed
+}
+
+
 class BaseCommunity(ABC):
+
+    def _jsonmode(func):
+        def wrapper(self, directory='models', **kwargs):
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+
+            func(self, directory=directory)
+
+        return wrapper
 
     def __init__(
             self,
@@ -130,7 +155,7 @@ class BaseCommunity(ABC):
         sorted2orig, orig2sorted, self._communities_dict, self._distinct_communities, self.n_communities = resort_communities(value)
 
     @property
-    def market_shares_community(self) -> type_cps:
+    def cond_probs_community(self) -> type_cps:
         return {edge: self._cond_probs_community[edge].copy() for edge in self._cond_probs_community.keys()}
 
     @property
@@ -180,12 +205,12 @@ class BaseCommunity(ABC):
             and the objective function value
         """
         pass
-    
+
     def update_scores(self, community_to_merge: int, new_community: int, update_communities: Optional[bool]=True) -> Tuple[List[Tuple[str,str]], List[str]]:
         edges_to_update, attr_to_update = self._update_communities(community_to_merge,new_community,update_communities)
         self.communities_dict = self._communities_dict
         return edges_to_update, attr_to_update
-    
+
     def _update_communities(self, community_to_merge: int, new_community: int, update_communities: bool) -> Tuple[List[Tuple[str,str]], List[str]]:
         # Find the attr in the community to merge
         attr_to_update_hhi = [k for k, v in self._communities_dict.items() if v in [community_to_merge,]]
@@ -212,7 +237,7 @@ class BaseCommunity(ABC):
         for i in range(self.n_communities):
             for j in range(self.n_communities):
                 if i >= j:
-                    self._sampled_communities_pairs.add((i,j)) 
+                    self._sampled_communities_pairs.add((i,j))
 
                 weight_i = self.bfs_degree_community[i]
                 weight_j = self.bfs_degree_community[j]
@@ -304,19 +329,30 @@ class BaseCommunity(ABC):
 
             self.communities_dict = communities_dict
         else:
-            self.communities_dict = communities_dict
+            n_not_defined = len(communities_dict)
+            _communities_dict = {}
+            for i,attr in enumerate(self.attr_list):
+                value = communities_dict.get(attr,None)
+
+                if value is not None:
+                    _communities_dict[attr] = value
+                else:
+                    _communities_dict[attr] = n_not_defined
+                    n_not_defined += 1
+
+            self.communities_dict = _communities_dict
 
     def _sample_community_pairs(self, n_samples: int = 5, epsilon: float = 0.1, replace: Optional[bool] = False) -> Union[list,bool]:
-        
+
         rng_np = self.random_state[1]
-        all_samples = list(itertools.product(range(self.n_communities), range(self.n_communities)))  
+        all_samples = list(itertools.product(range(self.n_communities), range(self.n_communities)))
 
         sample_set = set(all_samples) - self._sampled_communities_pairs
-        sample_list = list(sample_set)  # convert set to list  
+        sample_list = list(sample_set)  # convert set to list
 
         if len(sample_list) == 0:
             return False
-    
+
         probabilities = self.bfs_degree_community[sample_list] / np.sum(self.bfs_degree_community)
         probabilities_pairs = probabilities[:,0] * probabilities[:,1]
         probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
@@ -335,7 +371,7 @@ class BaseCommunity(ABC):
             self._sampled_communities_pairs |= set(sample_is_pairs)
 
         sample_set = set(all_samples) - self._sampled_communities_pairs
-        sample_list = list(sample_set)  # convert set to list 
+        sample_list = list(sample_set)  # convert set to list
 
         if not replace:
             n_samples_uni = min(len(sample_list),n_samples_uni)
@@ -347,12 +383,48 @@ class BaseCommunity(ABC):
 
 
         return sample_is_pairs + sample_uni_pairs
-    
+
     def __del__(self):
         if self.use_gpu and self._init_gpu:
             print("Destructor: Instance destroyed")
             del self._adj_d
 
+    @_jsonmode
+    def save(self, directory=None, **kwargs):
+        data_to_save = {
+            'communities_dict': self._communities_dict,
+            'log_bfs_degree': self._log_bfs_degree,
+            'bfs_degree': self._bfs_degree,
+            'hhi': {str(k): v for k, v in self._hhi.items()},
+            'bfs_degree_community': self.bfs_degree_community.tolist() if isinstance(self.bfs_degree_community, np.ndarray) else self.bfs_degree_community,
+            'communities_history': self.communities_history,
+            'f_history': self.f_history,
+            'multi_history': self.multi_history
+        }
+
+        for name, data in data_to_save.items():
+            with open(f'{directory}/{name}.json', 'w') as f:
+                json.dump(data, f, indent=4)
+
+    @_jsonmode
+    def load(self, directory=None, **kwargs):
+        data_to_load = {
+            'communities_dict':     {"name" : '_communities_dict', "dtype" : dict},
+            'log_bfs_degree':       {"name" : '_log_bfs_degree', "dtype" : dict},
+            'bfs_degree':           {"name" : '_bfs_degree', "dtype" : dict},
+            'hhi':                  {"name" : '_hhi', "dtype" : Dict[Tuple[str,str],int]},
+            'bfs_degree_community': {"name" : 'bfs_degree_community', "dtype" : np.ndarray},
+            'communities_history':  {"name" : 'communities_history', "dtype" : List[Dict[str,int]]},
+            'f_history':            {"name" : 'f_history', "dtype" : list},
+            'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
+        }
+
+        for name, data_dict in data_to_load.items():
+            with open(f'{directory}/{name}.json', 'r') as f:
+                data = json.load(f)
+                dtype = data_dict["dtype"]
+                data = dtype_load_func.get(dtype, load_dict)(data)
+                setattr(self, data_dict["name"], data)
 
 class DeterministicCommunity(BaseCommunity):
 
@@ -688,7 +760,7 @@ class DeterministicCommunity(BaseCommunity):
 
                 # cache current partition
                 communities_dict = self.communities_dict
-                market_shares_community, hhi = self._get_cache_hhi()
+                cond_probs_community, hhi = self._get_cache_hhi()
                 bfs_degree, log_bfs_degree = self._get_cache_bfs_degree()
 
                 # For each pair of communities
@@ -714,7 +786,7 @@ class DeterministicCommunity(BaseCommunity):
 
                                 # Revert the merge
                                 self.communities_dict = communities_dict
-                                self._set_cache_hhi(market_shares_community, hhi)
+                                self._set_cache_hhi(cond_probs_community, hhi)
                                 self._set_cache_bfs_degree(bfs_degree, log_bfs_degree)
 
                             pbar_inner.update(1)
@@ -919,9 +991,9 @@ class StochasticCommunity(BaseCommunity):
         self.update_scores(0,0)
 
     def update_scores(
-            self, 
-            community_to_merge: int, 
-            new_community: int, 
+            self,
+            community_to_merge: int,
+            new_community: int,
             reduced_counts_base_d: Optional[np.ndarray] = None,
             cum_weight_base_d: Optional[np.ndarray] = None,
             stream_id: Optional[int] = 0
@@ -1240,8 +1312,8 @@ class StochasticCommunity(BaseCommunity):
         ):
 
         if community_i < community_j:
-            stream_id = batch_index % len(self.streams)  
-            stream = self.streams[stream_id]  
+            stream_id = batch_index % len(self.streams)
+            stream = self.streams[stream_id]
 
             # Perform stochastic evaluation using the selected stream
             hhi_estimate, bfs_estimate, log_bfs = self._stochastic_eval_gpu(
@@ -1263,10 +1335,10 @@ class StochasticCommunity(BaseCommunity):
             if not self.use_gpu:
                 reduced_counts_base_h = reduced_counts_base_d.copy_to_host()
                 reduced_counts_h = reduced_counts_d.copy_to_host()
-                # Assuming your matrices are named matrix1 and matrix2  
-                hhi_new = np.sort(reduced_counts_h, axis=1)  
-                hhi_base = np.sort(reduced_counts_base_h, axis=1)  
-                distributions_changed = np.any(hhi_new != hhi_base, axis=1) 
+                # Assuming your matrices are named matrix1 and matrix2
+                hhi_new = np.sort(reduced_counts_h, axis=1)
+                hhi_base = np.sort(reduced_counts_base_h, axis=1)
+                distributions_changed = np.any(hhi_new != hhi_base, axis=1)
             else:
                 nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, ), TPB = self.TPB_1D)
 
@@ -1319,7 +1391,7 @@ class StochasticCommunity(BaseCommunity):
         for i, (b, log_b) in enumerate(zip(bfs_estimate,log_bfs)):
             self._bfs_degree[self.attr_i2key[i]] = b
             self._log_bfs_degree[self.attr_i2key[i]] = log_b
-        
+
         return hhi_estimate, bfs_estimate, log_bfs
 
     def _greedy_optimize_gpu(
@@ -1339,7 +1411,7 @@ class StochasticCommunity(BaseCommunity):
         self.reduced_counts_streams = [self.cuda.device_array((self.n_unique_edges,self.n_communities), dtype=np.int32, stream=stream) for stream in self.streams]
 
         hhi_estimate, bfs_estimate, log_bfs = self.update_scores(0,0,reduced_counts_base_d,cum_weight_base_d)
-        
+
         f1 = -np.mean(list(self._hhi.values())) * 100
         f2 = np.mean(list(self._log_bfs_degree.values()))
         f = multiobjective(f1,f2,weights)
@@ -1375,7 +1447,7 @@ class StochasticCommunity(BaseCommunity):
                 with tqdm(total=n_feasible_pairs, desc="Inner Loop") as pbar_inner:
                     while True:
                         sample_pairs = self._sample_community_pairs(n_sample_pairs, epsilon)
-                        
+
                         if not sample_pairs:
                             break
 
@@ -1416,7 +1488,7 @@ class StochasticCommunity(BaseCommunity):
                                     if testing_opt:
                                         hhi_pairs_h[community_i,community_j,:] = hhi_estimate
                                         bfs_pairs_h[community_i,community_j,:] = bfs_estimate
-                        
+
                         # Synchronize all streams
                         for stream in self.streams:
                             stream.synchronize()
