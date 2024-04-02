@@ -1,12 +1,14 @@
 from cgi import test
+from collections import defaultdict
 from doctest import debug
 from optparse import Option
 import pytest
 import os
 
 from sklearn.covariance import log_likelihood
-from ..community_detection.alliance_builder import DeterministicCommunity, StochasticCommunity, BaseCommunity
+from ..community_detection.alliance_builder import DeterministicCommunity, StochasticCommunity, BaseCommunity, multiobjective
 from ..community_detection.utilities import resort_communities, same_community
+from ..community_detection.utilities_cuda import define_cuda_kernels_stochastic
 from ..utilities import cuda_blocks
 
 import numpy as np
@@ -17,10 +19,12 @@ import math
 import itertools
 from scipy.stats import chisquare
 from scipy.special import kl_div
+from numba import cuda
 
 from typing import Optional, Tuple, Dict
 
 seed = 1234
+tolerance = 1e-6
 
 def get_conditional_prob(test_class: StochasticCommunity):
 
@@ -40,7 +44,7 @@ def get_likelihood_prob(test_class: StochasticCommunity):
 
         for u,v,key in test_class.edge_attr2keypair_list[attr]:
             j = test_class.edge_pairkey2ui[(u,v,key)]
-            edge_weight = test_class.edge_pairkey2atrr[(u,v,key)]["weight"]
+            edge_weight = test_class.edge_pairkey2data[(u,v,key)]["weight"]
             likelihood_edge_attr[i,j] += edge_weight / attr_weight
 
     return likelihood_edge_attr
@@ -116,17 +120,17 @@ def get_attr_bfs_probabilities(
         return probabilities
 
     edges = test_class.edge_u2pairkey_list[source_u]
-    total_weight = sum(test_class.edge_pairkey2atrr[edge]['weight'] for edge in edges)
+    total_weight = sum(test_class.edge_pairkey2data[edge]['weight'] for edge in edges)
     target_community = test_class.communities_dict[target_attr]
 
     for u, v, key in edges:
         curr_edge = (u, v, key)
         edge_prob = test_class.edge_pair2w[(u,v)] / total_weight
-        edge_type_prob = test_class.edge_pairkey2atrr[curr_edge]['market_share_percent'] / 100.0
-        edge_type = test_class.edge_pairkey2atrr[curr_edge]['edge_type']
+        edge_type_prob = test_class.edge_pairkey2data[curr_edge]['market_share_percent'] / 100.0
+        edge_type = test_class.edge_pairkey2data[curr_edge]['edge_type']
         current_community = test_class.communities_dict[edge_type]
 
-        previous_edge_type = test_class.edge_pairkey2atrr[previous_edge]['edge_type'] if previous_edge is not None else None
+        previous_edge_type = test_class.edge_pairkey2data[previous_edge]['edge_type'] if previous_edge is not None else None
         previous_community = test_class.communities_dict.get(previous_edge_type,None)
 
         if current_depth == 1:
@@ -785,7 +789,7 @@ def test_same_community(dict1, dict2, expected):
     ]
 )
 def test_reorder(input_dict, test_dict, test_unique, test_n_communities):
-    key, reorder_dict, unique_list, n_communities = resort_communities(input_dict)
+    orig2sorted, sorted2orig, reorder_dict, unique_list, n_communities = resort_communities(input_dict)
     assert n_communities == test_n_communities
     assert reorder_dict == test_dict
     assert unique_list == test_unique
@@ -840,7 +844,8 @@ def test_sampler(test_vector, expected):
 
     assert np.allclose(p,expected,rtol=1e-1)
 
-    os.environ['NUMBA_ENABLE_CUDASIM'] = numba_sim # reset environment to default
+    if numba_sim is not None:
+        os.environ['NUMBA_ENABLE_CUDASIM'] = numba_sim # reset environment to default
 
 def test_cuda_blocks():
 
@@ -853,6 +858,85 @@ def test_cuda_blocks():
 
     return
 
+@pytest.mark.parametrize("reduced_counts_base, reduced_counts", [
+    (
+        np.array(
+            [
+                [  0,   0,   0, 191, 309],        
+                [500,   0,   0,   0,   0],        
+                [  0,   0, 500,   0,   0],        
+                [  0, 500,   0,   0,   0],        
+                [  0,   0, 399, 101,   0],        
+                [  0,   0,   0,   0, 500]
+            ], dtype = np.int32
+        ),
+        np.array(
+            [
+                [  0,   0,   0, 191, 309],        
+                [500,   0,   0,   0,   0],        
+                [  0,   0, 500,   0,   0],        
+                [  0, 500,   0,   0,   0],        
+                [  0,   0,   0, 399, 101],        
+                [  0,   0,   0,   0, 500]
+            ], dtype = np.int32
+        )
+    ),
+    (
+        np.array(
+            [
+                [  0,   0,   0, 191, 309],        
+                [500,   0,   0,   0,   0],        
+                [  0,   0, 500,   0,   0],        
+                [  0, 500,   0,   0,   0],        
+                [  0,   0, 399, 101,   0],        
+                [  0,   0,   0,   0, 500]
+            ], dtype = np.int32
+        ),
+        np.array(
+            [
+                [  0,   0,   0, 191, 309],        
+                [500,   0,   0,   0,   0],        
+                [  0,   0, 500,   0,   0],        
+                [  0, 500,   0,   0,   0],        
+                [  0,   0,   0, 500,   0],        
+                [  0,   0,   0,   0, 500]
+            ], dtype = np.int32
+        )
+    )
+], ids=['no difference', 'difference'])
+def test_hist_diff(reduced_counts_base, reduced_counts):
+
+    _, _, _, \
+        _, _, _, \
+        _, _, check_edge_distribution, \
+        _, _, _, \
+        _, _ = define_cuda_kernels_stochastic(1, 1, 500, 1, 1)
+
+    reduced_counts_base_d = cuda.to_device(reduced_counts_base)
+    reduced_counts_d = cuda.to_device(reduced_counts)
+    distributions_changed_d = cuda.device_array(reduced_counts.shape[0], dtype=np.int32)
+
+    reduced_counts_base_h = reduced_counts_base
+    reduced_counts_h = reduced_counts
+    # Assuming your matrices are named matrix1 and matrix2  
+    hhi_new = np.sort(reduced_counts_h, axis=1)  
+    hhi_base = np.sort(reduced_counts_base_h, axis=1)  
+    distributions_changed_test = np.any(hhi_new != hhi_base, axis=1) 
+
+    nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(reduced_counts.shape[0], ), TPB = 8)
+
+    check_edge_distribution[threadsperblock,blockspergrid](
+        reduced_counts_base_d,
+        reduced_counts_d,
+        distributions_changed_d
+    )
+
+    cuda.synchronize()
+
+    distributions_changed = distributions_changed_d.copy_to_host()
+    distributions_changed = distributions_changed > 0
+
+    assert np.all(distributions_changed_test == distributions_changed)
 
 class TestDeterministic():
 
@@ -877,7 +961,7 @@ class TestDeterministic():
         assert all(key in test_HHI.keys() for key in test_class.hhi)
 
         for key,value in test_class.hhi.items():
-            assert test_HHI[key] == value
+            assert abs(test_HHI[key] - value) < tolerance 
 
         assert all(key in test_weights_dict.keys() for key in test_class.bfs_degree)
 
@@ -968,11 +1052,10 @@ class TestDeterministic():
         MG, _, _, _, _, _ = example_case
 
         test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True)
-        test_class.init_gpu()
+        test_class.init_gpu(num_streams=test_class.n_communities)
 
         membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(
             max_iterations=1,
-            num_streams=test_class.n_communities,
             batch_size=1,
             debug=True
         )
@@ -993,11 +1076,10 @@ class TestDeterministic():
         # check all keys in test dictionary are present
         assert all(key in test_HHI.keys() for key in test_class.hhi)
 
-        for key,value in test_class.communities_dict.items():
-            assert value == merge_communities_test[key]
+        assert same_community(test_class.communities_dict, merge_communities_test)
 
         for key,value in test_class.hhi.items():
-            assert test_HHI[key] == value
+            assert abs(test_HHI[key] - value) < tolerance
 
         for key,value in test_class.bfs_degree.items():
             assert value == test_weights_dict[key] + test_weights_individual_dict[key]
@@ -1032,7 +1114,7 @@ class TestDeterministic():
             assert value == merge_communities_test[key]
 
         for key,value in zip(test_class.edge_unique_list,hhi_pairs[community_to_merge,new_community]):
-            assert test_HHI[key] == value
+            assert abs(test_HHI[key] - value) < tolerance 
 
         for key,value in zip(test_class.attr_list,weights_pairs[community_to_merge,new_community]):
             assert test_weights_dict[key] == value
@@ -1050,7 +1132,67 @@ class TestDeterministic():
         print(test_class.f_history)
         print(test_class.communities_history)
 
-@pytest.mark.filterwarnings("ignore:NumbaPerformanceWarning")
+    def test_memo(self, example_case, example_merge, init_class: DeterministicCommunity):
+
+        test_class = init_class
+
+        init_n_communities = test_class.n_communities
+
+        _, nodes_airlines_dict, \
+        test_HHI, test_weights_dict, \
+        test_weights_individual_dict, \
+        init_communities_test = example_case
+
+        all_samples = list(itertools.product(range(init_n_communities), range(init_n_communities)))  
+        
+        init_memo = {}
+        for sample in all_samples:
+            test_class.update_scores(*sample, update_communities=False)
+            f1 = -(sum(test_class._hhi.values())*100) / (len(test_class._hhi)*10000)
+            f2 = sum(test_class._log_bfs_degree.values()) / len(test_class._log_bfs_degree)
+            f_new = multiobjective(f1,f2,weights=(0.5,0.5))
+            init_memo[sample] = {
+                "f1": f1,
+                "f2": f2,
+                "f": f_new,
+            }
+
+        _, \
+        community_to_merge, new_community, \
+        merge_communities_test, merge_HHI, \
+        merge_weights_dict, test_weights_individual_dict = example_merge
+
+        test_class.update_scores(community_to_merge,new_community)
+        sorted2orig, orig2sorted, test_class._communities_dict, test_class._distinct_communities, test_class.n_communities = resort_communities(test_class._communities_dict)
+        merge_n_communities = test_class.n_communities
+
+        all_samples = list(itertools.product(range(merge_n_communities), range(merge_n_communities)))  
+        
+        merge_memo = {}
+        for pair, value in init_memo.items():
+            if community_to_merge in pair or new_community in pair:
+                continue
+            new_pair = (orig2sorted[pair[0]], orig2sorted[pair[1]])
+            merge_memo[new_pair] = value
+
+        merge_memo_test = {}
+        for sample in all_samples:
+            test_class.update_scores(*sample, update_communities=False)
+            f1 = -(sum(test_class._hhi.values())*100) / (len(test_class._hhi)*10000)
+            f2 = sum(test_class._log_bfs_degree.values()) / len(test_class._log_bfs_degree)
+            f_new = multiobjective(f1,f2,weights=(0.5,0.5))
+            merge_memo_test[sample] = {
+                "f1": f1,
+                "f2": f2,
+                "f": f_new,
+            }
+
+        for key,value in merge_memo_test.items():
+            assert merge_memo.get(key,value) == value
+
+        return
+
+
 class TestStochastic():
 
     n_samples_edge=500
@@ -1118,7 +1260,7 @@ class TestStochastic():
             n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length
         )
-        test_class.init_gpu(tile_size=self.tile_size)
+        test_class.init_gpu(tile_size=self.tile_size,num_streams=self.num_streams)
 
         return test_class
 
@@ -1150,7 +1292,7 @@ class TestStochastic():
             n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length
         )
-        test_class.init_gpu(tile_size=self.tile_size)
+        test_class.init_gpu(tile_size=self.tile_size, num_streams=1)
 
         membership_pairs = test_class._calculate_members_gpu()
 
@@ -1167,6 +1309,7 @@ class TestStochastic():
             source_attr_counts,
             membership_pairs,
             stream = test_class.cuda.stream(),
+            stream_id = 0,
             testing = True,
             parallel_reduce=self.parallel_reduce
         )
@@ -1242,11 +1385,12 @@ class TestStochastic():
             source_attr_counts,
             membership_pairs,
             stream = test_class.cuda.stream(),
+            stream_id = 0,
             testing = True,
             parallel_reduce = self.parallel_reduce
         )
 
-        test_class.update_scores(community_to_merge, new_community)
+        test_class.update_scores(community_to_merge, new_community, stream_id=0)
         test_class.communities_dict = test_class._communities_dict
 
         estimate_bfs = get_estimate_node_bfs_probabilities(
@@ -1267,7 +1411,7 @@ class TestStochastic():
 
         assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
 
-    @pytest.mark.parametrize("n_sample_pairs", [12, 4], ids=['no sampling', '8 samples'])
+    @pytest.mark.parametrize("n_sample_pairs", [12, 8], ids=['no sampling', '8 samples'])
     def test_optimize_gpu(self, init_class_gpu: StochasticCommunity, optimization_cases, n_sample_pairs):
         _, weights, test_communities_dict = optimization_cases
 
@@ -1277,7 +1421,8 @@ class TestStochastic():
                 weights=weights,
                 testing_opt=True,
                 n_sample_pairs=n_sample_pairs,
-                num_streams=self.num_streams
+                epsilon = 0.5,
+                rtol = 0.0
             )
 
         assert same_community(test_class.communities_dict, test_communities_dict)
@@ -1309,7 +1454,7 @@ class TestStochastic():
 
         assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
         assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
-
+        
         membership_pairs = test_class._calculate_members_gpu()
 
         edge_samples, walks_spatial, walks_edges_spatial, \

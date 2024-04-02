@@ -152,6 +152,7 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
 def define_cuda_kernels_stochastic(
         n_attr:int,
         n_nodes:int,
+        n_samples_edge:int,
         tile_size:int,
         max_size:int
     ) -> Tuple[Callable, Callable, Callable, Callable]:
@@ -433,6 +434,37 @@ def define_cuda_kernels_stochastic(
                 item = membership[ci,cj,samples[i, j]]
                 cuda.atomic.add(counts[i], item, 1)  # Pass the array and index separately
 
+    n_samples_edge+=1
+
+    @cuda.jit
+    def check_edge_distribution(counts_base, counts_new, result):
+        x = cuda.grid(1)
+        dx = cuda.gridsize(1)
+        hist1 = cuda.local.array(n_samples_edge, dtype=np.int32)
+        hist2 = cuda.local.array(n_samples_edge, dtype=np.int32)
+
+        for i in range(x, counts_base.shape[0], dx):
+            result[i] = 0
+            # Initialize histograms
+            for k in range(n_samples_edge):
+                hist1[k] = 0
+                hist2[k] = 0
+
+        cuda.syncthreads()
+
+        for i in range(x, counts_base.shape[0], dx):
+            
+            # Build histograms for the current row
+            for j in range(counts_base.shape[1]):
+                hist1[counts_base[i, j]] += 1
+                hist2[counts_new[i, j]] += 1
+            
+            # Compare histograms
+            for k in range(n_samples_edge):
+                if hist1[k] != hist2[k]:
+                    result[i] = 1
+                    break
+
     @cuda.jit
     def load_counts(
             ci,
@@ -568,5 +600,6 @@ def define_cuda_kernels_stochastic(
 
     return set_membership, spatial_random_walk, weighted_spatial_random_walk, \
         attr_sampler, attr_source_postprocess, edge_sampler, \
-        init_edge_counts, edge_postprocess, load_counts, edge_histogram, copy_reduced_counts, \
+        init_edge_counts, edge_postprocess, check_edge_distribution, \
+        load_counts, edge_histogram, copy_reduced_counts, \
         init_attr, attr_postprocess
