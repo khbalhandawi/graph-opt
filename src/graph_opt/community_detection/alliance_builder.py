@@ -4,7 +4,6 @@ from networkx import MultiDiGraph
 import numpy as np
 import os
 import json
-import matplotlib.pyplot as plt
 from copy import deepcopy
 import sys
 import random
@@ -25,7 +24,7 @@ else:
     from tqdm import tqdm
 
 from .utilities import resort_communities
-from ..utilities import _default_if_none, dict2array, cpu_gpu_dispatcher, cuda_blocks, safe_log
+from ..utilities import _default_if_none, dict2array, cpu_gpu_dispatcher, cuda_blocks, safe_log, serialize, deserialize
 
 from typing import Dict, List, Union, Tuple, Optional, NewType
 from ..random_settings import random_state
@@ -404,7 +403,7 @@ class BaseCommunity(ABC):
 
         for name, data in data_to_save.items():
             with open(f'{directory}/{name}.json', 'w') as f:
-                json.dump(data, f, indent=4)
+                json.dump(serialize(data), f, indent=4)
 
     @_jsonmode
     def load(self, directory=None, **kwargs):
@@ -421,7 +420,7 @@ class BaseCommunity(ABC):
 
         for name, data_dict in data_to_load.items():
             with open(f'{directory}/{name}.json', 'r') as f:
-                data = json.load(f)
+                data = deserialize(json.load(f))
                 dtype = data_dict["dtype"]
                 data = dtype_load_func.get(dtype, load_dict)(data)
                 setattr(self, data_dict["name"], data)

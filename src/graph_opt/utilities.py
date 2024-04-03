@@ -246,10 +246,12 @@ def serialize(input:Union[list,np.ndarray,dict,type]):
     if isinstance(input, dict):
         return {serialize(key): serialize(value)
                 for key, value in input.items()}
-    elif isinstance(input, (list,np.ndarray)):
+    elif isinstance(input, (list,tuple,np.ndarray)):
         return [serialize(element) for element in input]
     elif isinstance(input,np.integer):
         return int(input)
+    elif isinstance(input,(np.float16, np.float32, np.float64)):
+        return float(input)
     elif inspect.isclass(input):
         return input.__name__
     else:
@@ -272,7 +274,7 @@ def deserialize(input:Union[list,np.ndarray,dict,type]):
     if isinstance(input, dict):
         return {deserialize(key): deserialize(value)
                 for key, value in input.items()}
-    elif isinstance(input, (list,np.ndarray)):
+    elif isinstance(input, (list,tuple,np.ndarray)):
         return [deserialize(element) for element in input]
     elif isinstance(input, str):
         return input
@@ -390,3 +392,21 @@ def safe_log(a:np.ndarray) -> np.ndarray:
     out = np.zeros_like(a)
     out[nonzero_mask] = np.log(a[nonzero_mask])
     return out
+
+def membership2cluster(membership_dict: Dict[str,int]) -> Dict[int,Dict[str,Union[List[str],int]]]:
+    cluster_dict = {}
+
+    for key, value in membership_dict.items():
+        if value not in cluster_dict:
+            cluster_dict[value] = {'nodes': [key], 'n_vertices': 1}
+        else:
+            cluster_dict[value]['nodes'].append(key)
+            cluster_dict[value]['n_vertices'] += 1
+
+    # Sort the dictionary by 'n_vertices' in descending order  
+    sorted_tuples = sorted(cluster_dict.items(), key=lambda item: item[1]['n_vertices'], reverse=True)  
+    
+    # Convert list of tuples back to dictionary  
+    sorted_dict = {k: v for k, v in sorted_tuples}
+
+    return sorted_dict
