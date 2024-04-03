@@ -520,7 +520,7 @@ class DeterministicCommunity(BaseCommunity):
 
         # Loop while improvement is possible
         n_iterations = 0
-        with tqdm(total=max_iterations, desc="Outer Loop") as pbar_outer:
+        with tqdm(total=max_iterations, desc="Outer Loop", position=0, leave=False) as pbar_outer:
             while improvement and n_iterations < max_iterations:
 
                 improvement = False
@@ -557,7 +557,7 @@ class DeterministicCommunity(BaseCommunity):
 
                 # Batch processing with streams
                 num_total_batches = num_batches_i * num_batches_j
-                with tqdm(total=num_total_batches, desc="Batches processed") as pbar_inner:
+                with tqdm(total=num_total_batches, desc="Batches processed", position=1, leave=False) as pbar_inner:
                     for batch_index in range(num_total_batches):
                         batch_i = batch_index // num_batches_j
                         batch_j = batch_index % num_batches_j
@@ -751,7 +751,7 @@ class DeterministicCommunity(BaseCommunity):
 
         # Loop while improvement is possible
         n_iterations = 0
-        with tqdm(total=max_iterations, desc="Outer Loop") as pbar_outer:
+        with tqdm(total=max_iterations, desc="Outer Loop", position=0, leave=False) as pbar_outer:
             while improvement and n_iterations < max_iterations:
                 improvement = False
                 max_increase = 0
@@ -764,7 +764,7 @@ class DeterministicCommunity(BaseCommunity):
 
                 # For each pair of communities
                 n_pairs = len(self._distinct_communities)**2
-                with tqdm(total=n_pairs, desc="Inner Loop", leave=False) as pbar_inner:
+                with tqdm(total=n_pairs, desc="Inner Loop", position=1, leave=False) as pbar_inner:
                     for community1 in self._distinct_communities:
                         for community2 in self._distinct_communities:
                             if community1 != community2:
@@ -1425,7 +1425,7 @@ class StochasticCommunity(BaseCommunity):
 
         # Loop while improvement is possible
         n_iterations = 0
-        with tqdm(total=max_iterations, desc="Outer Loop") as pbar_outer:
+        with tqdm(total=max_iterations, desc="Outer Loop", position=0, leave=False) as pbar_outer:
             while improvement and n_iterations < max_iterations:
 
                 improvement = False
@@ -1443,7 +1443,7 @@ class StochasticCommunity(BaseCommunity):
                 n_feasible_pairs = self.n_communities**2 - len(self._sampled_communities_pairs)
                 n_sample_pairs = _default_if_none(n_sample_pairs,n_feasible_pairs,'n_sample_pairs')
 
-                with tqdm(total=n_feasible_pairs, desc="Inner Loop") as pbar_inner:
+                with tqdm(total=n_feasible_pairs, desc="Inner Loop", position=1, leave=False) as pbar_inner:
                     while True:
                         sample_pairs = self._sample_community_pairs(n_sample_pairs, epsilon)
 
