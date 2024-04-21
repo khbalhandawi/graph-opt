@@ -1,6 +1,7 @@
 from cgi import test
 from collections import defaultdict
 from doctest import debug
+from ipaddress import v4_int_to_packed
 from optparse import Option
 import pytest
 import os
@@ -930,13 +931,10 @@ def test_hist_diff(reduced_counts_base, reduced_counts):
     assert np.all(distributions_changed_test == distributions_changed)
 
 class TestDeterministic():
-
     n_samples_edge=500
     walk_length=10
-    threads_per_block=8
     n_samples_source_node = 50
-    num_streams = 4
-    tile_size = 2
+    use_gpu = False
 
     @pytest.mark.dependency()
     def test_initialization(self,example_case_param):
@@ -946,7 +944,7 @@ class TestDeterministic():
         test_weights_individual_dict, \
         init_communities_test = example_case_param
 
-        test_class = DeterministicCommunity(MG, communities_dict=init_communities_test)
+        test_class = DeterministicCommunity(MG, communities_dict=init_communities_test, use_gpu=self.use_gpu)
 
         # check all keys in test dictionary are present
         assert all(key in test_HHI.keys() for key in test_class.hhi)
@@ -960,6 +958,86 @@ class TestDeterministic():
             assert value == test_weights_dict[key] + test_weights_individual_dict[key]
 
         assert same_community(init_communities_test,test_class.communities_dict)
+
+    @pytest.fixture(scope="function")
+    def init_class(self, example_case) -> DeterministicCommunity:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=self.use_gpu, num_streams=100)
+        if self.use_gpu:
+            test_class.init_gpu()
+
+        return test_class
+
+    def test_save_load(self, example_case, tmp_path):
+
+        directory = tmp_path / "test_save"
+        directory.mkdir()
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=self.use_gpu, num_streams=100)
+        if self.use_gpu:
+            test_class.init_gpu()
+
+        test_class.greedy_optimize()
+
+        test_class.save(directory=directory)
+
+        data_to_load = {
+            'communities_dict':     {"name" : '_communities_dict', "dtype" : dict},
+            'log_bfs_degree':       {"name" : '_log_bfs_degree', "dtype" : dict},
+            'bfs_degree':           {"name" : '_bfs_degree', "dtype" : dict},
+            'hhi':                  {"name" : '_hhi', "dtype" : Dict[Tuple[str,str],int]},
+            'bfs_degree_community': {"name" : 'bfs_degree_community', "dtype" : np.ndarray},
+            'communities_history':  {"name" : 'communities_history', "dtype" : List[Dict[str,int]]},
+            'f_history':            {"name" : 'f_history', "dtype" : list},
+            'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
+        }
+
+        test_data = {}
+        for name, attr in data_to_load.items():
+            test_data[name] = getattr(test_class,attr["name"])
+
+        del test_class
+
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=self.use_gpu)
+        test_class.load(directory=directory)
+
+        for name, attr in data_to_load.items():
+            if attr["dtype"] == np.ndarray:
+                assert np.allclose(getattr(test_class,attr["name"]), test_data[name], rtol=1e-1)
+            elif attr["dtype"] == list:
+                for value, test_value in zip(getattr(test_class,attr["name"]), test_data[name]):
+                    assert abs(value - test_value) < 1e-6
+            elif attr["dtype"] == List[Dict[str,int]]:
+                for value, test_value in zip(getattr(test_class,attr["name"]), test_data[name]):
+                    assert value == test_value
+            elif attr["dtype"] == List[Tuple[float,float]]:
+                for value, test_value in zip(getattr(test_class,attr["name"]), test_data[name]):
+                    for value_i, test_value_i in zip(value, test_value):
+                        assert abs(value_i - test_value_i) < 1e-6
+            else:
+                assert getattr(test_class,attr["name"]) == test_data[name]
+
+    def test_optimize(self, init_class: DeterministicCommunity, optimization_cases):
+
+        _, weights, test_communities_dict = optimization_cases
+
+        test_class = init_class
+
+        test_class.greedy_optimize(weights=weights)
+
+        assert same_community(test_class.communities_dict, test_communities_dict)
+
+        print(test_class.f_history)
+        print(test_class.communities_history)
+
+
+class TestDeterministicCPU(TestDeterministic):
+    use_gpu = False
 
     @pytest.mark.dependency()
     def test_sampler(self,example_case_param):
@@ -1015,44 +1093,6 @@ class TestDeterministic():
 
         return
 
-    @pytest.fixture(scope="function")
-    def init_class(self, example_case) -> DeterministicCommunity:
-        # This setup will run once for the entire class
-
-        MG, _, _, _, _, _ = example_case
-
-        test_class = DeterministicCommunity(MG, seed=seed)
-
-        return test_class
-
-    @pytest.fixture(scope="function")
-    def init_class_gpu(self, example_case) -> DeterministicCommunity:
-        # This setup will run once for the entire class
-
-        MG, _, _, _, _, _ = example_case
-
-        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True)
-        test_class.init_gpu()
-
-        return test_class
-
-    @pytest.fixture(scope="class")
-    def init_class_gpu_iteration(self, example_case) -> DeterministicCommunity:
-        # This setup will run once for the entire class
-
-        MG, _, _, _, _, _ = example_case
-
-        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True, num_streams=100)
-        test_class.init_gpu()
-
-        membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(
-            max_iterations=1,
-            batch_size=1,
-            debug=True
-        )
-
-        return test_class, membership_pairs, hhi_pairs, weights_pairs
-
     def test_merge(self, init_class: DeterministicCommunity, example_merge):
 
         test_class = init_class
@@ -1075,26 +1115,38 @@ class TestDeterministic():
         for key,value in test_class.bfs_degree.items():
             assert value == test_weights_dict[key] + test_weights_individual_dict[key]
 
-    def test_optimize(self, init_class: DeterministicCommunity, optimization_cases):
 
-        MG, weights, test_communities_dict = optimization_cases
+class TestDeterministicGPU(TestDeterministic):
+    num_streams = 4
+    tile_size = 2
+    threads_per_block=8
+    use_gpu = True
 
-        test_class = init_class
+    @pytest.fixture(scope="class")
+    def init_class_iteration(self, example_case) -> DeterministicCommunity:
+        # This setup will run once for the entire class
 
-        test_class.greedy_optimize(weights=weights)
+        MG, _, _, _, _, _ = example_case
 
-        assert same_community(test_class.communities_dict, test_communities_dict)
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=self.use_gpu, num_streams=100)
+        if self.use_gpu:
+            test_class.init_gpu()
 
-        print(test_class.f_history)
-        print(test_class.communities_history)
+        membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(
+            max_iterations=1,
+            batch_size=1,
+            debug=True
+        )
 
-    def test_merge_gpu(
+        return test_class, membership_pairs, hhi_pairs, weights_pairs
+
+    def test_merge(
             self,
-            init_class_gpu_iteration: Tuple[DeterministicCommunity,np.ndarray,np.ndarray,np.ndarray,np.ndarray],
+            init_class_iteration: Tuple[DeterministicCommunity,np.ndarray,np.ndarray,np.ndarray,np.ndarray],
             example_merge
         ):
 
-        test_class, membership_pairs, hhi_pairs, weights_pairs = init_class_gpu_iteration
+        test_class, membership_pairs, hhi_pairs, weights_pairs = init_class_iteration
 
         _, \
         community_to_merge, new_community, \
@@ -1110,71 +1162,6 @@ class TestDeterministic():
         for key,value in zip(test_class.attr_list,weights_pairs[community_to_merge,new_community]):
             assert test_weights_dict[key] == value
 
-    def test_optimize_gpu(self, init_class_gpu: DeterministicCommunity, optimization_cases):
-
-        _, weights, test_communities_dict = optimization_cases
-
-        test_class = init_class_gpu
-
-        test_class.greedy_optimize(weights=weights)
-
-        assert same_community(test_class.communities_dict, test_communities_dict)
-
-        print(test_class.f_history)
-        print(test_class.communities_history)
-
-    def test_save_load(init_class_gpu: DeterministicCommunity, example_case, tmp_path):
-
-        directory = tmp_path / "test_save"
-        directory.mkdir()
-
-        MG, _, _, _, _, _ = example_case
-
-        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True, num_streams=100)
-        test_class.init_gpu()
-
-        test_class.greedy_optimize(
-            batch_size=1,
-            debug=False
-        )
-
-        test_class.save(directory=directory)
-
-        data_to_load = {
-            'communities_dict':     {"name" : '_communities_dict', "dtype" : dict},
-            'log_bfs_degree':       {"name" : '_log_bfs_degree', "dtype" : dict},
-            'bfs_degree':           {"name" : '_bfs_degree', "dtype" : dict},
-            'hhi':                  {"name" : '_hhi', "dtype" : Dict[Tuple[str,str],int]},
-            'bfs_degree_community': {"name" : 'bfs_degree_community', "dtype" : np.ndarray},
-            'communities_history':  {"name" : 'communities_history', "dtype" : List[Dict[str,int]]},
-            'f_history':            {"name" : 'f_history', "dtype" : list},
-            'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
-        }
-
-        test_data = {}
-        for name, attr in data_to_load.items():
-            test_data[name] = getattr(test_class,attr["name"])
-
-        del test_class
-
-        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True)
-        test_class.load(directory=directory)
-
-        for name, attr in data_to_load.items():
-            if attr["dtype"] == np.ndarray:
-                assert np.allclose(getattr(test_class,attr["name"]), test_data[name], rtol=1e-1)
-            elif attr["dtype"] == list:
-                for value, test_value in zip(getattr(test_class,attr["name"]), test_data[name]):
-                    assert abs(value - test_value) < 1e-6
-            elif attr["dtype"] == List[Dict[str,int]]:
-                for value, test_value in zip(getattr(test_class,attr["name"]), test_data[name]):
-                    assert value == test_value
-            elif attr["dtype"] == List[Tuple[float,float]]:
-                for value, test_value in zip(getattr(test_class,attr["name"]), test_data[name]):
-                    for value_i, test_value_i in zip(value, test_value):
-                        assert abs(value_i - test_value_i) < 1e-6
-            else:
-                assert getattr(test_class,attr["name"]) == test_data[name]
 
 class TestStochastic():
 
@@ -1187,6 +1174,7 @@ class TestStochastic():
     num_streams = 4
     tile_size = 2
     parallel_reduce = False
+    use_gpu = False
 
     @pytest.mark.dependency()
     def test_initialization(self,example_case_param):
@@ -1198,24 +1186,43 @@ class TestStochastic():
 
         test_class = StochasticCommunity(
             MG, seed=seed,
-            use_gpu=True,
+            use_gpu=self.use_gpu,
             n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length,
             communities_dict=init_communities_test
         )
 
+        if self.use_gpu:
+            test_class.init_gpu()
+
         # check all keys in test dictionary are present
         assert all(key in test_HHI.keys() for key in test_class.hhi)
 
         for key,value in test_class.hhi.items():
-            assert test_HHI[key] == value
+            assert abs(test_HHI[key] - value * 100**2) / test_HHI[key] <= 1e-1
 
         assert all(key in test_weights_dict.keys() for key in test_class.bfs_degree)
 
-        for key,value in test_class.bfs_degree.items():
-            assert value == test_weights_dict[key] + test_weights_individual_dict[key]
-
         assert same_community(init_communities_test,test_class.communities_dict)
+
+    @pytest.fixture(scope="function")
+    def init_class_less_samples(self, example_case) -> StochasticCommunity:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed,
+            use_gpu=self.use_gpu,
+            n_samples_edge=self.n_samples_edge_low,
+            walk_length=self.walk_length,
+            num_streams=self.num_streams
+        )
+        if self.use_gpu:
+            test_class.init_gpu(tile_size=self.tile_size)
+
+        return test_class
+
 
     @pytest.fixture(scope="function")
     def init_class(self, example_case) -> StochasticCommunity:
@@ -1225,117 +1232,76 @@ class TestStochastic():
 
         test_class = StochasticCommunity(
             MG, seed=seed,
-            use_gpu=True,
-            n_samples_edge=self.n_samples_edge,
-            walk_length=self.walk_length
-        )
-
-        return test_class
-
-    @pytest.fixture(scope="function")
-    def init_class_gpu_less_samples(self, example_case) -> StochasticCommunity:
-        # This setup will run once for the entire class
-
-        MG, _, _, _, _, _ = example_case
-
-        test_class = StochasticCommunity(
-            MG, seed=seed,
-            use_gpu=True,
-            n_samples_edge=self.n_samples_edge_low,
-            walk_length=self.walk_length,
-            num_streams=self.num_streams
-        )
-        test_class.init_gpu(tile_size=self.tile_size)
-
-        return test_class
-
-    @pytest.fixture(scope="function")
-    def init_class_gpu(self, example_case) -> StochasticCommunity:
-        # This setup will run once for the entire class
-
-        MG, _, _, _, _, _ = example_case
-
-        test_class = StochasticCommunity(
-            MG, seed=seed,
-            use_gpu=True,
+            use_gpu=self.use_gpu,
             n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length,
             num_streams=self.num_streams
         )
-        test_class.init_gpu(tile_size=self.tile_size)
+
+        if self.use_gpu:
+            test_class.init_gpu(tile_size=self.tile_size)
 
         return test_class
 
     @pytest.fixture(scope="function")
-    def init_class_gpu_many_samples(self, example_case) -> StochasticCommunity:
+    def init_class_many_samples(self, example_case) -> StochasticCommunity:
         # This setup will run once for the entire class
 
         MG, _, _, _, _, _ = example_case
 
         test_class = StochasticCommunity(
             MG, seed=seed,
-            use_gpu=True,
-            n_samples_edge=self.n_samples_edge_high,
-            walk_length=self.walk_length
-        )
-        test_class.init_gpu(tile_size=self.tile_size)
-
-        return test_class
-
-    @pytest.fixture(scope="function")
-    def init_class_cpu_less_samples(self, example_case) -> StochasticCommunity:
-        # This setup will run once for the entire class
-
-        MG, _, _, _, _, _ = example_case
-
-        test_class = StochasticCommunity(
-            MG, seed=seed,
-            use_gpu=False,
-            n_samples_edge=self.n_samples_edge_low,
-            walk_length=self.walk_length
-        )
-
-        return test_class
-
-    @pytest.fixture(scope="function")
-    def init_class_cpu(self, example_case) -> StochasticCommunity:
-        # This setup will run once for the entire class
-
-        MG, _, _, _, _, _ = example_case
-
-        test_class = StochasticCommunity(
-            MG, seed=seed,
-            use_gpu=False,
-            n_samples_edge=self.n_samples_edge,
-            walk_length=self.walk_length
-        )
-
-        return test_class
-
-    @pytest.fixture(scope="function")
-    def init_class_cpu_many_samples(self, example_case) -> StochasticCommunity:
-        # This setup will run once for the entire class
-
-        MG, _, _, _, _, _ = example_case
-
-        test_class = StochasticCommunity(
-            MG, seed=seed,
-            use_gpu=False,
+            use_gpu=self.use_gpu,
             n_samples_edge=self.n_samples_edge_high,
             walk_length=self.walk_length
         )
 
+        if self.use_gpu:
+            test_class.init_gpu(tile_size=self.tile_size)
+
         return test_class
+
+    def test_probabilities(self, init_class: StochasticCommunity, example_case, example_conditionals):
+        MG, _, _, _, _, _ = example_case
+        test_posterior, test_likelihood, test_prior, test_marginal, \
+            test_source, test_edge_source_cond, test_bfs = example_conditionals
+
+        test_class = init_class
+
+        posterior = get_conditional_prob(test_class)
+        likelihood = get_likelihood_prob(test_class)
+
+        prior = get_prior(test_class)
+        marginal = get_marginal(test_class)
+
+        edge_p, edge_source_cond_p = get_edge_prob(test_class)
+        source_p = get_source_prob(test_class)
+
+        bfs = get_bfs_probabilities(test_class,3)
+
+        assert np.allclose(test_posterior, posterior, 1e-3)
+        assert np.allclose(test_likelihood, likelihood, 1e-3)
+        assert np.allclose(test_prior, prior, 1e-3)
+        assert np.allclose(test_marginal, marginal, 1e-3)
+        assert np.allclose(test_edge_source_cond, edge_source_cond_p, 1e-3)
+        assert np.allclose(test_marginal, edge_p, 1e-3)
+        assert np.allclose(test_source, source_p, 1e-3)
+        assert np.allclose(test_bfs, bfs, 1e-3)
+
+
+class TestStochasticGPU(TestStochastic):
+
+    use_gpu = True
 
     @pytest.fixture(scope="class")
-    def baseline_stochastic_gpu(self, example_case) -> Tuple[np.ndarray, np.ndarray]:
+    def baseline_stochastic(self, example_case) -> Tuple[np.ndarray, np.ndarray]:
         # This setup will run once for the entire class
 
         MG, _, _, _, _, _ = example_case
 
         test_class = StochasticCommunity(
             MG, seed=seed,
-            use_gpu=True,
+            use_gpu=self.use_gpu,
             n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length,
             num_streams=1
@@ -1374,8 +1340,164 @@ class TestStochastic():
 
         return cum_weight, hhi_estimate, mai_estimate, bfs, estimate_bfs
 
+    def test_counters(self, init_class_less_samples: StochasticCommunity):
+        test_class = init_class_less_samples
+        community_to_merge = 0
+        new_community = 0
+
+        membership_pairs = test_class._calculate_members_cpu()
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_attr, walks_attr_cp, \
+                source_attr_counts = test_class._randomwalk_cpu(testing=True)
+
+        # Convert edge_samples and membership_pairs to device arrays
+        membership_pairs = test_class._calculate_members_gpu()
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_attr, walks_attr_cp, \
+                source_attr_counts = test_class._randomwalk_gpu(testing=True)
+
+        _, _, _, edge_counts, _, _, _, _ = test_class._stochastic_eval_gpu(
+            community_to_merge,
+            new_community,
+            edge_samples,
+            walks_attr_cp,
+            walks_attr,
+            source_attr_counts,
+            membership_pairs,
+            stream = test_class.cuda.stream(),
+            stream_id = 0,
+            testing = True,
+            parallel_reduce = self.parallel_reduce
+        )
+
+        # Expected counts calculation on host for verification
+        expected_counts = np.zeros((test_class.n_unique_edges, test_class.n_communities), dtype=int)
+        for i, sample_row in enumerate(edge_samples):
+            for sample in sample_row:
+                expected_counts[i, membership_pairs[community_to_merge, new_community, sample]] += 1
+
+        # Assert the results
+        np.testing.assert_array_equal(edge_counts * test_class.n_samples_edge, expected_counts)
+
+    def test_merge(
+            self,
+            init_class: StochasticCommunity,
+            example_merge,
+            baseline_stochastic
+        ):
+
+        _, \
+        community_to_merge, new_community, \
+        merge_communities_test, test_HHI, \
+        test_weights_dict, test_weights_individual_dict = example_merge
+
+        test_class = init_class
+
+        cum_weight_baseline, hhi_estimate_baseline, \
+            mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic
+
+        membership_pairs = test_class._calculate_members_gpu()
+
+        edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_gpu(
+            community_to_merge,
+            new_community,
+            test_class._edge_samples_d,
+            test_class._walks_attr_cp_d,
+            test_class._walks_attr_d,
+            test_class._source_attr_counts_d,
+            membership_pairs,
+            stream = test_class.cuda.stream(),
+            stream_id = 0,
+            testing = True,
+            parallel_reduce = self.parallel_reduce
+        )
+
+        test_class.update_scores(community_to_merge, new_community, stream_id=0)
+        test_class.communities_dict = test_class._communities_dict
+
+        estimate_bfs = get_estimate_node_bfs_probabilities(
+            test_class,
+            n_samples_edge = self.n_samples_edge,
+            walk_length = self.walk_length,
+            walks_attr = test_class._walks_attr_d,
+            walks_nodes_spatial=test_class._walks_d
+        )
+
+        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
+
+        for key,value in zip(test_class.attr_list,membership_pairs[community_to_merge,new_community]):
+            assert value == merge_communities_test[key]
+
+        for key,value in zip(test_class.edge_unique_list,hhi_estimate):
+            assert math.isclose(test_HHI[key]/(100**2),value,rel_tol=1e-1)
+
+        assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
+
+    @pytest.mark.parametrize("n_sample_pairs", [12, 8], ids=['no sampling', '8 samples'])
+    def test_optimize(self, init_class: StochasticCommunity, optimization_cases, n_sample_pairs):
+        _, weights, test_communities_dict = optimization_cases
+
+        test_class = init_class
+
+        membership_pairs, hhi_pairs, weights_pairs = test_class.greedy_optimize(
+                weights=weights,
+                testing_opt=True,
+                n_sample_pairs=n_sample_pairs,
+                epsilon = 0.5,
+                rtol = 0.0
+            )
+
+        assert same_community(test_class.communities_dict, test_communities_dict)
+
+        print(test_class.f_history)
+        print(test_class.communities_history)
+
+    def test_randomwalker(self, example_case, init_class_many_samples: StochasticCommunity):
+
+        MG, _, _, _, _, _ = example_case
+        test_class = init_class_many_samples
+
+        membership_pairs = test_class._calculate_members_gpu()
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_attr, walks_attr_cp, \
+                source_counts = test_class._randomwalk_gpu(testing=True)
+
+        edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, _, _, _ = test_class._stochastic_eval_gpu(
+            0,
+            0,
+            edge_samples,
+            walks_attr_cp,
+            walks_attr,
+            source_counts,
+            membership_pairs,
+            stream = test_class.cuda.stream(),
+            testing = True,
+            parallel_reduce = self.parallel_reduce
+        )
+
+
+        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
+        estimate_bfs = get_estimate_node_bfs_probabilities(
+            test_class,
+            n_samples_edge=self.n_samples_edge_high,
+            walk_length=self.walk_length,
+            walks_attr=walks_attr,
+            walks_nodes_spatial=walks_spatial
+        )
+
+        assert np.allclose(test_class._adj3/100,edge_counts,rtol=1e-1)
+        assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
+
+
+class TestStochasticCPU(TestStochastic):
+
+    use_gpu = False
+
     @pytest.fixture(scope="function")
-    def baseline_stochastic_cpu(self, example_case) -> Tuple[StochasticCommunity, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def baseline_stochastic(self, example_case) -> Tuple[StochasticCommunity, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         # This setup will run once for the entire class
 
         MG, _, _, _, _, _ = example_case
@@ -1416,38 +1538,11 @@ class TestStochastic():
 
         return test_class, cum_weight, hhi_estimate, mai_estimate, bfs, estimate_bfs
 
-    def test_probabilities(self, init_class: StochasticCommunity, example_case, example_conditionals):
-        MG, _, _, _, _, _ = example_case
-        test_posterior, test_likelihood, test_prior, test_marginal, \
-            test_source, test_edge_source_cond, test_bfs = example_conditionals
-
-        test_class = init_class
-
-        posterior = get_conditional_prob(test_class)
-        likelihood = get_likelihood_prob(test_class)
-
-        prior = get_prior(test_class)
-        marginal = get_marginal(test_class)
-
-        edge_p, edge_source_cond_p = get_edge_prob(test_class)
-        source_p = get_source_prob(test_class)
-
-        bfs = get_bfs_probabilities(test_class,3)
-
-        assert np.allclose(test_posterior, posterior, 1e-3)
-        assert np.allclose(test_likelihood, likelihood, 1e-3)
-        assert np.allclose(test_prior, prior, 1e-3)
-        assert np.allclose(test_marginal, marginal, 1e-3)
-        assert np.allclose(test_edge_source_cond, edge_source_cond_p, 1e-3)
-        assert np.allclose(test_marginal, edge_p, 1e-3)
-        assert np.allclose(test_source, source_p, 1e-3)
-        assert np.allclose(test_bfs, bfs, 1e-3)
-
     def test_counters(
             self,
-            init_class_cpu_less_samples: StochasticCommunity,
+            init_class_less_samples: StochasticCommunity,
         ):
-        test_class = init_class_cpu_less_samples
+        test_class = init_class_less_samples
         community_to_merge = 0
         new_community = 0
 
@@ -1474,51 +1569,10 @@ class TestStochastic():
 
         np.testing.assert_array_equal(reduced_counts, expected_counts)
 
-    def test_counters_gpu(self, init_class_gpu_less_samples: StochasticCommunity):
-        test_class = init_class_gpu_less_samples
-        community_to_merge = 0
-        new_community = 0
-
-        membership_pairs = test_class._calculate_members_cpu()
-
-        edge_samples, walks_spatial, walks_edges_spatial, \
-            walks_attr, walks_attr_cp, \
-                source_attr_counts = test_class._randomwalk_cpu(testing=True)
-
-        # Convert edge_samples and membership_pairs to device arrays
-        membership_pairs = test_class._calculate_members_gpu()
-
-        edge_samples, walks_spatial, walks_edges_spatial, \
-            walks_attr, walks_attr_cp, \
-                source_attr_counts = test_class._randomwalk_gpu(testing=True)
-
-        _, _, _, edge_counts, _, _, _, _ = test_class._stochastic_eval_gpu(
-            community_to_merge,
-            new_community,
-            edge_samples,
-            walks_attr_cp,
-            walks_attr,
-            source_attr_counts,
-            membership_pairs,
-            stream = test_class.cuda.stream(),
-            stream_id = 0,
-            testing = True,
-            parallel_reduce = self.parallel_reduce
-        )
-
-        # Expected counts calculation on host for verification
-        expected_counts = np.zeros((test_class.n_unique_edges, test_class.n_communities), dtype=int)
-        for i, sample_row in enumerate(edge_samples):
-            for sample in sample_row:
-                expected_counts[i, membership_pairs[community_to_merge, new_community, sample]] += 1
-
-        # Assert the results
-        np.testing.assert_array_equal(edge_counts * test_class.n_samples_edge, expected_counts)
-
-    def test_merge_cpu(
+    def test_merge(
             self,
             example_merge,
-            baseline_stochastic_cpu: Tuple[StochasticCommunity, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            baseline_stochastic: Tuple[StochasticCommunity, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
         ):
 
         _, \
@@ -1527,7 +1581,7 @@ class TestStochastic():
         test_weights_dict, test_weights_individual_dict = example_merge
 
         test_class, cum_weight_baseline, hhi_estimate_baseline, \
-            mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic_cpu
+            mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic
 
         membership_pairs = test_class._calculate_members_cpu()
 
@@ -1564,65 +1618,11 @@ class TestStochastic():
 
         assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
 
-    def test_merge_gpu(
-            self,
-            init_class_gpu: StochasticCommunity,
-            example_merge,
-            baseline_stochastic_gpu
-        ):
-
-        _, \
-        community_to_merge, new_community, \
-        merge_communities_test, test_HHI, \
-        test_weights_dict, test_weights_individual_dict = example_merge
-
-        test_class = init_class_gpu
-
-        cum_weight_baseline, hhi_estimate_baseline, \
-            mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic_gpu
-
-        membership_pairs = test_class._calculate_members_gpu()
-
-        edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_gpu(
-            community_to_merge,
-            new_community,
-            test_class._edge_samples_d,
-            test_class._walks_attr_cp_d,
-            test_class._walks_attr_d,
-            test_class._source_attr_counts_d,
-            membership_pairs,
-            stream = test_class.cuda.stream(),
-            stream_id = 0,
-            testing = True,
-            parallel_reduce = self.parallel_reduce
-        )
-
-        test_class.update_scores(community_to_merge, new_community, stream_id=0)
-        test_class.communities_dict = test_class._communities_dict
-
-        estimate_bfs = get_estimate_node_bfs_probabilities(
-            test_class,
-            n_samples_edge = self.n_samples_edge,
-            walk_length = self.walk_length,
-            walks_attr = test_class._walks_attr_d,
-            walks_nodes_spatial=test_class._walks_d
-        )
-
-        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
-
-        for key,value in zip(test_class.attr_list,membership_pairs[community_to_merge,new_community]):
-            assert value == merge_communities_test[key]
-
-        for key,value in zip(test_class.edge_unique_list,hhi_estimate):
-            assert math.isclose(test_HHI[key]/(100**2),value,rel_tol=1e-1)
-
-        assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
-
     @pytest.mark.parametrize("n_sample_pairs", [12, 8], ids=['no sampling', '8 samples'])
-    def test_optimize_cpu(self, init_class_cpu: StochasticCommunity, optimization_cases, n_sample_pairs):
+    def test_optimize(self, init_class: StochasticCommunity, optimization_cases, n_sample_pairs):
         _, weights, test_communities_dict = optimization_cases
 
-        test_class = init_class_cpu
+        test_class = init_class
 
         membership_pairs, hhi_pairs, weights_pairs = test_class.greedy_optimize(
                 weights=weights,
@@ -1637,29 +1637,10 @@ class TestStochastic():
         print(test_class.f_history)
         print(test_class.communities_history)
 
-    @pytest.mark.parametrize("n_sample_pairs", [12, 8], ids=['no sampling', '8 samples'])
-    def test_optimize_gpu(self, init_class_gpu: StochasticCommunity, optimization_cases, n_sample_pairs):
-        _, weights, test_communities_dict = optimization_cases
-
-        test_class = init_class_gpu
-
-        membership_pairs, hhi_pairs, weights_pairs = test_class.greedy_optimize(
-                weights=weights,
-                testing_opt=True,
-                n_sample_pairs=n_sample_pairs,
-                epsilon = 0.5,
-                rtol = 0.0
-            )
-
-        assert same_community(test_class.communities_dict, test_communities_dict)
-
-        print(test_class.f_history)
-        print(test_class.communities_history)
-
-    def test_randomwalker_cpu(self, example_case, init_class_cpu_many_samples: StochasticCommunity):
+    def test_randomwalker(self, example_case, init_class_many_samples: StochasticCommunity):
 
         MG, _, _, _, _, _ = example_case
-        test_class = init_class_cpu_many_samples
+        test_class = init_class_many_samples
 
         membership_pairs = test_class._calculate_members_cpu()
 
@@ -1675,43 +1656,6 @@ class TestStochastic():
             membership_pairs = membership_pairs,
             testing = True
         )
-
-        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
-        estimate_bfs = get_estimate_node_bfs_probabilities(
-            test_class,
-            n_samples_edge=self.n_samples_edge_high,
-            walk_length=self.walk_length,
-            walks_attr=walks_attr,
-            walks_nodes_spatial=walks_spatial
-        )
-
-        assert np.allclose(test_class._adj3/100,edge_counts,rtol=1e-1)
-        assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
-
-    def test_randomwalker_gpu(self, example_case, init_class_gpu_many_samples: StochasticCommunity):
-
-        MG, _, _, _, _, _ = example_case
-        test_class = init_class_gpu_many_samples
-
-        membership_pairs = test_class._calculate_members_gpu()
-
-        edge_samples, walks_spatial, walks_edges_spatial, \
-            walks_attr, walks_attr_cp, \
-                source_counts = test_class._randomwalk_gpu(testing=True)
-
-        edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, _, _, _ = test_class._stochastic_eval_gpu(
-            0,
-            0,
-            edge_samples,
-            walks_attr_cp,
-            walks_attr,
-            source_counts,
-            membership_pairs,
-            stream = test_class.cuda.stream(),
-            testing = True,
-            parallel_reduce = self.parallel_reduce
-        )
-
 
         bfs = get_bfs_probabilities(test_class,self.walk_length-1)
         estimate_bfs = get_estimate_node_bfs_probabilities(

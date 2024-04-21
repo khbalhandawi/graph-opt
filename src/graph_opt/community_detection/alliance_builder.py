@@ -388,7 +388,7 @@ class BaseCommunity(ABC):
 
     def __del__(self):
         if self.use_gpu and self._init_gpu:
-            print("Destructor: Instance destroyed")
+            # print("Destructor: Instance destroyed")
             del self._adj_d
 
     @_jsonmode
