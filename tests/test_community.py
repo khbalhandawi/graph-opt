@@ -966,8 +966,7 @@ class TestDeterministic():
         MG, _, _, _, _, _ = example_case
 
         test_class = DeterministicCommunity(MG, seed=seed, use_gpu=self.use_gpu, num_streams=100)
-        if self.use_gpu:
-            test_class.init_gpu()
+        test_class.init_random()
 
         return test_class
 
@@ -979,8 +978,7 @@ class TestDeterministic():
         MG, _, _, _, _, _ = example_case
 
         test_class = DeterministicCommunity(MG, seed=seed, use_gpu=self.use_gpu, num_streams=100)
-        if self.use_gpu:
-            test_class.init_gpu()
+        test_class.init_random()
 
         test_class.greedy_optimize()
 
@@ -1129,8 +1127,7 @@ class TestDeterministicGPU(TestDeterministic):
         MG, _, _, _, _, _ = example_case
 
         test_class = DeterministicCommunity(MG, seed=seed, use_gpu=self.use_gpu, num_streams=100)
-        if self.use_gpu:
-            test_class.init_gpu()
+        test_class.init_random()
 
         membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(
             max_iterations=1,
@@ -1192,8 +1189,7 @@ class TestStochastic():
             communities_dict=init_communities_test
         )
 
-        if self.use_gpu:
-            test_class.init_gpu()
+        test_class.init_random()
 
         # check all keys in test dictionary are present
         assert all(key in test_HHI.keys() for key in test_class.hhi)
@@ -1218,8 +1214,7 @@ class TestStochastic():
             walk_length=self.walk_length,
             num_streams=self.num_streams
         )
-        if self.use_gpu:
-            test_class.init_gpu(tile_size=self.tile_size)
+        test_class.init_random(tile_size=self.tile_size)
 
         return test_class
 
@@ -1238,8 +1233,7 @@ class TestStochastic():
             num_streams=self.num_streams
         )
 
-        if self.use_gpu:
-            test_class.init_gpu(tile_size=self.tile_size)
+        test_class.init_random(tile_size=self.tile_size)
 
         return test_class
 
@@ -1256,8 +1250,7 @@ class TestStochastic():
             walk_length=self.walk_length
         )
 
-        if self.use_gpu:
-            test_class.init_gpu(tile_size=self.tile_size)
+        test_class.init_random(tile_size=self.tile_size)
 
         return test_class
 
@@ -1306,7 +1299,7 @@ class TestStochasticGPU(TestStochastic):
             walk_length=self.walk_length,
             num_streams=1
         )
-        test_class.init_gpu(tile_size=self.tile_size)
+        test_class.init_random(tile_size=self.tile_size)
 
         membership_pairs = test_class._calculate_members_gpu()
 
@@ -1345,11 +1338,11 @@ class TestStochasticGPU(TestStochastic):
         community_to_merge = 0
         new_community = 0
 
-        membership_pairs = test_class._calculate_members_cpu()
+        membership_pairs = test_class._calculate_members_gpu()
 
         edge_samples, walks_spatial, walks_edges_spatial, \
             walks_attr, walks_attr_cp, \
-                source_attr_counts = test_class._randomwalk_cpu(testing=True)
+                source_attr_counts = test_class._randomwalk_gpu(testing=True)
 
         # Convert edge_samples and membership_pairs to device arrays
         membership_pairs = test_class._calculate_members_gpu()
@@ -1508,6 +1501,7 @@ class TestStochasticCPU(TestStochastic):
             n_samples_edge=self.n_samples_edge,
             walk_length=self.walk_length
         )
+        test_class.init_random(tile_size=self.tile_size)
 
         membership_pairs = test_class._calculate_members_cpu()
 
@@ -1571,6 +1565,7 @@ class TestStochasticCPU(TestStochastic):
 
     def test_merge(
             self,
+            init_class: StochasticCommunity,
             example_merge,
             baseline_stochastic: Tuple[StochasticCommunity, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
         ):
@@ -1579,6 +1574,8 @@ class TestStochasticCPU(TestStochastic):
         community_to_merge, new_community, \
         merge_communities_test, test_HHI, \
         test_weights_dict, test_weights_individual_dict = example_merge
+
+        test_class = init_class
 
         test_class, cum_weight_baseline, hhi_estimate_baseline, \
             mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic
@@ -1668,3 +1665,41 @@ class TestStochasticCPU(TestStochastic):
 
         assert np.allclose(test_class._adj3/100,edge_counts,rtol=1e-1)
         assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
+
+    def test_attr_postprocess(self, init_class_less_samples: StochasticCommunity):
+        # This setup will run once for the entire class
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
+        data_dir = os.path.join('..','test_data')
+        MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir,data_dir,'test_DG_AP_AL_blank.graphml')) # store graph
+
+        test_class = StochasticCommunity(
+            MG, seed=seed,
+            use_gpu=self.use_gpu,
+            n_samples_edge=self.n_samples_edge_low,
+            walk_length=self.walk_length,
+            num_streams=self.num_streams
+        )
+        test_class.init_random(tile_size=self.tile_size)
+        
+        community_to_merge = 0
+        new_community = 0
+
+        membership_pairs = test_class._calculate_members_cpu()
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_attr, walks_attr_cp, \
+                source_attr_counts = test_class._randomwalk_cpu(testing=True)
+
+        cum_weight_h = attr_postprocess_cpu(
+            ci = community_to_merge,
+            cj = new_community,
+            samples = walks_attr,
+            samples_weights = walks_attr_cp,
+            source_counts = source_attr_counts,
+            membership = membership_pairs,
+            n_attr = test_class.n_attr
+        )
+
+        # Expected counts calculation on host for verification
+        expected_counts = np.zeros((test_class.n_unique_edges, test_class.n_communities), dtype=int)

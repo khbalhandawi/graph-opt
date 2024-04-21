@@ -154,38 +154,35 @@ def edge_postprocess_cpu(ci, cj, samples, membership, n_communities):
 
 def attr_postprocess_cpu(ci, cj, samples, samples_weights, source_counts, membership, n_attr):
     n_nodes, n_samples, walk_length = samples.shape
-    cum_weight = np.zeros((n_nodes, n_attr), dtype=np.int32)
+    cum_weight = np.zeros((n_nodes, n_attr), dtype=np.float32)
 
     # Initial processing to identify valid source nodes
-    source_nodes = samples[:, :, 0]  # source nodes for each sample
-    valid_sources_mask = ~np.isnan(source_nodes) & (source_nodes >= 0)
-    
-    # Convert float indices to integer for indexing
-    source_nodes = source_nodes.astype(int)
-    
-    # Membership of the source nodes
+    source_nodes = samples[:, :, 0].astype(int)
+    valid_sources_mask = ~np.isnan(samples[:, :, 0]) & (source_nodes >= 0)
+
+    # Membership of the source nodes using advanced indexing
     source_c = membership[ci, cj, source_nodes]
-    
-    # Loop through each walk length position k
+
+    # Process each walk length position
     for k in range(walk_length - 1):
-        current_nodes = samples[:, :, k]
-        valid_currents_mask = ~np.isnan(current_nodes) & (current_nodes >= 0)
-        current_nodes = current_nodes.astype(int)
+        current_nodes = samples[:, :, k].astype(int)
+        valid_currents_mask = ~np.isnan(samples[:, :, k]) & (current_nodes >= 0)
 
         current_c = membership[ci, cj, current_nodes]
         current_weights = samples_weights[:, :, k]
-        
-        # Conditions for matching community and valid source count
+
+        # Combine conditions using broadcasting and boolean indexing
         conditions = (current_c == source_c) & (source_counts[np.arange(n_nodes)[:, None], source_nodes] > 0)
-        
-        # Apply all masks and conditions
         full_conditions = valid_sources_mask & valid_currents_mask & conditions
+
+        # Vectorized weight addition
+        # Flatten the indices and weights where full_conditions is True
+        valid_indices = np.where(full_conditions)
+        flattened_source_nodes = source_nodes[valid_indices]
+        flattened_current_weights = current_weights[valid_indices]
         
-        # Efficiently add weights using np.add.at
-        for i in range(n_nodes):
-            for j in range(n_samples):
-                if full_conditions[i, j]:
-                    np.add.at(cum_weight, (i, source_nodes[i, j]), current_weights[i, j])
+        # Use np.add.at to add weights to cum_weight based on unique source nodes
+        np.add.at(cum_weight, (valid_indices[0], flattened_source_nodes), flattened_current_weights)
 
     return cum_weight
 

@@ -12,7 +12,7 @@ import math
 from pdb import set_trace
 from scipy.sparse import spmatrix
 from typing import Callable, Dict, Any, Union
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import itertools
 
 from abc import ABC, abstractmethod
@@ -129,7 +129,14 @@ class BaseCommunity(ABC):
         self._parse_graph()
         self._initialize_communities(communities_dict)
 
-    def init_gpu(
+    @cpu_gpu_dispatcher('_init_random_cpu', '_init_random_gpu')
+    def init_random(self, **kwargs):
+        pass
+    
+    def _init_random_cpu(self, **kwargs):
+        pass
+
+    def _init_random_gpu(
             self,
             threads_per_block_1D: Optional[int] = 484,
             threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 22,
@@ -444,13 +451,13 @@ class DeterministicCommunity(BaseCommunity):
         self._update_bfs_scores()
         self._update_community_weights()
 
-    def init_gpu(
+    def _init_random_gpu(
             self,
             threads_per_block_1D: Optional[int] = 484,
             threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 22,
             threads_per_block_3D: Optional[Union[int,Tuple[int,int,int]]] = 8,
         ):
-        super().init_gpu(threads_per_block_1D,threads_per_block_2D,threads_per_block_3D)
+        super()._init_random_gpu(threads_per_block_1D,threads_per_block_2D,threads_per_block_3D)
 
         from .utilities_cuda import define_cuda_kernels_deterministic
 
@@ -939,6 +946,9 @@ class StochasticCommunity(BaseCommunity):
         self._walks_attr_cp = np.zeros((self.n_nodes_spatial,self.n_samples_edge,self.walk_length-1), dtype=np.float32)
         self._source_attr_counts = np.zeros((self.n_nodes_spatial,self.n_attr), dtype=np.int32)
 
+    def _init_random_cpu(self, **kwargs):
+        super()._init_random_cpu(**kwargs)
+
         self.distributions_changed_streams = []
         self.cum_weight_streams = []
         self.reduced_counts_streams = []
@@ -947,11 +957,10 @@ class StochasticCommunity(BaseCommunity):
             self.cum_weight_streams += [np.zeros((self.n_nodes_spatial,self.n_attr), dtype=np.float32)]
             self.reduced_counts_streams += [np.zeros((self.n_unique_edges,self.n_communities), dtype=np.float32)]
 
-        if not use_gpu:
-            self._randomwalk_cpu()
-            self.update_scores(0,0)
+        self._randomwalk_cpu()
+        self.update_scores(0,0)
 
-    def init_gpu(
+    def _init_random_gpu(
             self,
             threads_per_block_1D: Optional[int] = 484,
             threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 22,
@@ -959,7 +968,7 @@ class StochasticCommunity(BaseCommunity):
             tile_size: Optional[int] = 42,
             block_size: Optional[int] = 24
         ):
-        super().init_gpu(threads_per_block_1D,threads_per_block_2D,threads_per_block_3D)
+        super()._init_random_gpu(threads_per_block_1D,threads_per_block_2D,threads_per_block_3D)
 
         from .utilities_cuda import define_cuda_kernels_stochastic
         from ..utilities_cuda import pairwise_product, elementwise_divide, create_xoroshiro128p_states
