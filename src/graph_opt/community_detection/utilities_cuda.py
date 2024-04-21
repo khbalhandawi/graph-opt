@@ -215,62 +215,6 @@ def define_cuda_kernels_stochastic(
                         membership_pairs[i,j,k] = cur_member
 
     @cuda.jit
-    def weighted_spatial_random_walk(
-            n_samples_attr,
-            n_samples,
-            walk_length,
-            weights_attr:DeviceNDArray,
-            adj:DeviceNDArray,
-            adj_i:DeviceNDArray,
-            walks:DeviceNDArray,
-            walks_edges_d:DeviceNDArray,
-            rng_states:DeviceNDArray,
-            cumsum:DeviceNDArray,
-            weights:DeviceNDArray
-        ):
-        # Compute flattened index inside the array
-        x, y = cuda.grid(2)
-
-        # Compute the grid stride
-        dx, dy = cuda.gridsize(2)
-
-        cumsum_init = cuda.local.array((n_attr,),dtype=float32)
-
-        for i in range(x, n_samples_attr, dx):
-
-            # sample starting node
-            cumsum_d(weights_attr,cumsum_init)
-            threshold = xoroshiro128p_uniform_float32(rng_states, i)
-            current_node = searchsorted_d(cumsum_init,threshold)
-
-            for j in range(y, n_samples, dy):
-
-                idx = i * dy + j
-
-                walks[i,j,0] = current_node
-
-                for k in range(walk_length - 1):
-
-                    # select spatial node
-                    for n in range(n_attr):
-                        weights[i,j,n] = adj[current_node,n]
-
-                    cumsum_global_2d(weights,cumsum,i,j)
-                    threshold = xoroshiro128p_uniform_float32(rng_states, idx)
-                    if cumsum[i,j,0] == 0 and cumsum[i,j,-1] == 0:
-                        chosen = current_node
-                    else:
-                        chosen = searchsorted_global_2d(cumsum,threshold,i,j)
-
-                    walks[i,j,k+1] = chosen
-                    chosen_edge = adj_i[current_node,chosen]
-                    if math.isnan(chosen_edge):
-                        walks_edges_d[i,j,k] = -1e6
-                    else:
-                        walks_edges_d[i,j,k] = chosen_edge
-                    current_node = chosen
-
-    @cuda.jit
     def spatial_random_walk(
             n_samples,
             walk_length,
@@ -598,7 +542,7 @@ def define_cuda_kernels_stochastic(
                         else:
                             break
 
-    return set_membership, spatial_random_walk, weighted_spatial_random_walk, \
+    return set_membership, spatial_random_walk, \
         attr_sampler, attr_source_postprocess, edge_sampler, \
         init_edge_counts, edge_postprocess, check_edge_distribution, \
         load_counts, edge_histogram, copy_reduced_counts, \

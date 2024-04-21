@@ -64,9 +64,7 @@ def _transform_edges(other_node: np.ndarray,
 
     return other_node
 
-def neighbor_arrays(
-        graph:Union[Graph,DiGraph], node: int, include_edge_weight=False, edge_types=None
-    ):
+def neighbor_arrays(graph:Union[Graph,DiGraph], node: int, include_edge_weight=False, edge_types=None):
         """
         Obtains the collection of neighbouring nodes connected to the given node
         as an array of node_ids. If `include_edge_weight` edge is `True` then

@@ -107,3 +107,19 @@ def pairwise_product(A, a):
                 A[i,j] /= 0.0
             else:
                 A[i,j] /= a[i]*a[j]
+
+# Simulating the device functions for testing in a CPU environment
+def cumsum_h(arr,out):
+    val = 0
+    for j in range(arr.shape[0]):
+        val += arr[j]
+        out[j] = val
+    return out
+
+def searchsorted_h(a, v):
+    out = 0
+    total = a[-1]
+    for j in range(a.shape[0]-1):
+        if a[j] <= v * total:
+            out = j + 1
+    return out

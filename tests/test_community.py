@@ -9,6 +9,7 @@ from sklearn.covariance import log_likelihood
 from ..community_detection.alliance_builder import DeterministicCommunity, StochasticCommunity, BaseCommunity, multiobjective
 from ..community_detection.utilities import resort_communities, same_community
 from ..community_detection.utilities_cuda import define_cuda_kernels_stochastic
+from ..community_detection.utilities_cpu import edge_postprocess_cpu, attr_postprocess_cpu
 from ..utilities import cuda_blocks
 
 import numpy as np
@@ -802,30 +803,23 @@ def test_reorder(input_dict, test_dict, test_unique, test_n_communities):
     (np.array([0, 40, 0, 0, 60]), 0.5, 4),
 ], ids=['case 1', 'case 2', 'case 3', 'case 4'])
 def test_sampler_deterministic(test_vector, threshold, expected):
-    numba_sim = os.environ.get("NUMBA_ENABLE_CUDASIM")
-    os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
 
-    from ..utilities_cuda import cumsum_d, searchsorted_d
+    from ..utilities_cuda import cumsum_h, searchsorted_h
 
     cumsum = np.zeros_like(test_vector)
 
-    cumsum_d(test_vector,cumsum)
-    chosen = searchsorted_d(cumsum,threshold)
+    cumsum_h(test_vector,cumsum)
+    chosen = searchsorted_h(cumsum,threshold)
 
     assert chosen == expected
-
-    if numba_sim is not None:
-        os.environ['NUMBA_ENABLE_CUDASIM'] = numba_sim # reset environment to default
 
 @pytest.mark.parametrize("test_vector, expected", [
     (np.array([0, 0, 0, 40, 60]), np.array([0,0,0,0.4,0.6])),
     (np.array([0, 40, 0, 0, 60]), np.array([0,0.4,0,0.0,0.6])),
 ], ids=['case 1', 'case 2'])
 def test_sampler(test_vector, expected):
-    numba_sim = os.environ.get("NUMBA_ENABLE_CUDASIM")
-    os.environ['NUMBA_ENABLE_CUDASIM'] = "1"
 
-    from ..utilities_cuda import cumsum_d, searchsorted_d
+    from ..utilities_cuda import cumsum_h, searchsorted_h
     import random
     random.seed(seed)
     n_samples = 50
@@ -833,19 +827,16 @@ def test_sampler(test_vector, expected):
     cumsum = np.zeros_like(test_vector)
     counts = np.zeros_like(test_vector)
 
-    cumsum_d(test_vector,cumsum)
+    cumsum_h(test_vector,cumsum)
 
     for _ in range(n_samples):
         threshold = random.random()
-        chosen = searchsorted_d(cumsum,threshold)
+        chosen = searchsorted_h(cumsum,threshold)
         counts[chosen] += 1
 
     p = counts / counts.sum()
 
     assert np.allclose(p,expected,rtol=1e-1)
-
-    if numba_sim is not None:
-        os.environ['NUMBA_ENABLE_CUDASIM'] = numba_sim # reset environment to default
 
 def test_cuda_blocks():
 
@@ -908,9 +899,9 @@ def test_hist_diff(reduced_counts_base, reduced_counts):
 
     _, _, _, \
         _, _, _, \
-        _, _, check_edge_distribution, \
+        _, check_edge_distribution, _, \
         _, _, _, \
-        _, _ = define_cuda_kernels_stochastic(1, 1, 500, 1, 1)
+        _ = define_cuda_kernels_stochastic(1, 1, 500, 1, 1)
 
     reduced_counts_base_d = cuda.to_device(reduced_counts_base)
     reduced_counts_d = cuda.to_device(reduced_counts)
@@ -1051,8 +1042,8 @@ class TestDeterministic():
 
         MG, _, _, _, _, _ = example_case
 
-        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True)
-        test_class.init_gpu(num_streams=test_class.n_communities)
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True, num_streams=100)
+        test_class.init_gpu()
 
         membership_pairs, hhi_pairs, weights_pairs, score_pairs = test_class.greedy_optimize(
             max_iterations=1,
@@ -1139,8 +1130,8 @@ class TestDeterministic():
 
         MG, _, _, _, _, _ = example_case
 
-        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True)
-        test_class.init_gpu(num_streams=test_class.n_communities)
+        test_class = DeterministicCommunity(MG, seed=seed, use_gpu=True, num_streams=100)
+        test_class.init_gpu()
 
         test_class.greedy_optimize(
             batch_size=1,
@@ -1187,6 +1178,7 @@ class TestDeterministic():
 
 class TestStochastic():
 
+    n_samples_edge_low=10
     n_samples_edge=500
     n_samples_edge_high = 5000
     walk_length=10
@@ -1241,6 +1233,23 @@ class TestStochastic():
         return test_class
 
     @pytest.fixture(scope="function")
+    def init_class_gpu_less_samples(self, example_case) -> StochasticCommunity:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed,
+            use_gpu=True,
+            n_samples_edge=self.n_samples_edge_low,
+            walk_length=self.walk_length,
+            num_streams=self.num_streams
+        )
+        test_class.init_gpu(tile_size=self.tile_size)
+
+        return test_class
+
+    @pytest.fixture(scope="function")
     def init_class_gpu(self, example_case) -> StochasticCommunity:
         # This setup will run once for the entire class
 
@@ -1250,9 +1259,10 @@ class TestStochastic():
             MG, seed=seed,
             use_gpu=True,
             n_samples_edge=self.n_samples_edge,
-            walk_length=self.walk_length
+            walk_length=self.walk_length,
+            num_streams=self.num_streams
         )
-        test_class.init_gpu(tile_size=self.tile_size,num_streams=self.num_streams)
+        test_class.init_gpu(tile_size=self.tile_size)
 
         return test_class
 
@@ -1272,8 +1282,53 @@ class TestStochastic():
 
         return test_class
 
+    @pytest.fixture(scope="function")
+    def init_class_cpu_less_samples(self, example_case) -> StochasticCommunity:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed,
+            use_gpu=False,
+            n_samples_edge=self.n_samples_edge_low,
+            walk_length=self.walk_length
+        )
+
+        return test_class
+
+    @pytest.fixture(scope="function")
+    def init_class_cpu(self, example_case) -> StochasticCommunity:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed,
+            use_gpu=False,
+            n_samples_edge=self.n_samples_edge,
+            walk_length=self.walk_length
+        )
+
+        return test_class
+
+    @pytest.fixture(scope="function")
+    def init_class_cpu_many_samples(self, example_case) -> StochasticCommunity:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed,
+            use_gpu=False,
+            n_samples_edge=self.n_samples_edge_high,
+            walk_length=self.walk_length
+        )
+
+        return test_class
+
     @pytest.fixture(scope="class")
-    def baseline_stochastic(self, example_case) -> Tuple[np.ndarray, np.ndarray]:
+    def baseline_stochastic_gpu(self, example_case) -> Tuple[np.ndarray, np.ndarray]:
         # This setup will run once for the entire class
 
         MG, _, _, _, _, _ = example_case
@@ -1282,9 +1337,10 @@ class TestStochastic():
             MG, seed=seed,
             use_gpu=True,
             n_samples_edge=self.n_samples_edge,
-            walk_length=self.walk_length
+            walk_length=self.walk_length,
+            num_streams=1
         )
-        test_class.init_gpu(tile_size=self.tile_size, num_streams=1)
+        test_class.init_gpu(tile_size=self.tile_size)
 
         membership_pairs = test_class._calculate_members_gpu()
 
@@ -1318,6 +1374,48 @@ class TestStochastic():
 
         return cum_weight, hhi_estimate, mai_estimate, bfs, estimate_bfs
 
+    @pytest.fixture(scope="function")
+    def baseline_stochastic_cpu(self, example_case) -> Tuple[StochasticCommunity, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        # This setup will run once for the entire class
+
+        MG, _, _, _, _, _ = example_case
+
+        test_class = StochasticCommunity(
+            MG, seed=seed,
+            use_gpu=False,
+            n_samples_edge=self.n_samples_edge,
+            walk_length=self.walk_length
+        )
+
+        membership_pairs = test_class._calculate_members_cpu()
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_attr, walks_attr_cp, \
+                source_attr_counts = test_class._randomwalk_cpu(testing=True)
+
+        _, _, _, _, cum_weight, hhi_estimate, mai_estimate, _ = test_class._stochastic_eval_cpu(
+            0,
+            0,
+            edge_samples,
+            walks_attr_cp,
+            walks_attr,
+            source_attr_counts,
+            membership_pairs,
+            testing = True,
+        )
+
+        estimate_bfs = get_estimate_node_bfs_probabilities(
+            test_class,
+            n_samples_edge=self.n_samples_edge,
+            walk_length=self.walk_length,
+            walks_attr=walks_attr,
+            walks_nodes_spatial=walks_spatial
+        )
+
+        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
+
+        return test_class, cum_weight, hhi_estimate, mai_estimate, bfs, estimate_bfs
+
     def test_probabilities(self, init_class: StochasticCommunity, example_case, example_conditionals):
         MG, _, _, _, _, _ = example_case
         test_posterior, test_likelihood, test_prior, test_marginal, \
@@ -1345,11 +1443,132 @@ class TestStochastic():
         assert np.allclose(test_source, source_p, 1e-3)
         assert np.allclose(test_bfs, bfs, 1e-3)
 
+    def test_counters(
+            self,
+            init_class_cpu_less_samples: StochasticCommunity,
+        ):
+        test_class = init_class_cpu_less_samples
+        community_to_merge = 0
+        new_community = 0
+
+        membership_pairs = test_class._calculate_members_cpu()
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_attr, walks_attr_cp, \
+                source_attr_counts = test_class._randomwalk_cpu(testing=True)
+
+        # Expected counts should be calculated based on the logic of edge_postprocess_cpu
+        # Assuming each number in samples corresponds to an index in the membership array
+        expected_counts = np.zeros((len(edge_samples), test_class.n_communities), dtype=int)
+        for i, sample_row in enumerate(edge_samples):
+            for sample in sample_row:
+                expected_counts[i, membership_pairs[community_to_merge, new_community, sample]] += 1
+
+        reduced_counts = edge_postprocess_cpu(
+            ci = community_to_merge,
+            cj = new_community,
+            samples = edge_samples,
+            membership = membership_pairs,
+            n_communities = test_class.n_communities
+        )
+
+        np.testing.assert_array_equal(reduced_counts, expected_counts)
+
+    def test_counters_gpu(self, init_class_gpu_less_samples: StochasticCommunity):
+        test_class = init_class_gpu_less_samples
+        community_to_merge = 0
+        new_community = 0
+
+        membership_pairs = test_class._calculate_members_cpu()
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_attr, walks_attr_cp, \
+                source_attr_counts = test_class._randomwalk_cpu(testing=True)
+
+        # Convert edge_samples and membership_pairs to device arrays
+        membership_pairs = test_class._calculate_members_gpu()
+
+        edge_samples, walks_spatial, walks_edges_spatial, \
+            walks_attr, walks_attr_cp, \
+                source_attr_counts = test_class._randomwalk_gpu(testing=True)
+
+        _, _, _, edge_counts, _, _, _, _ = test_class._stochastic_eval_gpu(
+            community_to_merge,
+            new_community,
+            edge_samples,
+            walks_attr_cp,
+            walks_attr,
+            source_attr_counts,
+            membership_pairs,
+            stream = test_class.cuda.stream(),
+            stream_id = 0,
+            testing = True,
+            parallel_reduce = self.parallel_reduce
+        )
+
+        # Expected counts calculation on host for verification
+        expected_counts = np.zeros((test_class.n_unique_edges, test_class.n_communities), dtype=int)
+        for i, sample_row in enumerate(edge_samples):
+            for sample in sample_row:
+                expected_counts[i, membership_pairs[community_to_merge, new_community, sample]] += 1
+
+        # Assert the results
+        np.testing.assert_array_equal(edge_counts * test_class.n_samples_edge, expected_counts)
+
+    def test_merge_cpu(
+            self,
+            example_merge,
+            baseline_stochastic_cpu: Tuple[StochasticCommunity, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        ):
+
+        _, \
+        community_to_merge, new_community, \
+        merge_communities_test, test_HHI, \
+        test_weights_dict, test_weights_individual_dict = example_merge
+
+        test_class, cum_weight_baseline, hhi_estimate_baseline, \
+            mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic_cpu
+
+        membership_pairs = test_class._calculate_members_cpu()
+
+        edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_cpu(
+            community_to_merge,
+            new_community,
+            test_class._edge_samples,
+            test_class._walks_attr_cp,
+            test_class._walks_attr,
+            test_class._source_attr_counts,
+            membership_pairs,
+            stream_id = 0,
+            testing = True,
+        )
+
+        test_class.update_scores(community_to_merge, new_community)
+        test_class.communities_dict = test_class._communities_dict
+
+        estimate_bfs = get_estimate_node_bfs_probabilities(
+            test_class,
+            n_samples_edge = self.n_samples_edge,
+            walk_length = self.walk_length,
+            walks_attr = test_class._walks_attr,
+            walks_nodes_spatial=test_class._walks
+        )
+
+        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
+
+        for key,value in zip(test_class.attr_list,membership_pairs[community_to_merge,new_community]):
+            assert value == merge_communities_test[key]
+
+        for key,value in zip(test_class.edge_unique_list,hhi_estimate):
+            assert math.isclose(test_HHI[key]/(100**2),value,rel_tol=1e-1)
+
+        assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
+
     def test_merge_gpu(
             self,
             init_class_gpu: StochasticCommunity,
             example_merge,
-            baseline_stochastic
+            baseline_stochastic_gpu
         ):
 
         _, \
@@ -1360,21 +1579,17 @@ class TestStochastic():
         test_class = init_class_gpu
 
         cum_weight_baseline, hhi_estimate_baseline, \
-            mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic
+            mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic_gpu
 
         membership_pairs = test_class._calculate_members_gpu()
-
-        edge_samples, walks_spatial, walks_edges_spatial, \
-            walks_attr, walks_attr_cp, \
-                source_attr_counts = test_class._randomwalk_gpu(testing=True)
 
         edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_gpu(
             community_to_merge,
             new_community,
-            edge_samples,
-            walks_attr_cp,
-            walks_attr,
-            source_attr_counts,
+            test_class._edge_samples_d,
+            test_class._walks_attr_cp_d,
+            test_class._walks_attr_d,
+            test_class._source_attr_counts_d,
             membership_pairs,
             stream = test_class.cuda.stream(),
             stream_id = 0,
@@ -1389,8 +1604,8 @@ class TestStochastic():
             test_class,
             n_samples_edge = self.n_samples_edge,
             walk_length = self.walk_length,
-            walks_attr = walks_attr,
-            walks_nodes_spatial=walks_spatial
+            walks_attr = test_class._walks_attr_d,
+            walks_nodes_spatial=test_class._walks_d
         )
 
         bfs = get_bfs_probabilities(test_class,self.walk_length-1)
@@ -1402,6 +1617,25 @@ class TestStochastic():
             assert math.isclose(test_HHI[key]/(100**2),value,rel_tol=1e-1)
 
         assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
+
+    @pytest.mark.parametrize("n_sample_pairs", [12, 8], ids=['no sampling', '8 samples'])
+    def test_optimize_cpu(self, init_class_cpu: StochasticCommunity, optimization_cases, n_sample_pairs):
+        _, weights, test_communities_dict = optimization_cases
+
+        test_class = init_class_cpu
+
+        membership_pairs, hhi_pairs, weights_pairs = test_class.greedy_optimize(
+                weights=weights,
+                testing_opt=True,
+                n_sample_pairs=n_sample_pairs,
+                epsilon = 0.5,
+                rtol = 0.0
+            )
+
+        assert same_community(test_class.communities_dict, test_communities_dict)
+
+        print(test_class.f_history)
+        print(test_class.communities_history)
 
     @pytest.mark.parametrize("n_sample_pairs", [12, 8], ids=['no sampling', '8 samples'])
     def test_optimize_gpu(self, init_class_gpu: StochasticCommunity, optimization_cases, n_sample_pairs):
@@ -1422,30 +1656,42 @@ class TestStochastic():
         print(test_class.f_history)
         print(test_class.communities_history)
 
-    def test_randomwalker(self, example_case, init_class_gpu_many_samples: StochasticCommunity):
+    def test_randomwalker_cpu(self, example_case, init_class_cpu_many_samples: StochasticCommunity):
+
+        MG, _, _, _, _, _ = example_case
+        test_class = init_class_cpu_many_samples
+
+        membership_pairs = test_class._calculate_members_cpu()
+
+        edge_samples, walks_spatial, walks_edges_spatial, walks_attr, walks_attr_cp, source_counts = test_class._randomwalk_cpu(testing=True)
+
+        edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, _, _, _ = test_class._stochastic_eval_cpu(
+            0,
+            0,
+            edge_samples = edge_samples,
+            walks_nodes_weights = walks_attr_cp,
+            walks_nodes = walks_attr,
+            source_counts = source_counts,
+            membership_pairs = membership_pairs,
+            testing = True
+        )
+
+        bfs = get_bfs_probabilities(test_class,self.walk_length-1)
+        estimate_bfs = get_estimate_node_bfs_probabilities(
+            test_class,
+            n_samples_edge=self.n_samples_edge_high,
+            walk_length=self.walk_length,
+            walks_attr=walks_attr,
+            walks_nodes_spatial=walks_spatial
+        )
+
+        assert np.allclose(test_class._adj3/100,edge_counts,rtol=1e-1)
+        assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
+
+    def test_randomwalker_gpu(self, example_case, init_class_gpu_many_samples: StochasticCommunity):
 
         MG, _, _, _, _, _ = example_case
         test_class = init_class_gpu_many_samples
-
-        walks_spatial_weighted, walks_edges_spatial_weighted = test_class.weighted_sampling(
-                n_samples_edge=self.n_samples_edge_high,
-                n_samples_source_node=self.n_samples_source_node,
-                walk_length=self.walk_length,
-                TPB = self.threads_per_block,
-                testing=True
-            )
-
-        edge_p, cond_edge_p = get_edge_prob(test_class)
-        estimate_edge_p, estimate_cond_edge_p = get_estimate_edge_weighted_prob(
-            test_class,
-            n_samples_edge=self.n_samples_edge_high,
-            n_samples_source_node=self.n_samples_source_node,
-            walks_nodes_spatial=walks_spatial_weighted,
-            walks_edges_spatial=walks_edges_spatial_weighted
-        )
-
-        assert np.allclose(cond_edge_p,estimate_cond_edge_p,rtol=1e-1)
-        assert np.allclose(edge_p,estimate_edge_p,rtol=1e-1)
 
         membership_pairs = test_class._calculate_members_gpu()
 
