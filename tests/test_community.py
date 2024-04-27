@@ -1666,40 +1666,106 @@ class TestStochasticCPU(TestStochastic):
         assert np.allclose(test_class._adj3/100,edge_counts,rtol=1e-1)
         assert np.allclose(bfs,estimate_bfs,rtol=1e-1)
 
-    def test_attr_postprocess(self, init_class_less_samples: StochasticCommunity):
-        # This setup will run once for the entire class
 
-        script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
-        data_dir = os.path.join('..','test_data')
-        MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir,data_dir,'test_DG_AP_AL_blank.graphml')) # store graph
+def test_attr_postprocess():
+    # This setup will run once for the entire class
 
-        test_class = StochasticCommunity(
-            MG, seed=seed,
-            use_gpu=self.use_gpu,
-            n_samples_edge=self.n_samples_edge_low,
-            walk_length=self.walk_length,
-            num_streams=self.num_streams
-        )
-        test_class.init_random(tile_size=self.tile_size)
-        
-        community_to_merge = 0
-        new_community = 0
+    n_samples_edge_low=5000
+    walk_length=10
+    num_streams = 4
+    tile_size = 2
 
-        membership_pairs = test_class._calculate_members_cpu()
+    script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
+    data_dir = os.path.join('..','test_data')
+    MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir,data_dir,'test_DG_AP_AL_blank.graphml')) # store graph
+    
+    test_class_gpu = StochasticCommunity(
+        MG, seed=seed,
+        use_gpu=True,
+        n_samples_edge=n_samples_edge_low,
+        walk_length=walk_length,
+        num_streams=num_streams
+    )
+    test_class_gpu.init_random(tile_size=tile_size)
 
-        edge_samples, walks_spatial, walks_edges_spatial, \
-            walks_attr, walks_attr_cp, \
-                source_attr_counts = test_class._randomwalk_cpu(testing=True)
+    _, _, _, _, _, _, _, _, _, _, _, _, attr_postprocess_gpu = define_cuda_kernels_stochastic(
+        n_attr = test_class_gpu.n_attr, 
+        n_nodes = test_class_gpu.n_nodes_spatial, 
+        n_samples_edge = n_samples_edge_low, 
+        tile_size = 1, 
+        max_size = 1
+    )
 
-        cum_weight_h = attr_postprocess_cpu(
-            ci = community_to_merge,
-            cj = new_community,
-            samples = walks_attr,
-            samples_weights = walks_attr_cp,
-            source_counts = source_attr_counts,
-            membership = membership_pairs,
-            n_attr = test_class.n_attr
-        )
+    community_to_merge = 0
+    new_community = 0
 
-        # Expected counts calculation on host for verification
-        expected_counts = np.zeros((test_class.n_unique_edges, test_class.n_communities), dtype=int)
+    membership_pairs = test_class_gpu._calculate_members_gpu()
+
+    edge_samples, walks_spatial, walks_edges_spatial, \
+        walks_attr, walks_attr_cp, \
+            source_attr_counts = test_class_gpu._randomwalk_gpu(testing=True)
+
+    nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(test_class_gpu.n_unique_edges, n_samples_edge_low), TPB = 8)
+
+    cum_weight_d = np.zeros((test_class_gpu.n_nodes_spatial,test_class_gpu.n_attr), dtype=np.float32)
+    cum_weight_d = cuda.to_device(cum_weight_d)
+
+    attr_postprocess_gpu[threadsperblock,blockspergrid](
+        community_to_merge,
+        new_community,
+        n_samples_edge_low,
+        walk_length,
+        walks_attr_cp,
+        walks_attr,
+        source_attr_counts,
+        cum_weight_d,
+        membership_pairs
+    )
+    
+    walks_attr_cp = walks_attr_cp.copy_to_host()
+    walks_attr = walks_attr.copy_to_host()
+    source_attr_counts = source_attr_counts.copy_to_host()
+    membership_pairs = membership_pairs.copy_to_host()
+
+    bfs_estimate_d = cum_weight_d.copy_to_host() / source_attr_counts
+
+    cum_weight_h = attr_postprocess_cpu(
+        ci = community_to_merge,
+        cj = new_community,
+        samples = walks_attr,
+        samples_weights = walks_attr_cp,
+        source_counts = source_attr_counts,
+        membership = membership_pairs,
+        n_attr = test_class_gpu.n_attr
+    )
+
+    np.testing.assert_array_equal(cum_weight_h, cum_weight_d.copy_to_host())
+
+    test_class_cpu = StochasticCommunity(
+        MG, seed=seed,
+        use_gpu=False,
+        n_samples_edge=n_samples_edge_low,
+        walk_length=walk_length,
+        num_streams=num_streams
+    )
+    test_class_cpu.init_random(tile_size=tile_size)
+
+    membership_pairs = test_class_cpu._calculate_members_cpu()
+
+    edge_samples, walks_spatial, walks_edges_spatial, \
+        walks_attr, walks_attr_cp, \
+            source_attr_counts = test_class_cpu._randomwalk_cpu(testing=True)
+
+    cum_weight_h = attr_postprocess_cpu(
+        ci = community_to_merge,
+        cj = new_community,
+        samples = walks_attr,
+        samples_weights = walks_attr_cp,
+        source_counts = source_attr_counts,
+        membership = membership_pairs,
+        n_attr = test_class_gpu.n_attr
+    )
+
+    bfs_estimate_h = cum_weight_h / source_attr_counts
+
+    np.allclose(bfs_estimate_h, bfs_estimate_d, rtol=1e-1)

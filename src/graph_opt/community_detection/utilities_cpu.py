@@ -13,7 +13,7 @@ def spatial_random_walk(
         walk_length: int,
     ):
     """
-    Perform `n` random walks of length `length` starting from root nodes `nodes`. 
+    Perform `n` random walks of length `length` starting from root nodes `nodes`.
 
     Parameters
     ----------
@@ -32,7 +32,7 @@ def spatial_random_walk(
     """
 
     walks = np.zeros((n_nodes, n_samples, walk_length), dtype=np.int32)
-    walks_edges = np.full((n_nodes, n_samples, walk_length-1), -1, dtype=np.int32)
+    walks_edges = np.full((n_nodes, n_samples, walk_length-1), -10000, dtype=np.int32)
 
     for i in range(n_nodes):  # iterate over root nodes
         for j in range(n_samples):  # generate n walks per root node
@@ -52,7 +52,7 @@ def spatial_random_walk(
                 choice = naive_weighted_choices(rs, weights)
                 if choice is None:
                     break
-                
+
                 current_node = choice
                 current_edge = edges[choice]
                 walks[current_node,j,k+1] = choice
@@ -62,7 +62,7 @@ def spatial_random_walk(
 
 def attr_sampler_cpu(n_samples, walk_length, walks_edges, adj, adj3, n_nodes):
     # Initialize output arrays
-    attr_sample = np.full((n_nodes, n_samples, walk_length-1), -1, np.int32)
+    attr_sample = np.full((n_nodes, n_samples, walk_length-1), -10000, np.int32)
     attr_cp = np.zeros((n_nodes, n_samples, walk_length-1))
 
     # Iterate over each step in the walk
@@ -70,10 +70,10 @@ def attr_sampler_cpu(n_samples, walk_length, walks_edges, adj, adj3, n_nodes):
         # Flatten the relevant slice for simplicity
         current_edges = walks_edges[:, :, k]
         valid_mask = current_edges >= 0
-        
+
         # We need to handle valid edges only
         valid_edges = current_edges[valid_mask].astype(int)
-        
+
         if len(valid_edges) > 0:
             # Extract weights from adj3 based on valid_edges for current step k
             weights = adj3[valid_edges]  # Shape: (num_valid_edges, n_attr)
@@ -98,7 +98,7 @@ def attr_sampler_cpu(n_samples, walk_length, walks_edges, adj, adj3, n_nodes):
 def attr_source_postprocess_cpu(n_nodes, n_attr, attr_sample):
 
     source_attr_counts = np.zeros((n_nodes, n_attr), dtype=np.int32)  # Assuming 100 possible attributes
-    
+
     # Iterate through the first attribute sample for each sample set
     # Extract the first attribute sample from each set
     first_attr_samples = attr_sample[:, :, 0]
@@ -156,46 +156,49 @@ def attr_postprocess_cpu(ci, cj, samples, samples_weights, source_counts, member
     n_nodes, n_samples, walk_length = samples.shape
     cum_weight = np.zeros((n_nodes, n_attr), dtype=np.float32)
 
-    # Initial processing to identify valid source nodes
-    source_nodes = samples[:, :, 0].astype(int)
-    valid_sources_mask = ~np.isnan(samples[:, :, 0]) & (source_nodes >= 0)
+    # Iterate over each sample and walk step
+    for i in range(n_nodes):
+        for j in range(n_samples):
+            source_node = samples[i, j, 0]
 
-    # Membership of the source nodes using advanced indexing
-    source_c = membership[ci, cj, source_nodes]
+            # Check if the source node is valid
+            if not np.isnan(source_node) and source_node >= 0:
+                source_node = int(source_node)
+                source_c = membership[ci, cj, source_node]
+                source_count = source_counts[i, source_node]
 
-    # Process each walk length position
-    for k in range(walk_length - 1):
-        current_nodes = samples[:, :, k].astype(int)
-        valid_currents_mask = ~np.isnan(samples[:, :, k]) & (current_nodes >= 0)
+                # Only proceed if the source node has a valid count
+                if source_count > 0:
+                    for k in range(walk_length - 1):  # Start from 1 since 0 is the source node
+                        current_node = samples[i, j, k]
 
-        current_c = membership[ci, cj, current_nodes]
-        current_weights = samples_weights[:, :, k]
+                        # Check if the current node is valid
+                        if np.isnan(current_node) or current_node < 0:
+                            break  # Stop processing this walk if an invalid node is encountered
 
-        # Combine conditions using broadcasting and boolean indexing
-        conditions = (current_c == source_c) & (source_counts[np.arange(n_nodes)[:, None], source_nodes] > 0)
-        full_conditions = valid_sources_mask & valid_currents_mask & conditions
+                        current_node = int(current_node)
+                        current_c = membership[ci, cj, current_node]
+                        current_weight = samples_weights[i, j, k]
 
-        # Vectorized weight addition
-        # Flatten the indices and weights where full_conditions is True
-        valid_indices = np.where(full_conditions)
-        flattened_source_nodes = source_nodes[valid_indices]
-        flattened_current_weights = current_weights[valid_indices]
-        
-        # Use np.add.at to add weights to cum_weight based on unique source nodes
-        np.add.at(cum_weight, (valid_indices[0], flattened_source_nodes), flattened_current_weights)
+                        # Check if current node matches the source node condition
+                        if current_c == source_c:
+                            # Update cumulative weight
+                            cum_weight[i, source_node] += current_weight
+                        else:
+                            break  # Optional: Stop if the membership condition isn't met
 
     return cum_weight
 
 def set_membership_cpu(communities, membership, n_attr):
     n = len(communities)
-    
+
     # Initialize the membership_pairs array
     membership_pairs = np.zeros((n, n, n_attr), dtype=np.int32)
-    
+
     # Broadcast communities to create a 3D array where each layer is the comparison of community1 and community2
     community1 = communities[:, None, None]  # Shape (n, 1, 1)
     community2 = communities[None, :, None]  # Shape (1, n, 1)
-    
+
     # Broadcast membership to match the third dimension
     membership_expanded = membership[None, None, :]  # Shape (1, 1, n_attr)
     membership_expanded = np.broadcast_to(membership_expanded, (n, n, n_attr))
@@ -203,7 +206,7 @@ def set_membership_cpu(communities, membership, n_attr):
     # Condition where community1 == community2
     mask_equal = community1 == community2
     mask_equal = np.broadcast_to(mask_equal, (n, n, n_attr))  # Make sure mask has the same shape as membership_pairs
-    
+
     # Condition where community1 == community2
     membership_pairs[mask_equal] = membership_expanded[mask_equal]
 

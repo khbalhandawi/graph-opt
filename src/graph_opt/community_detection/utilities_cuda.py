@@ -233,7 +233,7 @@ def define_cuda_kernels_stochastic(
         # Compute the grid stride
         dx, dy = cuda.gridsize(2)
 
-        for i in range(x, n_attr, dx):
+        for i in range(x, n_nodes, dx):
             for j in range(y, n_samples, dy):
 
                 idx = i * dy + j
@@ -243,7 +243,7 @@ def define_cuda_kernels_stochastic(
                 for k in range(walk_length - 1):
 
                     # select spatial node
-                    for n in range(n_attr):
+                    for n in range(n_nodes):
                         weights[i,j,n] = adj[current_node,n]
 
                     cumsum_global_2d(weights,cumsum,i,j)
@@ -523,24 +523,26 @@ def define_cuda_kernels_stochastic(
             for j in range(y, n_samples, dy):
 
                 source_node = samples[i,j,0]
+                
                 if not math.isnan(source_node) and source_node >= 0:
+
                     source_c = membership[ci,cj,source_node]
+                    source_count = source_counts[i,source_node]
 
-                    for k in range(walk_length-1):
+                    if source_count > 0:
+                        for k in range(walk_length-1):
 
-                        curr_node = samples[i,j,k]
-                        if math.isnan(curr_node) or curr_node < 0:
-                            break
-                        else:
+                            curr_node = samples[i,j,k]
+                            if math.isnan(curr_node) or curr_node < 0:
+                                break
+
                             curr_c = membership[ci,cj,curr_node]
+                            curr_weight = samples_weights[i,j,k]
 
-                        curr_weight = samples_weights[i,j,k]
-                        source_count = source_counts[i,source_node]
-
-                        if curr_c == source_c and source_count > 0:
-                            cuda.atomic.add(cum_weight[i], source_node, curr_weight)
-                        else:
-                            break
+                            if curr_c == source_c and source_count > 0:
+                                cuda.atomic.add(cum_weight[i], source_node, curr_weight)
+                            else:
+                                break
 
     return set_membership, spatial_random_walk, \
         attr_sampler, attr_source_postprocess, edge_sampler, \
