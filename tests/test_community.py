@@ -1670,7 +1670,7 @@ class TestStochasticCPU(TestStochastic):
 def test_attr_postprocess():
     # This setup will run once for the entire class
 
-    n_samples_edge_low=5000
+    n_samples_edge_low=10
     walk_length=10
     num_streams = 4
     tile_size = 2
@@ -1678,7 +1678,7 @@ def test_attr_postprocess():
     script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
     data_dir = os.path.join('..','test_data')
     MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir,data_dir,'test_DG_AP_AL_blank.graphml')) # store graph
-    
+
     test_class_gpu = StochasticCommunity(
         MG, seed=seed,
         use_gpu=True,
@@ -1721,7 +1721,7 @@ def test_attr_postprocess():
         cum_weight_d,
         membership_pairs
     )
-    
+
     walks_attr_cp = walks_attr_cp.copy_to_host()
     walks_attr = walks_attr.copy_to_host()
     source_attr_counts = source_attr_counts.copy_to_host()

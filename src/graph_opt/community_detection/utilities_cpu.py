@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Optional
 from random import Random
+import numba  
 
 from ..random_walk.utilities import naive_weighted_choices
 
@@ -152,6 +153,7 @@ def edge_postprocess_cpu(ci, cj, samples, membership, n_communities):
 
     return counts
 
+@numba.njit
 def attr_postprocess_cpu(ci, cj, samples, samples_weights, source_counts, membership, n_attr):
     n_nodes, n_samples, walk_length = samples.shape
     cum_weight = np.zeros((n_nodes, n_attr), dtype=np.float32)
@@ -162,8 +164,7 @@ def attr_postprocess_cpu(ci, cj, samples, samples_weights, source_counts, member
             source_node = samples[i, j, 0]
 
             # Check if the source node is valid
-            if not np.isnan(source_node) and source_node >= 0:
-                source_node = int(source_node)
+            if source_node >= 0:
                 source_c = membership[ci, cj, source_node]
                 source_count = source_counts[i, source_node]
 
@@ -173,10 +174,9 @@ def attr_postprocess_cpu(ci, cj, samples, samples_weights, source_counts, member
                         current_node = samples[i, j, k]
 
                         # Check if the current node is valid
-                        if np.isnan(current_node) or current_node < 0:
+                        if current_node < 0:
                             break  # Stop processing this walk if an invalid node is encountered
 
-                        current_node = int(current_node)
                         current_c = membership[ci, cj, current_node]
                         current_weight = samples_weights[i, j, k]
 

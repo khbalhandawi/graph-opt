@@ -981,7 +981,7 @@ class StochasticCommunity(BaseCommunity):
         self._adj3_d = self.cuda.to_device(self._adj3)
         self._adj_dense_index_d = self.cuda.to_device(self._adj_dense_index)
 
-        node_spatial_list = np.array(list(self.node_spatial_list),np.int32)
+        node_spatial_list = np.array([self.node_spatial_key2i[node] for node in self.node_spatial_list],np.int32)
         node_spatial_degree = np.array(list(self.node_spatial_degree),np.float32)
 
         self._node_spatial_list_d = self.cuda.to_device(node_spatial_list)
