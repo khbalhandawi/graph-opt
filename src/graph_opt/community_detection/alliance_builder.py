@@ -25,7 +25,7 @@ else:
 
 from .utilities import resort_communities
 from .utilities_cpu import set_membership_cpu, edge_sampler_cpu, spatial_random_walk, attr_sampler_cpu, \
-    attr_source_postprocess_cpu, edge_postprocess_cpu, attr_postprocess_cpu
+    attr_source_postprocess_cpu, attr_weight_cpu, node_weight_cpu, community_weight_cpu, edge_postprocess_cpu, attr_postprocess_cpu
 from ..utilities import _default_if_none, dict2array, cpu_gpu_dispatcher, cuda_blocks, safe_log, serialize, deserialize
 from ..random_walk.utilities import naive_weighted_choices
 
@@ -945,6 +945,8 @@ class StochasticCommunity(BaseCommunity):
         self._walks_attr = np.zeros((self.n_nodes_spatial,self.n_samples_edge,self.walk_length-1), dtype=np.int32)
         self._walks_attr_cp = np.zeros((self.n_nodes_spatial,self.n_samples_edge,self.walk_length-1), dtype=np.float32)
         self._source_attr_counts = np.zeros((self.n_nodes_spatial,self.n_attr), dtype=np.int32)
+        self._attr_weights = np.zeros((self.n_nodes_spatial,self.n_attr), dtype=np.float32)
+        self._node_weights = np.zeros((self.n_nodes_spatial), dtype=np.float32)
 
     def _init_random_cpu(self, **kwargs):
         super()._init_random_cpu(**kwargs)
@@ -1001,8 +1003,13 @@ class StochasticCommunity(BaseCommunity):
         self.edge_histogram                     : Callable = kernels[9]
         self.copy_reduced_counts                : Callable = kernels[10]
         self.init_attr                          : Callable = kernels[11]
-        self.attr_postprocess                   : Callable = kernels[12]
-
+        self.init_node_weights                  : Callable = kernels[12]
+        self.init_community                     : Callable = kernels[13]
+        self.node_weight                        : Callable = kernels[14]
+        self.attr_weight                        : Callable = kernels[15]
+        self.community_weight                   : Callable = kernels[16]
+        self.attr_postprocess                   : Callable = kernels[17]
+        
         self.create_xoroshiro128p_states: Callable = create_xoroshiro128p_states
 
         # random walk data
@@ -1012,13 +1019,17 @@ class StochasticCommunity(BaseCommunity):
         self._walks_attr_d = self.cuda.device_array((self.n_nodes_spatial,self.n_samples_edge,self.walk_length-1), dtype=np.int32)
         self._walks_attr_cp_d = self.cuda.device_array((self.n_nodes_spatial,self.n_samples_edge,self.walk_length-1), dtype=np.float32)
         self._source_attr_counts_d = self.cuda.device_array((self.n_nodes_spatial,self.n_attr), dtype=np.int32)
+        self._attr_weights_d = self.cuda.device_array((self.n_nodes_spatial,self.n_attr), dtype=np.float32)
+        self._node_weights_d = self.cuda.device_array((self.n_nodes_spatial), dtype=np.float32)
 
         self.distributions_changed_streams = []
         self.cum_weight_streams = []
+        self.community_weight_streams = []
         self.reduced_counts_streams = []
         for stream in self.streams:
             self.distributions_changed_streams += [self.cuda.device_array(self.n_unique_edges, dtype=np.int32, stream=stream)]
             self.cum_weight_streams += [self.cuda.device_array((self.n_nodes_spatial,self.n_attr), dtype=np.float32, stream=stream)]
+            self.community_weight_streams += [self.cuda.device_array((self.n_nodes_spatial,self.n_communities), dtype=np.float32, stream=stream)]
             self.reduced_counts_streams += [self.cuda.device_array((self.n_unique_edges,self.n_communities), dtype=np.float32, stream=stream)]
 
         self._randomwalk_gpu()
@@ -1094,8 +1105,12 @@ class StochasticCommunity(BaseCommunity):
             attr_sample = self._walks_attr,
         )
 
+        self._attr_weights = attr_weight_cpu(self._walks_attr, self._walks_attr_cp, self.n_attr)
+        self._node_weights = node_weight_cpu(self._walks_attr, self._walks_attr_cp)
+
         if testing:
-            return self._edge_samples, self._walks, self._walks_edges, self._walks_attr, self._walks_attr_cp, self._source_attr_counts
+            return self._edge_samples, self._walks, self._walks_edges, self._walks_attr, self._walks_attr_cp, self._source_attr_counts, \
+                self._attr_weights, self._node_weights
 
     def _stochastic_eval_cpu(
             self,
@@ -1104,7 +1119,6 @@ class StochasticCommunity(BaseCommunity):
             edge_samples,
             walks_nodes_weights,
             walks_nodes,
-            source_counts,
             membership_pairs,
             stream_id = 0,
             testing = False,
@@ -1123,19 +1137,28 @@ class StochasticCommunity(BaseCommunity):
             n_communities = self.n_communities
         )
 
+        community_weight = community_weight_cpu(
+            ci = community_i, 
+            cj = community_j, 
+            samples = walks_nodes, 
+            samples_weights = walks_nodes_weights,
+            membership = membership_pairs,
+            n_communities = self.n_communities
+        )
+
         cum_weight_h = attr_postprocess_cpu(
             ci = community_i,
             cj = community_j,
-            samples = walks_nodes,
-            samples_weights = walks_nodes_weights,
-            source_counts = source_counts,
+            attr_weight = self._attr_weights,
+            community_weight = community_weight,
+            node_weight = self._node_weights,
             membership = membership_pairs,
+            n_nodes = self.n_nodes_spatial,
             n_attr = self.n_attr
         )
 
         # Initialize the cum_weight_norm array with zeros (to avoid underflows)
-        cum_weight_norm = np.zeros_like(cum_weight_h, dtype=float)
-        np.divide(cum_weight_h, source_counts, out=cum_weight_norm, where=(source_counts != 0))
+        cum_weight_norm = cum_weight_h
 
         edge_counts = reduced_counts_h / self.n_samples_edge
 
@@ -1143,7 +1166,7 @@ class StochasticCommunity(BaseCommunity):
         hhi_estimate = np.nansum(hhi_estimate,axis=1)
 
         bfs_estimate = cum_weight_norm
-        bfs_estimate = np.nansum(bfs_estimate,axis=0)
+        bfs_estimate = np.nansum(bfs_estimate,axis=0) / bfs_estimate.shape[0]
         log_bfs = safe_log(bfs_estimate)
 
         # update record
@@ -1155,7 +1178,7 @@ class StochasticCommunity(BaseCommunity):
             np.copyto(cum_weight, cum_weight_h)       
 
         if testing:
-            return edge_samples, walks_nodes, walks_nodes_weights, edge_counts, cum_weight_norm, hhi_estimate, bfs_estimate, log_bfs
+            return edge_samples, walks_nodes, walks_nodes_weights, community_weight, edge_counts, cum_weight_norm, hhi_estimate, bfs_estimate, log_bfs
         else:
             return hhi_estimate, bfs_estimate, log_bfs
 
@@ -1198,7 +1221,6 @@ class StochasticCommunity(BaseCommunity):
                 edge_samples,
                 walks_nodes_weights,
                 walks_nodes,
-                source_counts,
                 membership_pairs,
                 stream_id = stream_id
             )
@@ -1236,7 +1258,6 @@ class StochasticCommunity(BaseCommunity):
             self._edge_samples,
             self._walks_attr_cp,
             self._walks_attr,
-            self._source_attr_counts,
             membership_pairs,
             stream_id = stream_id,
             testing = False,
@@ -1383,6 +1404,14 @@ class StochasticCommunity(BaseCommunity):
 
         self.init_attr[blockspergrid,threadsperblock](self._source_attr_counts_d,)
 
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial,), TPB = self.TPB_1D)
+
+        self.init_node_weights[blockspergrid,threadsperblock](self._node_weights_d,)
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial,self.n_attr), TPB = self.TPB_2D)
+
+        self.init_community[blockspergrid,threadsperblock](self.n_attr,self._attr_weights_d)
+
         # Define the thread and block dimensions
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_samples_edge), TPB = self.TPB_2D)
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
@@ -1439,8 +1468,30 @@ class StochasticCommunity(BaseCommunity):
 
         self.cuda.synchronize()
 
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, self.n_samples_edge), TPB = self.TPB_2D)
+        self.attr_weight[blockspergrid,threadsperblock](
+            self.n_samples_edge, 
+            self.walk_length, 
+            self.n_attr, 
+            self._walks_attr_d, 
+            self._walks_attr_cp_d, 
+            self._attr_weights_d
+        )
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, self.n_samples_edge), TPB = self.TPB_2D)
+        self.node_weight[blockspergrid,threadsperblock](
+            self.n_samples_edge, 
+            self.walk_length, 
+            self._walks_attr_d, 
+            self._walks_attr_cp_d, 
+            self._node_weights_d
+        )
+        
+        self.cuda.synchronize()
+
         if testing:
-            return self._edge_samples_d, self._walks_d, self._walks_edges_d, self._walks_attr_d, self._walks_attr_cp_d, self._source_attr_counts_d
+            return self._edge_samples_d, self._walks_d, self._walks_edges_d, self._walks_attr_d, self._walks_attr_cp_d, self._source_attr_counts_d, \
+                self._attr_weights_d, self._node_weights_d
 
     def _stochastic_eval_gpu(
             self,
@@ -1449,14 +1500,14 @@ class StochasticCommunity(BaseCommunity):
             edge_samples_d,
             walks_nodes_weights_d,
             walks_nodes_d,
-            source_counts_d,
             membership_pairs_d,
             stream,
             stream_id = 0,
             testing = False,
             parallel_reduce = False,
             reduced_counts_d = None,
-            cum_weight_d = None
+            cum_weight_d = None,
+            community_weight_d = None,
         ):
 
         #################################
@@ -1464,6 +1515,7 @@ class StochasticCommunity(BaseCommunity):
 
         reduced_counts_d = _default_if_none(reduced_counts_d, self.reduced_counts_streams[stream_id], "reduced_counts_d")
         cum_weight_d = _default_if_none(cum_weight_d, self.cum_weight_streams[stream_id], "cum_weight_d")
+        community_weight_d = _default_if_none(community_weight_d, self.community_weight_streams[stream_id], "community_weight_d")
 
         if parallel_reduce:
 
@@ -1549,29 +1601,37 @@ class StochasticCommunity(BaseCommunity):
 
         self.init_attr[blockspergrid,threadsperblock,stream](cum_weight_d,)
 
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, self.n_communities), TPB = self.TPB_2D)
+
+        self.init_community[blockspergrid,threadsperblock,stream](self.n_communities,community_weight_d)
+
         stream.synchronize()
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_samples_edge), TPB = self.TPB_2D)
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, self.n_samples_edge), TPB = self.TPB_2D)
+
+        self.community_weight[blockspergrid,threadsperblock,stream](
+            community_i, 
+            community_j, 
+            self.n_samples_edge, 
+            self.walk_length, 
+            self.n_communities,
+            self._walks_attr_d, 
+            self._walks_attr_cp_d, 
+            membership_pairs_d, 
+            community_weight_d
+        )
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_nodes_spatial, self.n_attr), TPB = self.TPB_2D)
 
         self.attr_postprocess[blockspergrid,threadsperblock,stream](
             community_i,
             community_j,
-            self.n_samples_edge,
-            self.walk_length,
-            walks_nodes_weights_d,
-            walks_nodes_d,
-            source_counts_d,
-            cum_weight_d,
-            membership_pairs_d
-        )
-
-        stream.synchronize()
-
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self.n_unique_edges, self.n_samples_edge), TPB = self.TPB_2D)
-
-        self.elementwise_divide[blockspergrid,threadsperblock,stream](
-            cum_weight_d,
-            source_counts_d
+            self.n_attr,
+            self._attr_weights_d,
+            community_weight_d,
+            self._node_weights_d,
+            membership_pairs_d,
+            cum_weight_d
         )
 
         stream.synchronize()
@@ -1589,7 +1649,7 @@ class StochasticCommunity(BaseCommunity):
         hhi_estimate = np.nansum(hhi_estimate,axis=1)
 
         bfs_estimate = cum_weight_h
-        bfs_estimate = np.nansum(bfs_estimate,axis=0)
+        bfs_estimate = np.nansum(bfs_estimate,axis=0) / bfs_estimate.shape[0]
         log_bfs = safe_log(bfs_estimate)
 
         if testing:
@@ -1625,7 +1685,6 @@ class StochasticCommunity(BaseCommunity):
             edge_samples_d,
             walks_nodes_weights_d,
             walks_nodes_d,
-            source_counts_d,
             membership_pairs_d,
             reduced_counts_base_d,
             weights,
@@ -1644,7 +1703,6 @@ class StochasticCommunity(BaseCommunity):
                 edge_samples_d,
                 walks_nodes_weights_d,
                 walks_nodes_d,
-                source_counts_d,
                 membership_pairs_d,
                 stream=stream,
                 stream_id=stream_id,
@@ -1688,7 +1746,6 @@ class StochasticCommunity(BaseCommunity):
             self._edge_samples_d,
             self._walks_attr_cp_d,
             self._walks_attr_d,
-            self._source_attr_counts_d,
             membership_pairs_d,
             stream,
             stream_id = stream_id,
@@ -1777,7 +1834,6 @@ class StochasticCommunity(BaseCommunity):
                                     self._edge_samples_d,
                                     self._walks_attr_cp_d,
                                     self._walks_attr_d,
-                                    self._source_attr_counts_d,
                                     membership_pairs_d,
                                     reduced_counts_base_d,
                                     weights,

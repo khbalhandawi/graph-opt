@@ -154,40 +154,90 @@ def edge_postprocess_cpu(ci, cj, samples, membership, n_communities):
     return counts
 
 @numba.njit
-def attr_postprocess_cpu(ci, cj, samples, samples_weights, source_counts, membership, n_attr):
+def node_weight_cpu(samples, samples_weights):
     n_nodes, n_samples, walk_length = samples.shape
-    cum_weight = np.zeros((n_nodes, n_attr), dtype=np.float32)
+    node_weight = np.zeros((n_nodes, ), dtype=np.float32)
 
     # Iterate over each sample and walk step
     for i in range(n_nodes):
         for j in range(n_samples):
-            source_node = samples[i, j, 0]
+            for l in range(walk_length):  # Start from 1 since 0 is the source node
+                current_attr = samples[i, j, l]
 
-            # Check if the source node is valid
-            if source_node >= 0:
-                source_c = membership[ci, cj, source_node]
-                source_count = source_counts[i, source_node]
+                # Check if the current node is valid
+                if current_attr < 0:
+                    break  # Stop processing this walk if an invalid node is encountered
 
-                # Only proceed if the source node has a valid count
-                if source_count > 0:
-                    for k in range(walk_length - 1):  # Start from 1 since 0 is the source node
-                        current_node = samples[i, j, k]
+                current_weight = samples_weights[i, j, l]
+                node_weight[i] += current_weight
 
-                        # Check if the current node is valid
-                        if current_node < 0:
-                            break  # Stop processing this walk if an invalid node is encountered
+    return node_weight
 
-                        current_c = membership[ci, cj, current_node]
-                        current_weight = samples_weights[i, j, k]
+@numba.njit
+def attr_weight_cpu(samples, samples_weights, n_attr):
+    n_nodes, n_samples, walk_length = samples.shape
+    attr_weight = np.zeros((n_nodes, n_attr), dtype=np.float32)
 
-                        # Check if current node matches the source node condition
-                        if current_c == source_c:
-                            # Update cumulative weight
-                            cum_weight[i, source_node] += current_weight
-                        else:
-                            break  # Optional: Stop if the membership condition isn't met
+    # Iterate over each sample and walk step
+    for i in range(n_nodes):
+        for j in range(n_samples):
+            for k in range(n_attr):
+                
+                target_attr = k
 
-    return cum_weight
+                for l in range(walk_length):  # Start from 1 since 0 is the source node
+                    current_attr = samples[i, j, l]
+
+                    # Check if the current node is valid
+                    if current_attr < 0:
+                        break  # Stop processing this walk if an invalid node is encountered
+
+                    current_weight = samples_weights[i, j, l]
+                    # Check if current node matches the source node condition
+                    if target_attr == current_attr:
+                        attr_weight[i, k] += current_weight
+
+    return attr_weight
+
+@numba.njit
+def community_weight_cpu(ci, cj, samples, samples_weights, membership, n_communities):
+    n_nodes, n_samples, walk_length = samples.shape
+    community_weight = np.zeros((n_nodes, n_communities), dtype=np.float32)
+
+    # Iterate over each sample and walk step
+    for i in range(n_nodes):
+        for j in range(n_samples):
+            for k in range(n_communities):
+
+                target_community = k
+                
+                for l in range(walk_length):  # Start from 1 since 0 is the source node
+                    current_attr = samples[i, j, l]
+
+                    # Check if the current node is valid
+                    if current_attr < 0:
+                        break  # Stop processing this walk if an invalid node is encountered
+                    
+                    current_community = membership[ci,cj,current_attr]
+                    current_weight = samples_weights[i, j, l]
+                    # Check if current node matches the source node condition
+                    if target_community == current_community:
+                        community_weight[i, k] += current_weight
+
+    return community_weight
+
+@numba.njit
+def attr_postprocess_cpu(ci, cj, attr_weight, community_weight, node_weight, membership, n_nodes, n_attr):
+    norm_weight = np.zeros((n_nodes, n_attr), dtype=np.float32)
+
+    # Iterate over each sample and walk step
+    for i in range(n_nodes):
+        for j in range(n_attr):
+            attr_community = membership[ci,cj,j]
+            if node_weight[i] > 0:
+                norm_weight[i,j] = (community_weight[i,attr_community] * attr_weight[i,j]) / (node_weight[i]*node_weight[i])
+
+    return norm_weight
 
 def set_membership_cpu(communities, membership, n_attr):
     n = len(communities)

@@ -188,6 +188,32 @@ def define_cuda_kernels_stochastic(
                 cum_weight[i,j] = 0        
 
     @cuda.jit
+    def init_node_weights(node_weights:DeviceNDArray):
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        for i in range(x, n_nodes, dx):
+            node_weights[i] = 0
+
+    @cuda.jit
+    def init_community(
+            n_communities:DeviceNDArray,
+            community_weights:DeviceNDArray,
+        ):
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_communities, dy):
+                community_weights[i,j] = 0
+
+    @cuda.jit
     def set_membership(
             communities:DeviceNDArray,
             membership:DeviceNDArray,
@@ -502,16 +528,113 @@ def define_cuda_kernels_stochastic(
                 output[i][j] = counts[i][0][j]
 
     @cuda.jit
+    def node_weight(
+            n_samples, 
+            walk_length, 
+            samples:DeviceNDArray, 
+            samples_weights:DeviceNDArray, 
+            node_weight:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        # Iterate over each sample and walk step
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_samples, dy):
+                for l in range(walk_length - 1):  # Start from 1 since 0 is the source node
+                    current_attr = samples[i, j, l]
+
+                    # Check if the current node is valid
+                    if current_attr < 0:
+                        break  # Stop processing this walk if an invalid node is encountered
+
+                    current_weight = samples_weights[i, j, l]
+                    cuda.atomic.add(node_weight, i, current_weight)
+
+    @cuda.jit
+    def attr_weight(
+            n_samples, 
+            walk_length, 
+            n_attr, 
+            samples:DeviceNDArray, 
+            samples_weights:DeviceNDArray, 
+            attr_weight:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        # Iterate over each sample and walk step
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_samples, dy):
+                for l in range(walk_length - 1):  # Start from 1 since 0 is the source node
+                    for k in range(n_attr):
+                        target_attr = k
+                        current_attr = samples[i, j, l]
+
+                        # Check if the current node is valid
+                        if current_attr < 0:
+                            break  # Stop processing this walk if an invalid node is encountered
+
+                        current_weight = samples_weights[i, j, l]
+                        # Check if current node matches the source node condition
+                        if target_attr == current_attr:
+                            cuda.atomic.add(attr_weight[i], k, current_weight)
+
+    @cuda.jit
+    def community_weight(
+            ci, 
+            cj, 
+            n_samples, 
+            walk_length, 
+            n_communities,
+            samples:DeviceNDArray, 
+            samples_weights:DeviceNDArray, 
+            membership:DeviceNDArray, 
+            community_weight:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        # Iterate over each sample and walk step
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_samples, dy):
+                for l in range(walk_length - 1):  # Start from 1 since 0 is the source node
+                    for k in range(n_communities):
+                        target_community = k
+                        current_attr = samples[i, j, l]
+
+                        # Check if the current node is valid
+                        if current_attr < 0:
+                            break  # Stop processing this walk if an invalid node is encountered
+                        
+                        current_community = membership[ci,cj,current_attr]
+                        current_weight = samples_weights[i, j, l]
+                        # Check if current node matches the source node condition
+                        if target_community == current_community:
+                            cuda.atomic.add(community_weight[i], k, current_weight)
+
+    @cuda.jit
     def attr_postprocess(
             ci,
             cj,
-            n_samples,
-            walk_length,
-            samples_weights:DeviceNDArray,
-            samples:DeviceNDArray,
-            source_counts:DeviceNDArray,
-            cum_weight:DeviceNDArray,
+            n_attr,
+            attr_weight:DeviceNDArray,
+            community_weight:DeviceNDArray,
+            node_weight:DeviceNDArray,
             membership:DeviceNDArray,
+            cum_weight:DeviceNDArray
         ):
         # Compute flattened index inside the array
         x, y = cuda.grid(2)
@@ -520,32 +643,17 @@ def define_cuda_kernels_stochastic(
         dx, dy = cuda.gridsize(2)
 
         for i in range(x, n_nodes, dx):
-            for j in range(y, n_samples, dy):
+            for j in range(y, n_attr, dy):
 
-                source_node = samples[i,j,0]
-                
-                if not math.isnan(source_node) and source_node >= 0:
-
-                    source_c = membership[ci,cj,source_node]
-                    source_count = source_counts[i,source_node]
-
-                    if source_count > 0:
-                        for k in range(walk_length-1):
-
-                            curr_node = samples[i,j,k]
-                            if math.isnan(curr_node) or curr_node < 0:
-                                break
-
-                            curr_c = membership[ci,cj,curr_node]
-                            curr_weight = samples_weights[i,j,k]
-
-                            if curr_c == source_c and source_count > 0:
-                                cuda.atomic.add(cum_weight[i], source_node, curr_weight)
-                            else:
-                                break
+                attr_community = membership[ci,cj,j]
+                if node_weight[i] > 0:
+                    cum_weight[i,j] = (community_weight[i,attr_community] * attr_weight[i,j]) / (node_weight[i]*node_weight[i])
+                else:
+                    cum_weight[i,j] = 0.0
 
     return set_membership, spatial_random_walk, \
         attr_sampler, attr_source_postprocess, edge_sampler, \
         init_edge_counts, edge_postprocess, check_edge_distribution, \
         load_counts, edge_histogram, copy_reduced_counts, \
-        init_attr, attr_postprocess
+        init_attr, init_node_weights, init_community, node_weight, \
+        attr_weight, community_weight, attr_postprocess
