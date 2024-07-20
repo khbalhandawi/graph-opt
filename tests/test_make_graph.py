@@ -75,22 +75,16 @@ if __name__ == "__main__":
     # Create a dictionary of airline information
     nodes_airlines_dict = {
         'AT': {
-            'alliance': 'Alliance B'
         },
         'BT': {
-            'alliance': 'Alliance B'
         },
         'CT': {
-            'alliance': 'Alliance C'
         },
         'HT': {
-            'alliance': 'Alliance A'
         },
         'VT': {
-            'alliance': 'Alliance A'
         },
         'ZT': {
-            'alliance': 'Alliance A'
         }
     }
 

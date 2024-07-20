@@ -522,7 +522,7 @@ class DeterministicCommunity(BaseCommunity):
         ) -> Tuple[Dict[int,int], float]:
 
         # Calculate the initial mean hhi over all routes
-        f1 = -(sum(self._hhi.values())*100) / (len(self._hhi)*10000)
+        f1 = -(sum(self._hhi.values())) / (len(self._hhi))
         f2 = sum(self._log_bfs_degree.values()) / len(self._log_bfs_degree)
         f = multiobjective(f1,f2,weights)
 
@@ -672,14 +672,14 @@ class DeterministicCommunity(BaseCommunity):
                         hhi_pairs_d = None
                         bfs_pairs_d = None
 
-                        f1_pairs = -np.mean(hhi_pairs_h,axis=2) / 100
+                        f1_pairs = -np.mean(hhi_pairs_h,axis=2)
                         f2_pairs = np.mean(score_pairs_h,axis=2)
                         f_pairs = multiobjective(f1_pairs,f2_pairs,weights=weights)
 
                         # Create a mask where i + start_idx_i > j + start_idx_j
                         mask = np.fromfunction(lambda i, j: i + start_idx_i < j + start_idx_j, (end_idx_i - start_idx_i, end_idx_j - start_idx_j))
                         f_pairs = np.where(mask, f_pairs, -np.inf)
-                        hhi_pairs_h = np.where(mask[:,:,np.newaxis], hhi_pairs_h, np.sign(weights[0])*10000.0)
+                        hhi_pairs_h = np.where(mask[:,:,np.newaxis], hhi_pairs_h, np.sign(weights[0]))
                         bfs_pairs_h = np.where(mask[:,:,np.newaxis], bfs_pairs_h, 0.0)
                         score_pairs_h = np.where(mask[:,:,np.newaxis], score_pairs_h, 0.0)
                         membership_pairs_h = np.where(mask[:,:,np.newaxis], membership_pairs_h, 0)
@@ -701,7 +701,7 @@ class DeterministicCommunity(BaseCommunity):
                 for stream in self.streams:
                     stream.synchronize()
 
-                f1_pairs = -np.mean(hhi_pairs,axis=2) / 100
+                f1_pairs = -np.mean(hhi_pairs,axis=2)
                 f2_pairs = np.mean(score_pairs,axis=2)
 
                 f_pairs = multiobjective(f1_pairs,f2_pairs,weights=weights)
@@ -733,7 +733,7 @@ class DeterministicCommunity(BaseCommunity):
                     improvement = True
 
                     # log history
-                    f1 = -(sum(self._hhi.values())*100) / (len(self._hhi)*10000)
+                    f1 = -(sum(self._hhi.values())) / (len(self._hhi))
                     f2 = sum(self._log_bfs_degree.values()) / len(self._log_bfs_degree)
 
                     self.communities_history.append(self.communities_dict)
@@ -753,7 +753,7 @@ class DeterministicCommunity(BaseCommunity):
         ) -> Tuple[Dict[int,int], float]:
 
         # Calculate the initial mean hhi over all routes
-        f1 = -(sum(self._hhi.values())*100) / (len(self._hhi)*10000)
+        f1 = -(sum(self._hhi.values())) / (len(self._hhi))
         f2 = sum(self._log_bfs_degree.values()) / len(self._log_bfs_degree)
         f = multiobjective(f1,f2,weights)
 
@@ -787,7 +787,7 @@ class DeterministicCommunity(BaseCommunity):
                                 # Calculate the mean hhi if these two communities were to be merged
                                 self.update_scores(community1,community2)
 
-                                f1 = -(sum(self._hhi.values())*100) / (len(self._hhi)*10000)
+                                f1 = -(sum(self._hhi.values())) / (len(self._hhi))
                                 f2 = sum(self._log_bfs_degree.values()) / len(self._log_bfs_degree)
                                 f_new = multiobjective(f1,f2,weights)
 
@@ -813,7 +813,7 @@ class DeterministicCommunity(BaseCommunity):
                     improvement = True
 
                     # log history
-                    f1 = -(sum(self._hhi.values())*100) / (len(self._hhi)*10000)
+                    f1 = -(sum(self._hhi.values())) / (len(self._hhi))
                     f2 = sum(self._log_bfs_degree.values()) / len(self._log_bfs_degree)
 
                     self.communities_history.append(communities_dict.copy())
@@ -879,8 +879,8 @@ class DeterministicCommunity(BaseCommunity):
             data_list = self.G.get_edge_data(u,v)
             for key,data in data_list.items():
                 # Accumulate the squares for each route
-                self._cond_probs_community[(u, v)][self._communities_dict[data['edge_type']]] += data['market_share_percent']
-                self._cond_probs_community_sparse.append([self._communities_dict[data['edge_type']],data['market_share_percent']])
+                self._cond_probs_community[(u, v)][self._communities_dict[data['edge_type']]] += data['market_share_percent'] / 100
+                self._cond_probs_community_sparse.append([self._communities_dict[data['edge_type']],data['market_share_percent'] / 100])
 
         # Recalculate the community hhi for each affected route
         for edge, communities in self._cond_probs_community.items():
@@ -1224,7 +1224,7 @@ class StochasticCommunity(BaseCommunity):
                 membership_pairs,
                 stream_id = stream_id
             )
-            f1 = -np.mean(hhi_estimate) * 100
+            f1 = -np.mean(hhi_estimate)
             f2 = np.mean(log_bfs)
             f_new = multiobjective(f1, f2, weights=weights)
 
@@ -1291,7 +1291,7 @@ class StochasticCommunity(BaseCommunity):
 
         hhi_estimate, bfs_estimate, log_bfs = self.update_scores(0,0,reduced_counts_base,cum_weight_base)
 
-        f1 = -np.mean(list(self._hhi.values())) * 100
+        f1 = -np.mean(list(self._hhi.values()))
         f2 = np.mean(list(self._log_bfs_degree.values()))
         f = multiobjective(f1,f2,weights)
 
@@ -1378,7 +1378,7 @@ class StochasticCommunity(BaseCommunity):
                     improvement = True
 
                     # log history
-                    f1 = -np.mean(list(self._hhi.values())) * 100
+                    f1 = -np.mean(list(self._hhi.values()))
                     f2 = np.mean(list(self._log_bfs_degree.values()))
 
                     self.communities_history.append(self.communities_dict)
@@ -1708,7 +1708,7 @@ class StochasticCommunity(BaseCommunity):
                 stream_id=stream_id,
                 parallel_reduce = parallel_reduce
             )
-            f1 = -np.mean(hhi_estimate) * 100
+            f1 = -np.mean(hhi_estimate)
             f2 = np.mean(log_bfs)
             f_new = multiobjective(f1, f2, weights=weights)
 
@@ -1783,7 +1783,7 @@ class StochasticCommunity(BaseCommunity):
 
         hhi_estimate, bfs_estimate, log_bfs = self.update_scores(0,0,reduced_counts_base_d,cum_weight_base_d)
 
-        f1 = -np.mean(list(self._hhi.values())) * 100
+        f1 = -np.mean(list(self._hhi.values()))
         f2 = np.mean(list(self._log_bfs_degree.values()))
         f = multiobjective(f1,f2,weights)
 
@@ -1874,7 +1874,7 @@ class StochasticCommunity(BaseCommunity):
                     improvement = True
 
                     # log history
-                    f1 = -np.mean(list(self._hhi.values())) * 100
+                    f1 = -np.mean(list(self._hhi.values()))
                     f2 = np.mean(list(self._log_bfs_degree.values()))
 
                     self.communities_history.append(self.communities_dict)

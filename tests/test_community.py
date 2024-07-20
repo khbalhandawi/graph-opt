@@ -369,12 +369,12 @@ def example_conditionals():
                 'VT': 4
             },
             "test_HHI": {
-                ('0', '1'): 5200.0,
-                ('0', '2'): 10000.0,
-                ('0', '4'): 10000.0,
-                ('1', '2'): 10000.0,
-                ('3', '4'): 6800.0,
-                ('4', '0'): 10000.0
+                ('0', '1'): 5200.0 / 10000,
+                ('0', '2'): 10000.0 / 10000,
+                ('0', '4'): 10000.0 / 10000,
+                ('1', '2'): 10000.0 / 10000,
+                ('3', '4'): 6800.0 / 10000,
+                ('4', '0'): 10000.0 / 10000
             },
             "test_weights_dict": {
                 'AT': 0,
@@ -393,12 +393,12 @@ def example_conditionals():
                 'VT': 4
             },
             "test_HHI": {
-                ('0', '1'): 5200.0,
-                ('0', '2'): 10000.0,
-                ('0', '4'): 10000.0,
-                ('1', '2'): 10000.0,
-                ('3', '4'): 6800.0,
-                ('4', '0'): 10000.0
+                ('0', '1'): 5200.0 / 10000,
+                ('0', '2'): 10000.0 / 10000,
+                ('0', '4'): 10000.0 / 10000,
+                ('1', '2'): 10000.0 / 10000,
+                ('3', '4'): 6800.0 / 10000,
+                ('4', '0'): 10000.0 / 10000
             },
             "test_weights_dict": {
                 'AT': 0,
@@ -417,12 +417,12 @@ def example_conditionals():
                 'VT': 4
             },
             "test_HHI": {
-                ('0', '1'): 5200.0,
-                ('0', '2'): 10000.0,
-                ('0', '4'): 10000.0,
-                ('1', '2'): 10000.0,
-                ('3', '4'): 6800.0,
-                ('4', '0'): 10000.0
+                ('0', '1'): 5200.0 / 10000,
+                ('0', '2'): 10000.0 / 10000,
+                ('0', '4'): 10000.0 / 10000,
+                ('1', '2'): 10000.0 / 10000,
+                ('3', '4'): 6800.0 / 10000,
+                ('4', '0'): 10000.0 / 10000
             },
             "test_weights_dict": {
                 'AT': 0,
@@ -441,12 +441,12 @@ def example_conditionals():
                 'VT': 4
             },
             "test_HHI": {
-                ('0', '1'): 10000.0,
-                ('0', '2'): 10000.0,
-                ('0', '4'): 10000.0,
-                ('1', '2'): 10000.0,
-                ('3', '4'): 6800.0,
-                ('4', '0'): 10000.0
+                ('0', '1'): 10000.0 / 10000,
+                ('0', '2'): 10000.0 / 10000,
+                ('0', '4'): 10000.0 / 10000,
+                ('1', '2'): 10000.0 / 10000,
+                ('3', '4'): 6800.0 / 10000,
+                ('4', '0'): 10000.0 / 10000
             },
             "test_weights_dict": {
                 'AT': 0,
@@ -550,12 +550,12 @@ def example_case():
                 'VT': 4
             },
             "test_HHI": {
-                ('0', '1'): 5200.0,
-                ('0', '2'): 10000.0,
-                ('0', '4'): 10000.0,
-                ('1', '2'): 10000.0,
-                ('3', '4'): 6800.0,
-                ('4', '0'): 10000.0
+                ('0', '1'): 5200.0 / 10000,
+                ('0', '2'): 10000.0 / 10000,
+                ('0', '4'): 10000.0 / 10000,
+                ('1', '2'): 10000.0 / 10000,
+                ('3', '4'): 6800.0 / 10000,
+                ('4', '0'): 10000.0 / 10000
             },
             "test_weights_dict": {
                 'AT': 0,
@@ -576,12 +576,12 @@ def example_case():
                 'VT': 4
             },
             "test_HHI": {
-                ('0', '1'): 5200.0,
-                ('0', '2'): 10000.0,
-                ('0', '4'): 10000.0,
-                ('1', '2'): 10000.0,
-                ('3', '4'): 6800.0,
-                ('4', '0'): 10000.0
+                ('0', '1'): 5200.0 / 10000,
+                ('0', '2'): 10000.0 / 10000,
+                ('0', '4'): 10000.0 / 10000,
+                ('1', '2'): 10000.0 / 10000,
+                ('3', '4'): 6800.0 / 10000,
+                ('4', '0'): 10000.0 / 10000
             },
             "test_weights_dict": {
                 'AT': 0,
@@ -602,12 +602,12 @@ def example_case():
                 'VT': 4
             },
             "test_HHI": {
-                ('0', '1'): 10000.0,
-                ('0', '2'): 10000.0,
-                ('0', '4'): 10000.0,
-                ('1', '2'): 10000.0,
-                ('3', '4'): 6800.0,
-                ('4', '0'): 10000.0
+                ('0', '1'): 10000.0 / 10000,
+                ('0', '2'): 10000.0 / 10000,
+                ('0', '4'): 10000.0 / 10000,
+                ('1', '2'): 10000.0 / 10000,
+                ('3', '4'): 6800.0 / 10000,
+                ('4', '0'): 10000.0 / 10000
             },
             "test_weights_dict": {
                 'AT': 0,
@@ -1173,7 +1173,7 @@ class TestStochastic():
         assert all(key in test_HHI.keys() for key in test_class.hhi)
 
         for key,value in test_class.hhi.items():
-            assert abs(test_HHI[key] - value * 100**2) / test_HHI[key] <= 1e-1
+            assert abs(test_HHI[key] - value) / test_HHI[key] <= 1e-1
 
         assert all(key in test_weights_dict.keys() for key in test_class.bfs_degree)
 
@@ -1387,7 +1387,7 @@ class TestStochasticGPU(TestStochastic):
             assert value == merge_communities_test[key]
 
         for key,value in zip(test_class.edge_unique_list,hhi_estimate):
-            assert math.isclose(test_HHI[key]/(100**2),value,rel_tol=1e-1)
+            assert math.isclose(test_HHI[key],value,rel_tol=1e-1)
 
         assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
 
@@ -1551,7 +1551,7 @@ class TestStochasticCPU(TestStochastic):
             assert value == merge_communities_test[key]
 
         for key,value in zip(test_class.edge_unique_list,hhi_estimate):
-            assert math.isclose(test_HHI[key]/(100**2),value,rel_tol=100e-1)
+            assert math.isclose(test_HHI[key],value,rel_tol=100e-1)
 
         assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
 
