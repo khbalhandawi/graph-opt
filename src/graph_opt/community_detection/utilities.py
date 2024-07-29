@@ -1,19 +1,11 @@
 from typing import Dict, Any, List, Set, Tuple
 import numpy as np
 
-def resort_communities(community_dict: Dict[str,int]) -> Tuple[Dict[int,int], Dict[int,int], Dict[str,int], List[int], int]:
-    # retrieve iteration constants
-    distinct_communities_set = set(community_dict.values())
-    reordered_communities_list = list(range(len(distinct_communities_set)))
+def distinct_communities(community_dict: Dict[str,int]) -> Tuple[List[int], int]:
+    distinct_communities_list = list(set(community_dict.values()))
+    n_communities = len(distinct_communities_list)
 
-    orig2sorted = dict(zip(sorted(distinct_communities_set),reordered_communities_list))
-    n_communities = len(orig2sorted)
-
-    reordered_communities_dict = {key:orig2sorted[value] for key,value in community_dict.items()}
-
-    sorted2orig = dict(zip(reordered_communities_list,sorted(distinct_communities_set)))
-
-    return sorted2orig, orig2sorted, reordered_communities_dict, reordered_communities_list, n_communities
+    return distinct_communities_list, n_communities
 
 def same_community(dict1: Dict[str,int], dict2: Dict[str,int]) -> bool:
     # Create a mapping from dict1 values to dict2 values

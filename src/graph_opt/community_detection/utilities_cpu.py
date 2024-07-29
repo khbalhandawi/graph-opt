@@ -5,41 +5,65 @@ import numba
 
 from ..random_walk.utilities import naive_weighted_choices
 
+# Sampling functions
+def edge_sampler_cpu(adj3: np.ndarray, samples: np.ndarray, rs: np.random.RandomState) -> np.ndarray:
+    # Initialize samples array
+
+    n_unique_edges, n_samples = samples.shape
+
+    # Loop through each unique edge and each sample
+    for i in range(n_unique_edges):
+        for j in range(n_samples):
+            # Extract the weights for the edge
+            weights = adj3[i, :]
+
+            # Compute the cumulative sum of the weights
+            cumsum = np.cumsum(weights)
+
+            # Generate a random float in the range [0, cumsum[-1])
+            threshold = rs.uniform(0, cumsum[-1])
+
+            # Find the index where the cumulative sum exceeds the threshold
+            chosen = np.searchsorted(cumsum, threshold)
+
+            # Assign the chosen index to samples
+            samples[i, j] = chosen
+
+    return samples
+
 def spatial_random_walk(
-        rs: Random,
         adj: np.ndarray,
         adj_i: np.ndarray,
-        n_nodes: int,
-        n_samples: int,
-        walk_length: int,
+        V: np.ndarray,
+        walks_edges: np.ndarray,
+        rs: Random,
     ):
     """
     Perform `n` random walks of length `length` starting from root nodes `nodes`.
 
     Parameters
     ----------
-    rs : Random
-        Random number generator used to generator the samples
     adj : np.ndarray
         dense adjacency matrix of shape n_nodes x n_nodes
     adj_i : np.ndarray
         dense matrix of shape n_nodes x n_nodes that contains edge indices
-    n_nodes : int
-        total number of nodes in the graph
-    n_samples : int
-        numpber of samples per root node
-    walk_length : int
-        length of the random walk
+    V : np.ndarray
+        array of shape n_nodes x n_samples x walk_length
+        to store the generated walks
+    walks_edges : np.ndarray
+        array of shape n_nodes x n_samples x walk_length-1
+        to store the edge indices of the generated walks
+    rs : Random
+        Random number generator used to generator the samples
     """
 
-    walks = np.zeros((n_nodes, n_samples, walk_length), dtype=np.int32)
-    walks_edges = np.full((n_nodes, n_samples, walk_length-1), -10000, dtype=np.int32)
+    n_nodes, n_samples, walk_length = V.shape
 
     for i in range(n_nodes):  # iterate over root nodes
         for j in range(n_samples):  # generate n walks per root node
             # the walk starts at the root
             current_node = i
-            walks[i,j,0] = current_node
+            V[i,j,0] = current_node
 
             for k in range(walk_length - 1):
                 # select one of the neighbors using the
@@ -56,18 +80,41 @@ def spatial_random_walk(
 
                 current_node = choice
                 current_edge = edges[choice]
-                walks[current_node,j,k+1] = choice
+                V[current_node,j,k+1] = choice
                 walks_edges[i,j,k] = current_edge
 
-    return walks, walks_edges
+def attr_sampler_cpu(
+        walks_edges: np.ndarray,
+        adj3: np.ndarray,
+        T: np.ndarray,
+        W: np.ndarray,
+        rs: np.random.RandomState,
+    ):
+    """
+    Sample attributes for each node in the random walks.
 
-def attr_sampler_cpu(n_samples, walk_length, walks_edges, adj, adj3, n_nodes):
-    # Initialize output arrays
-    attr_sample = np.full((n_nodes, n_samples, walk_length-1), -10000, np.int32)
-    attr_cp = np.zeros((n_nodes, n_samples, walk_length-1))
+    Parameters
+    ----------
+    walks_edges : np.ndarray
+        array of shape n_nodes x n_samples x walk_length-1
+        that contains the edge indices of the generated walks
+    adj3 : np.ndarray
+        sparse matrix of shape n_unique_edges x n_attr
+        that contains the weights for each edge attribute
+    T : np.ndarray
+        array of shape n_nodes x n_samples x walk_length
+        to store the sampled attributes
+    W : np.ndarray
+        array of shape n_nodes x n_samples x walk_length
+        to store the conditional probabilities of the sampled attributes
+    rs : np.random.RandomState
+        Random number generator used to generator the samples
+    """
+
+    n_nodes, n_samples, walk_length_1 = T.shape
 
     # Iterate over each step in the walk
-    for k in range(walk_length-1):
+    for k in range(walk_length_1):
         # Flatten the relevant slice for simplicity
         current_edges = walks_edges[:, :, k]
         valid_mask = current_edges >= 0
@@ -85,187 +132,173 @@ def attr_sampler_cpu(n_samples, walk_length, walks_edges, adj, adj3, n_nodes):
             probs = weights_cumsum / total_weights
 
             # Sample according to the cumulative probability distribution
-            random_samples = np.random.rand(*probs.shape[:-1], 1)
+            random_samples = rs.rand(*probs.shape[:-1], 1)
             chosen_indices = np.argmax(probs >= random_samples, axis=1)
 
             # Assign the chosen indices to the sample array
-            attr_sample[valid_mask, k] = chosen_indices
+            T[valid_mask, k] = chosen_indices
 
-            # Compute attr_cp values using the selected attributes and adj values
-            attr_cp[valid_mask, k] = adj[current_edges[valid_mask]] * (weights[np.arange(len(valid_edges)), chosen_indices] / 100.0)
+            # Compute W values using the selected attributes and adj values
+            W[valid_mask, k] = adj3[current_edges[valid_mask], chosen_indices]
 
-    return attr_sample, attr_cp
+# Exact evaluation functions
+@numba.njit
+def edge_postprocess_cpu(
+        edges_cp,
+        membership,
+        edges_communities,
+    ):
 
-def attr_source_postprocess_cpu(n_nodes, n_attr, attr_sample):
+    n_unique_edges, n_attr = edges_cp.shape
 
-    source_attr_counts = np.zeros((n_nodes, n_attr), dtype=np.int32)  # Assuming 100 possible attributes
-
-    # Iterate through the first attribute sample for each sample set
-    # Extract the first attribute sample from each set
-    first_attr_samples = attr_sample[:, :, 0]
-
-    # Filter out invalid samples (NaN or negative)
-    mask = first_attr_samples >= 0  # Create a mask for valid samples
-
-    # Update counts for each node based on the first valid attribute sample
-    for i in range(n_nodes):
-        unique, counts = np.unique(first_attr_samples[i][mask[i]], return_counts=True)
-        unique = unique.astype(int)  # Ensure indices are integers for indexing
-        source_attr_counts[i, unique] += counts
-
-    return source_attr_counts
-
-def edge_sampler_cpu(n_samples, n_unique_edges, adj3):
-    # Initialize samples array
-    samples = np.zeros((n_unique_edges, n_samples), dtype=int)
-
-    # Loop through each unique edge and each sample
     for i in range(n_unique_edges):
-        for j in range(n_samples):
-            # Extract the weights for the edge
-            weights = adj3[i, :]
+        for j in range(n_attr):
 
-            # Compute the cumulative sum of the weights
-            cumsum = np.cumsum(weights)
-
-            # Generate a random float in the range [0, cumsum[-1])
-            threshold = np.random.uniform(0, cumsum[-1])
-
-            # Find the index where the cumulative sum exceeds the threshold
-            chosen = np.searchsorted(cumsum, threshold)
-
-            # Assign the chosen index to samples
-            samples[i, j] = chosen
-
-    return samples
-
-def edge_postprocess_cpu(ci, cj, samples, membership, n_communities):
-    n_unique_edges, n_samples_edges = samples.shape
-    n_attr = samples.shape[-1]
-
-    counts = np.zeros((n_unique_edges, n_communities), dtype=int)
-
-    # Expand samples to index membership
-    expanded_samples = membership[ci, cj, samples]
-
-    # Use np.add.at for unbuffered in-place addition across the indices
-    np.add.at(counts, (np.arange(n_unique_edges)[:, None], expanded_samples), 1)
-
-    return counts
+            cp = edges_cp[i, j]
+            k = membership[j]
+            edges_communities[i,k] += cp
 
 @numba.njit
-def node_weight_cpu(samples, samples_weights):
-    n_nodes, n_samples, walk_length = samples.shape
-    node_weight = np.zeros((n_nodes, ), dtype=np.float32)
+def calc_hhi_cpu(
+        edges_communities,
+        edges_hhi
+    ):
+
+    n_unique_edges, n_communities = edges_communities.shape
+
+    # Grid stride loop
+    for i in range(n_unique_edges):
+        for j in range(n_communities):
+            
+            cp = edges_communities[i, j]
+            edges_hhi[i] += cp**2
+
+@numba.njit
+def calc_w_it_cpu(
+        adj,
+        adj3,
+        w_it,
+    ):
+
+    n_unique_edges, n_attr = adj3.shape
+    n_nodes, n_attr = w_it.shape
+
+    # Grid stride loop
+    for i in range(n_unique_edges):
+        for j in range(n_attr):
+            source = adj[i,0]
+            w_it[source, j] += adj3[i, j]
+
+@numba.njit
+def calc_w_ik_cpu(
+        membership,
+        w_it,
+        w_ik,
+    ):
+
+    n_nodes, n_attr = w_it.shape
+
+    # Grid stride loop
+    for i in range(n_nodes):
+        for j in range(n_attr):
+            k = membership[j]
+            w_ik[i, k] += w_it[i, j]
+
+@numba.njit
+def calc_mpc_cpu(
+        membership,
+        w_it,
+        w_ik,
+        w_i,
+        mpc,
+    ):
+
+    n_nodes, n_attr = w_it.shape
+    n_nodes, n_communities = w_ik.shape
+
+    # Grid stride loop
+    for t in range(n_attr):
+        for i in range(n_nodes):
+            if w_i[i] > 0.0:
+                k = membership[t]
+                mpc[t] += w_it[i, t] * w_ik[i, k] / (w_i[i] ** 2)
+
+# Sampling evaluation functions
+@numba.njit
+def calc_sample_w_i_cpu(T_ijk, w_i):
+    n_nodes, n_samples, walk_length = T_ijk.shape
 
     # Iterate over each sample and walk step
     for i in range(n_nodes):
         for j in range(n_samples):
-            for l in range(walk_length):  # Start from 1 since 0 is the source node
-                current_attr = samples[i, j, l]
+            for k in range(walk_length):  # Start from 1 since 0 is the source node
+                current_attr = T_ijk[i, j, k]
 
                 # Check if the current node is valid
                 if current_attr < 0:
                     break  # Stop processing this walk if an invalid node is encountered
 
-                current_weight = samples_weights[i, j, l]
-                node_weight[i] += current_weight
-
-    return node_weight
+                w_i[i] += 1
 
 @numba.njit
-def attr_weight_cpu(samples, samples_weights, n_attr):
-    n_nodes, n_samples, walk_length = samples.shape
-    attr_weight = np.zeros((n_nodes, n_attr), dtype=np.float32)
+def calc_sample_w_it_cpu(T_ijk, w_it):
+    n_nodes, n_samples, walk_length = T_ijk.shape
+    n_nodes, n_attr = w_it.shape
 
     # Iterate over each sample and walk step
     for i in range(n_nodes):
         for j in range(n_samples):
-            for k in range(n_attr):
+            for t in range(n_attr):
                 
-                target_attr = k
-
-                for l in range(walk_length):  # Start from 1 since 0 is the source node
-                    current_attr = samples[i, j, l]
+                for k in range(walk_length):  # Start from 1 since 0 is the source node
+                    current_attr = T_ijk[i, j, k]
 
                     # Check if the current node is valid
                     if current_attr < 0:
                         break  # Stop processing this walk if an invalid node is encountered
 
-                    current_weight = samples_weights[i, j, l]
                     # Check if current node matches the source node condition
-                    if target_attr == current_attr:
-                        attr_weight[i, k] += current_weight
+                    if t == current_attr:
+                        w_it[i, t] += 1
 
-    return attr_weight
+def edge_sample_postprocess_cpu(samples, membership, n_communities, counts):
+    n_unique_edges, n_samples_edges = samples.shape
+
+    # Expand samples to index membership
+    expanded_samples = membership[samples]
+
+    # Use np.add.at for unbuffered in-place addition across the indices
+    np.add.at(counts, (np.arange(n_unique_edges)[:, None], expanded_samples), 1)
 
 @numba.njit
-def community_weight_cpu(ci, cj, samples, samples_weights, membership, n_communities):
-    n_nodes, n_samples, walk_length = samples.shape
-    community_weight = np.zeros((n_nodes, n_communities), dtype=np.float32)
+def calc_sample_w_ik_cpu(T_ijk, membership, w_ik):
+    n_nodes, n_samples, walk_length = T_ijk.shape
+    n_nodes, n_communities = w_ik.shape
 
     # Iterate over each sample and walk step
     for i in range(n_nodes):
         for j in range(n_samples):
             for k in range(n_communities):
-
-                target_community = k
                 
                 for l in range(walk_length):  # Start from 1 since 0 is the source node
-                    current_attr = samples[i, j, l]
+                    current_attr = T_ijk[i, j, l]
 
                     # Check if the current node is valid
                     if current_attr < 0:
                         break  # Stop processing this walk if an invalid node is encountered
                     
-                    current_community = membership[ci,cj,current_attr]
-                    current_weight = samples_weights[i, j, l]
+                    current_community = membership[current_attr]
                     # Check if current node matches the source node condition
-                    if target_community == current_community:
-                        community_weight[i, k] += current_weight
-
-    return community_weight
+                    if k == current_community:
+                        w_ik[i, k] += 1
 
 @numba.njit
-def attr_postprocess_cpu(ci, cj, attr_weight, community_weight, node_weight, membership, n_nodes, n_attr):
-    norm_weight = np.zeros((n_nodes, n_attr), dtype=np.float32)
+def calc_sample_mpc_cpu(w_it, w_ik, w_i, membership, mpc):
+    n_nodes, n_attr = w_it.shape
 
     # Iterate over each sample and walk step
     for i in range(n_nodes):
         for j in range(n_attr):
-            attr_community = membership[ci,cj,j]
-            if node_weight[i] > 0:
-                norm_weight[i,j] = (community_weight[i,attr_community] * attr_weight[i,j]) / (node_weight[i]*node_weight[i])
-
-    return norm_weight
-
-def set_membership_cpu(communities, membership, n_attr):
-    n = len(communities)
-
-    # Initialize the membership_pairs array
-    membership_pairs = np.zeros((n, n, n_attr), dtype=np.int32)
-
-    # Broadcast communities to create a 3D array where each layer is the comparison of community1 and community2
-    community1 = communities[:, None, None]  # Shape (n, 1, 1)
-    community2 = communities[None, :, None]  # Shape (1, n, 1)
-
-    # Broadcast membership to match the third dimension
-    membership_expanded = membership[None, None, :]  # Shape (1, 1, n_attr)
-    membership_expanded = np.broadcast_to(membership_expanded, (n, n, n_attr))
-
-    # Condition where community1 == community2
-    mask_equal = community1 == community2
-    mask_equal = np.broadcast_to(mask_equal, (n, n, n_attr))  # Make sure mask has the same shape as membership_pairs
-
-    # Condition where community1 == community2
-    membership_pairs[mask_equal] = membership_expanded[mask_equal]
-
-    # Condition where community1 != community2
-    mask_not_equal = community1 != community2
-    mask_not_equal = np.broadcast_to(mask_not_equal, (n, n, n_attr))
-    # Correct membership for the case where community1 != community2
-    # Using np.where to select membership values or alternative community
-    alternative_community = np.where(membership_expanded == community1, community2, membership_expanded)
-    membership_pairs[mask_not_equal] = alternative_community[mask_not_equal]
-
-    return membership_pairs
+            attr_community = membership[j]
+            if w_i[i] > 0:
+                mpc[i,j] = (w_ik[i,attr_community] * w_it[i,j]) / (w_i[i]*w_i[i])

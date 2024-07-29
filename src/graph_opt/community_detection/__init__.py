@@ -1,1 +1,1 @@
-from .alliance_builder import DeterministicCommunity, StochasticCommunity
+from .alliance_builder import NeighbourSampler
