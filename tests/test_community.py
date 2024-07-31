@@ -8,7 +8,8 @@ import pytest
 import os
 
 from sklearn.covariance import log_likelihood
-from ..community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, multiobjective
+
+from ..community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, GreedyOptimizer
 from ..community_detection.utilities import same_community
 from ..community_detection.utilities_cuda import define_cuda_kernels_sampling, define_cuda_kernels_deterministic, define_cuda_kernels_stochastic
 from ..utilities import cuda_blocks
@@ -423,17 +424,13 @@ def example_merge(request, example_case):
         'maximize MAI',
     ]
 )
-def optimization_cases(request, example_case):
-    MG, nodes_airlines_dict, \
-    test_HHI, test_weights_dict, \
-    test_weights_individual_dict, \
-    init_communities_test = example_case
+def optimization_cases(request):
 
     param = request.param
     weights = param["weights"]
     test_communities_dict = param["test_communities_dict"]
 
-    return MG, weights, test_communities_dict
+    return weights, test_communities_dict
 
 @pytest.mark.parametrize("dict1, dict2, expected", [
     ({'AT': 0, 'BT': 1, 'CT': 0, 'HT': 1, 'VT': 0}, {'AT': 1, 'BT': 0, 'CT': 1, 'HT': 0, 'VT': 1}, True),
@@ -895,9 +892,77 @@ class TestStochasticGPU(_TestStochastic):
     use_gpu = True
 
 
+class TestOptimize():
 
+    epsilon = 0.5
+    rtol = 0.0
+    n_samples_edge=500
+    walk_length=1
+    threads_per_block=8
+    n_walks = 1000
+    use_gpu = False
 
+    @pytest.fixture(scope="function")
+    def read_graph(self) -> Tuple[GraphLoader, NeighbourSampler]:
+        # This setup will run once for the entire class
 
+        script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
+        data_dir = os.path.join('..','test_data')
+        MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir,data_dir,'test_DG_AP_AL.graphml')) # store graph
+
+        graph = GraphLoader(
+            MG = MG,
+            seed = seed,
+            use_gpu = self.use_gpu
+        )
+
+        sampler = NeighbourSampler(
+            gloader=graph,
+            seed=seed,
+            use_gpu=self.use_gpu,
+            n_samples_edge=self.n_samples_edge,
+            n_walks=self.n_walks,
+            walk_length=self.walk_length,
+        )
+
+        sampler.execute_randomwalk()
+
+        return graph, sampler
+
+    @pytest.mark.parametrize("n_sample_pairs", [100, 8], ids=['no sampling', '8 samples'])
+    def test_optimize(self, read_graph: Tuple[GraphLoader, NeighbourSampler], optimization_cases, n_sample_pairs):
+
+        graph, sampler = read_graph
+        weights, test_communities_dict = optimization_cases
+
+        evaluator = SampleEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            seed=seed,
+            use_gpu=self.use_gpu,
+            n_communities=None, 
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        optimizer = GreedyOptimizer(
+            evaluator=evaluator,
+            seed=seed,
+            num_streams=1,
+            weights=weights,
+            use_gpu=self.use_gpu
+        )
+
+        optimizer.greedy_optimize(
+            max_iterations = 1000,
+            epsilon = self.epsilon,
+            rtol = self.rtol,
+            n_sample_pairs = n_sample_pairs
+        )
+
+        assert same_community(optimizer.communities_dict, test_communities_dict)
 
 
 
@@ -955,168 +1020,3 @@ class TestStochasticGPU(_TestStochastic):
 #     assert np.mean(empirical_pmf - probabilities_pairs) <= 1e-3
 
 #     return
-
-# def test_merge_D_CPU(self, init_class: ExactEvaluator, example_merge):
-
-#     test_class = init_class
-
-#     _, \
-#     community_to_merge, new_community, \
-#     merge_communities_test, test_HHI, \
-#     test_weights_dict, test_weights_individual_dict = example_merge
-
-#     test_class.update_scores(community_to_merge,new_community)
-
-#     # check all keys in test dictionary are present
-#     assert all(key in test_HHI.keys() for key in test_class.hhi)
-
-#     assert same_community(test_class.communities_dict, merge_communities_test)
-
-#     for key,value in test_class.hhi.items():
-#         assert abs(test_HHI[key] - value) < tolerance
-
-#     for key,value in test_class.bfs_degree.items():
-#         assert value == test_weights_dict[key] + test_weights_individual_dict[key]
-
-# def test_merge_D_GPU(
-#         self,
-#         init_class_iteration: Tuple[ExactEvaluator,np.ndarray,np.ndarray,np.ndarray,np.ndarray],
-#         example_merge
-#     ):
-
-#     test_class, membership_pairs, hhi_pairs, weights_pairs = init_class_iteration
-
-#     _, \
-#     community_to_merge, new_community, \
-#     merge_communities_test, test_HHI, \
-#     test_weights_dict, _ = example_merge
-
-#     for key,value in zip(test_class.attr_list,membership_pairs[community_to_merge,new_community]):
-#         assert value == merge_communities_test[key]
-
-#     for key,value in zip(test_class.edge_unique_list,hhi_pairs[community_to_merge,new_community]):
-#         assert abs(test_HHI[key] - value) < tolerance
-
-#     for key,value in zip(test_class.attr_list,weights_pairs[community_to_merge,new_community]):
-#         assert test_weights_dict[key] == value
-
-# def test_merge_GPU(
-#         self,
-#         init_class: NeighbourSampler,
-#         example_merge,
-#         baseline_stochastic
-#     ):
-
-#     _, \
-#     community_to_merge, new_community, \
-#     merge_communities_test, test_HHI, \
-#     test_weights_dict, test_weights_individual_dict = example_merge
-
-#     test_class = init_class
-
-#     cum_weight_baseline, hhi_estimate_baseline, \
-#         mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic
-
-#     membership_pairs = test_class._calculate_members_gpu()
-
-#     edge_samples, walks_attr, walks_attr_cp, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_gpu(
-#         community_to_merge,
-#         new_community,
-#         test_class._edge_samples_d,
-#         test_class._walks_attr_cp_d,
-#         test_class._walks_attr_d,
-#         membership_pairs,
-#         stream = test_class.cuda.stream(),
-#         stream_id = 0,
-#         testing = True,
-#         parallel_reduce = self.parallel_reduce
-#     )
-
-#     test_class.update_scores(community_to_merge, new_community, stream_id=0)
-#     test_class.communities_dict = test_class._communities_dict
-
-#     bfs = get_bfs_probabilities(test_class,self.walk_length-1)
-
-#     for key,value in zip(test_class.attr_list,membership_pairs[community_to_merge,new_community]):
-#         assert value == merge_communities_test[key]
-
-#     for key,value in zip(test_class.edge_unique_list,hhi_estimate):
-#         assert math.isclose(test_HHI[key],value,rel_tol=1e-1)
-
-#     assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
-
-# def test_merge_CPU(
-#         self,
-#         init_class: NeighbourSampler,
-#         example_merge,
-#         baseline_stochastic: Tuple[NeighbourSampler, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
-#     ):
-
-#     _, \
-#     community_to_merge, new_community, \
-#     merge_communities_test, test_HHI, \
-#     test_weights_dict, test_weights_individual_dict = example_merge
-
-#     test_class = init_class
-
-#     test_class, community_weight_baseline, cum_weight_baseline, hhi_estimate_baseline, \
-#         mai_estimate_baseline, bfs_baseline, estimate_bfs_baseline = baseline_stochastic
-
-#     membership_pairs = test_class._calculate_members_cpu()
-
-#     edge_samples, walks_attr, walks_attr_cp, community_weight, edge_counts, cum_weight, hhi_estimate, mai_estimate, log_mai = test_class._stochastic_eval_cpu(
-#         community_to_merge,
-#         new_community,
-#         test_class._edge_samples,
-#         test_class._walks_attr_cp,
-#         test_class._walks_attr,
-#         membership_pairs,
-#         stream_id = 0,
-#         testing = True,
-#     )
-
-#     test_class.update_scores(community_to_merge, new_community)
-#     test_class.communities_dict = test_class._communities_dict
-
-#     bfs = get_bfs_probabilities(test_class,self.walk_length-1)
-
-#     for key,value in zip(test_class.attr_list,membership_pairs[community_to_merge,new_community]):
-#         assert value == merge_communities_test[key]
-
-#     for key,value in zip(test_class.edge_unique_list,hhi_estimate):
-#         assert math.isclose(test_HHI[key],value,rel_tol=100e-1)
-
-#     assert np.all(np.sign(cum_weight_baseline - cum_weight) == np.sign(bfs_baseline.sum(axis=2) - bfs.sum(axis=2)))
-
-# @pytest.mark.parametrize("n_sample_pairs", [12, 8], ids=['no sampling', '8 samples'])
-# def test_optimize_GPU(self, init_class: NeighbourSampler, optimization_cases, n_sample_pairs):
-#     _, weights, test_communities_dict = optimization_cases
-
-#     test_class = init_class
-
-#     membership_pairs, hhi_pairs, weights_pairs = test_class.greedy_optimize(
-#             weights=weights,
-#             testing_opt=True,
-#             n_sample_pairs=n_sample_pairs,
-#             epsilon = 0.5,
-#             rtol = 0.0
-#         )
-
-#     assert same_community(test_class.communities_dict, test_communities_dict)
-
-#     print(test_class.f_history)
-#     print(test_class.communities_history)
-
-# def test_optimize(self, init_class: ExactEvaluator, optimization_cases):
-
-#     _, weights, test_communities_dict = optimization_cases
-
-#     test_class = init_class
-
-#     test_class.greedy_optimize(weights=weights)
-
-#     assert same_community(test_class.communities_dict, test_communities_dict)
-
-#     print(test_class.f_history)
-#     print(test_class.communities_history)
-

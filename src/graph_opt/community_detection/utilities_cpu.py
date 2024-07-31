@@ -302,3 +302,47 @@ def calc_sample_mpc_cpu(w_it, w_ik, w_i, membership, mpc):
             attr_community = membership[j]
             if w_i[i] > 0:
                 mpc[i,j] = (w_ik[i,attr_community] * w_it[i,j]) / (w_i[i]*w_i[i])
+
+# Optimization functions
+def calc_membership_pairs_cpu(membership: np.ndarray, membership_pairs: np.ndarray, n_communities: int):
+    """
+    Generate all possible membership merge pairs.
+
+    Parameters
+    ----------
+    membership : np.ndarray
+        Array of shape (n_attr,) that contains the current community assignments
+
+    membership_pairs : np.ndarray
+        Array of shape (n_communities, n_communities, n_attr) that contains all possible
+        pairs of community merges
+    """
+
+    communities = np.array(range(n_communities))
+
+    n_attr = membership.shape[0]
+
+    # Broadcast communities to create a 3D array where each layer is the comparison of community1 and community2
+    community1 = communities[:, None, None]  # Shape (n, 1, 1)
+    community2 = communities[None, :, None]  # Shape (1, n, 1)
+
+    # Broadcast membership to match the third dimension
+    membership_expanded = membership[None, None, :]  # Shape (1, 1, n_attr)
+    membership_expanded = np.broadcast_to(membership_expanded, (n_communities, n_communities, n_attr))
+
+    # Condition where community1 == community2
+    mask_equal = community1 == community2
+    mask_equal = np.broadcast_to(mask_equal, (n_communities, n_communities, n_attr))  # Make sure mask has the same shape as membership_pairs
+
+    # Condition where community1 == community2
+    membership_pairs[mask_equal] = membership_expanded[mask_equal]
+
+    # Condition where community1 != community2
+    mask_not_equal = community1 != community2
+    mask_not_equal = np.broadcast_to(mask_not_equal, (n_communities, n_communities, n_attr))
+    # Correct membership for the case where community1 != community2
+    # Using np.where to select membership values or alternative community
+    alternative_community = np.where(membership_expanded == community1, community2, membership_expanded)
+    membership_pairs[mask_not_equal] = alternative_community[mask_not_equal]
+
+    return membership_pairs
