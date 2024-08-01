@@ -511,13 +511,7 @@ def define_cuda_kernels_sampling_utils() -> Tuple[Callable, Callable]:
 
     return calc_w_k_edges, calc_w_k_nodes
 
-def define_cuda_kernels_utils(
-        n_attr:int,
-        n_nodes:int,
-        n_samples_edge:int,
-        tile_size:int,
-        max_size:int
-    ) -> Tuple[Callable, Callable, Callable, Callable]:
+def define_cuda_kernels_utils(n_samples_edge:int) -> Callable:
 
     n_samples_edge+=1
 
@@ -550,88 +544,4 @@ def define_cuda_kernels_utils(
                     result[i] = 1
                     break
 
-    @cuda.jit
-    def load_counts(
-            samples:DeviceNDArray,
-            counts:DeviceNDArray,
-            membership:DeviceNDArray,
-        ):
-
-        # Compute flattened index inside the array
-        x, y = cuda.grid(2)
-
-        # Compute the grid stride
-        dx, dy = cuda.gridsize(2)
-
-        n_unique_edges, n_samples, n_bins = counts.shape
-
-        for i in range(x, n_unique_edges, dx):
-            for j in range(y, n_samples, dy):
-                for k in range(n_bins):
-                    counts[i][j][k] = 0
-
-        cuda.syncthreads()
-
-        for i in range(x, n_unique_edges, dx):
-            for j in range(y, n_samples, dy):
-                item = membership[samples[i, j]]
-                counts[i][j][item] += 1
-
-    @cuda.jit
-    def edge_histogram(counts:DeviceNDArray,):
-        # Size of shared_counts is now determined by tile_size
-        shared_counts = cuda.shared.array(shape=(max_size, max_size, tile_size), dtype=int16)
-
-        x, y = cuda.grid(2)
-        dx, dy = cuda.gridsize(2)
-
-        tx = cuda.threadIdx.x
-        ty = cuda.threadIdx.y
-
-        n_unique_edges, n_samples, n_bins = counts.shape
-
-        for tile_start in range(0, n_bins, tile_size):  # loop over tiles
-            # Initialize shared memory for this tile
-            for k in range(tile_size):
-                shared_counts[tx][ty][k] = 0
-
-            cuda.syncthreads()
-
-            for i in range(x, n_unique_edges, dx):
-                for j in range(y, n_samples, dy):
-                    for k in range(tile_size):
-                        if tile_start + k < n_bins:  # check we're not out of bounds
-                            shared_counts[tx][ty][k] = counts[i][j][tile_start + k]
-
-                    cuda.syncthreads()
-
-                    stride = 1
-                    while stride < max_size:
-                        if ty % (2*stride) == 0:
-                            for k in range(tile_size):
-                                shared_counts[tx][ty][k] += shared_counts[tx][ty+stride][k]
-                        stride *= 2
-                        cuda.syncthreads()
-
-                    if cuda.threadIdx.y == 0:
-                        for k in range(tile_size):
-                            if tile_start + k < n_bins:  # check we're not out of bounds
-                                counts[i][cuda.blockIdx.y][tile_start + k] = shared_counts[tx][0][k]
-
-    @cuda.jit
-    def copy_reduced_counts(
-            counts:DeviceNDArray,
-            output:DeviceNDArray
-        ):
-
-        # Compute flattened index inside the array
-        x, y = cuda.grid(2)
-
-        # Compute the grid stride
-        dx, dy = cuda.gridsize(2)
-
-        n_unique_edges, n_communities = output.shape
-
-        for i in range(x, n_unique_edges, dx):
-            for j in range(y, n_communities, dy):
-                output[i][j] = counts[i][0][j]
+    return check_edge_distribution

@@ -161,7 +161,7 @@ def edge_postprocess_cpu(
 @numba.njit
 def calc_hhi_cpu(
         edges_communities,
-        edges_hhi
+        hhi_edges
     ):
 
     n_unique_edges, n_communities = edges_communities.shape
@@ -171,7 +171,7 @@ def calc_hhi_cpu(
         for j in range(n_communities):
             
             cp = edges_communities[i, j]
-            edges_hhi[i] += cp**2
+            hhi_edges[i] += cp**2
 
 @numba.njit
 def calc_w_it_cpu(

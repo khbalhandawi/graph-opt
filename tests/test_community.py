@@ -892,7 +892,7 @@ class TestStochasticGPU(_TestStochastic):
     use_gpu = True
 
 
-class TestOptimize():
+class _TestGreedyOptimize():
 
     epsilon = 0.5
     rtol = 0.0
@@ -900,7 +900,7 @@ class TestOptimize():
     walk_length=1
     threads_per_block=8
     n_walks = 1000
-    use_gpu = False
+    num_streams = 8
 
     @pytest.fixture(scope="function")
     def read_graph(self) -> Tuple[GraphLoader, NeighbourSampler]:
@@ -931,7 +931,7 @@ class TestOptimize():
 
     @pytest.mark.parametrize("n_sample_pairs", [100, 8], ids=['no sampling', '8 samples'])
     def test_optimize(self, read_graph: Tuple[GraphLoader, NeighbourSampler], optimization_cases, n_sample_pairs):
-
+        
         graph, sampler = read_graph
         weights, test_communities_dict = optimization_cases
 
@@ -950,7 +950,7 @@ class TestOptimize():
         optimizer = GreedyOptimizer(
             evaluator=evaluator,
             seed=seed,
-            num_streams=1,
+            num_streams=self.num_streams,
             weights=weights,
             use_gpu=self.use_gpu
         )
@@ -964,7 +964,14 @@ class TestOptimize():
 
         assert same_community(optimizer.communities_dict, test_communities_dict)
 
+class TestGreedyOptimizeGPU(_TestGreedyOptimize):
 
+    use_gpu = True
+
+
+class TestExactOptimizeCPU(_TestGreedyOptimize):
+
+    use_gpu = False
 
 
 # @pytest.mark.dependency()
@@ -987,36 +994,36 @@ class TestOptimize():
 # @pytest.mark.dependency()
 # def test_sampler_dist(self,example_case_param):
 
-#     n_samples = 1000
+    # n_samples = 1000
 
-#     MG, nodes_airlines_dict, \
-#     test_HHI, test_weights_dict, \
-#     test_weights_individual_dict, \
-#     init_communities_test = example_case_param
+    # MG, nodes_airlines_dict, \
+    # test_HHI, test_weights_dict, \
+    # test_weights_individual_dict, \
+    # init_communities_test = example_case_param
 
-#     test_class = ExactEvaluator(MG, communities_dict=init_communities_test)
+    # test_class = ExactEvaluator(MG, communities_dict=init_communities_test)
 
-#     all_samples = list(itertools.product(range(test_class.n_communities), range(test_class.n_communities)))
-#     all_samples_dict = {pair : i for i,pair in enumerate(all_samples)}
-#     diag_mask = np.array([True if i==j else False for i,j in all_samples])
+    # all_samples = list(itertools.product(range(test_class.n_communities), range(test_class.n_communities)))
+    # all_samples_dict = {pair : i for i,pair in enumerate(all_samples)}
+    # diag_mask = np.array([True if i==j else False for i,j in all_samples])
 
-#     probabilities = test_class.bfs_degree_community[all_samples] / np.sum(test_class.bfs_degree_community)
-#     probabilities_pairs = probabilities[:,0] * probabilities[:,1]
-#     probabilities_pairs[diag_mask] = 0.0
-#     probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
+    # probabilities = test_class.bfs_degree_community[all_samples] / np.sum(test_class.bfs_degree_community)
+    # probabilities_pairs = probabilities[:,0] * probabilities[:,1]
+    # probabilities_pairs[diag_mask] = 0.0
+    # probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
 
 
-#     samples = test_class._sample_community_pairs(n_samples,replace=True)
-#     samples_indices = [all_samples_dict[pair] for pair in samples]
+    # samples = test_class._sample_community_pairs(n_samples,replace=True)
+    # samples_indices = [all_samples_dict[pair] for pair in samples]
 
-#     # Compute the empirical PMF
-#     unique, counts = np.unique(samples_indices, return_counts=True)
-#     counts_full = np.zeros_like(probabilities_pairs)
-#     counts_full[unique] = counts
-#     empirical_pmf = counts_full / len(samples_indices)
+    # # Compute the empirical PMF
+    # unique, counts = np.unique(samples_indices, return_counts=True)
+    # counts_full = np.zeros_like(probabilities_pairs)
+    # counts_full[unique] = counts
+    # empirical_pmf = counts_full / len(samples_indices)
 
-#     kl_divergence = kl_div(empirical_pmf + 1e-10, probabilities_pairs + 1e-10)
+    # kl_divergence = kl_div(empirical_pmf + 1e-10, probabilities_pairs + 1e-10)
 
-#     assert np.mean(empirical_pmf - probabilities_pairs) <= 1e-3
+    # assert np.mean(empirical_pmf - probabilities_pairs) <= 1e-3
 
-#     return
+    # return
