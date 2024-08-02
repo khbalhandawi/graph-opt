@@ -297,6 +297,12 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
         dx, dy = cuda.gridsize(2)
 
         n_nodes, n_attr = w_it.shape
+
+        for t in range(x, n_attr, dx):
+            mpc[t] = 0
+
+        cuda.syncthreads()
+
         n_nodes, n_communities = w_ik.shape
 
         # Grid stride loop
@@ -503,6 +509,11 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
         dx, dy = cuda.gridsize(2)
 
         n_nodes, n_attr = w_it.shape
+
+        for j in range(y, n_attr, dy):
+            mpc[j] = 0.0
+
+        cuda.syncthreads()
 
         for i in range(x, n_nodes, dx):
             for j in range(y, n_attr, dy):

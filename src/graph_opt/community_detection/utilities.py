@@ -1,5 +1,6 @@
 from typing import Dict, Any, List, Set, Tuple
 import numpy as np
+from itertools import product
 
 def distinct_communities(community_dict: Dict[str,int]) -> Tuple[List[int], int]:
     distinct_communities_list = list(set(community_dict.values()))
@@ -96,3 +97,46 @@ def generate_membership_combinations(membership: np.ndarray, max_community: int)
                 results[(i, j)] = new_membership
     
     return results
+
+
+
+def canonical_form(membership):
+    """ Convert membership to its canonical form to treat equivalent patterns identically. """
+    mapper = {}
+    new_label = 0
+    canonical = []
+    for community in membership:
+        if community not in mapper:
+            mapper[community] = new_label
+            new_label += 1
+        canonical.append(mapper[community])
+    return tuple(canonical)
+
+def generate_possible_memberships(n: int, max_community: int) -> set:
+    """
+    Generate all possible unique membership combinations for a vector of length `n`
+    considering up to `max_community` communities.
+
+    Parameters
+    ----------
+    n : int
+        Length of the membership vector.
+    max_community : int
+        Maximum index for communities, starting from 0.
+
+    Returns
+    -------
+    set
+        A set of tuples, each representing a unique community membership configuration.
+    """
+
+    # Generate all possible combinations of community memberships
+    combinations = product(range(max_community + 1), repeat=n)
+
+    # Use a set to store unique canonical forms
+    unique_memberships = set()
+    for combo in combinations:
+        # Convert each combination to its canonical form and add to set
+        unique_memberships.add(canonical_form(combo))
+
+    return unique_memberships

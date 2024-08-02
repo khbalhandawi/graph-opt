@@ -10,7 +10,7 @@ import os
 
 from sklearn.covariance import log_likelihood
 
-from ..community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, GreedyOptimizer
+from ..community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, GreedyOptimizer, BruteForce, multiobjective
 from ..community_detection.utilities import same_community
 from ..utilities import cuda_blocks
 
@@ -682,10 +682,10 @@ class TestStochasticGPU(_TestStochastic):
     use_gpu = True
 
 
-class _TestGreedyOptimize():
+class _TestOptimize():
 
     epsilon = 0.5
-    rtol = 1e-3
+    rtol = 1e-6
     n_samples_edge=500
     walk_length=6
     threads_per_block=8
@@ -757,15 +757,15 @@ class _TestGreedyOptimize():
                 gloader=graph,
                 seed=seed,
                 use_gpu=self.use_gpu,
-                n_communities=None, 
+                n_communities=5, 
                 threads_per_block_1D=self.threads_per_block,
                 threads_per_block_2D=self.threads_per_block,
                 threads_per_block_3D=self.threads_per_block,
                 stream=None
             )
 
-    @pytest.mark.parametrize("n_sample_pairs", [100, 8], ids=['no sampling', '8 samples'])
-    def test_optimize(
+    @pytest.mark.parametrize("n_sample_pairs", [None, 8], ids=['no sampling', '8 samples'])
+    def test_greedy_optimize(
         self, 
         optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
         get_evaluator: SampleEvaluator | ExactEvaluator, 
@@ -783,7 +783,7 @@ class _TestGreedyOptimize():
             use_gpu=self.use_gpu
         )
 
-        optimizer.greedy_optimize(
+        optimizer.optimize(
             max_iterations = 1000,
             epsilon = self.epsilon,
             rtol = self.rtol,
@@ -793,13 +793,45 @@ class _TestGreedyOptimize():
 
         assert same_community(optimizer.communities_dict, test_communities_dict)
 
-class TestGreedyOptimizeGPU(_TestGreedyOptimize):
+    @pytest.mark.parametrize("max_iterations", [None, 1000], ids=['unlimited budget', '100 budget'])
+    def test_brute_force_optimize(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_evaluator: SampleEvaluator | ExactEvaluator, 
+        max_iterations: int
+    ):
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_evaluator
+
+        optimizer = BruteForce(
+            evaluator=evaluator,
+            seed=seed,
+            num_streams=self.num_streams,
+            weights=weights,
+            use_gpu=self.use_gpu
+        )
+
+        optimizer.optimize(
+            max_iterations = max_iterations,
+            rtol = self.rtol,
+            multiprocess=self.use_multiprocessing
+        )
+
+        evaluator.update_scores(test_communities_dict)
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f = multiobjective(f1,f2,weights)
+
+        assert optimizer.f == f
+
+class TestOptimizeGPU(_TestOptimize):
 
     use_gpu = True
     use_multiprocessing = False
 
 
-class TestGreedyOptimizeCPU(_TestGreedyOptimize):
+class TestOptimizeCPU(_TestOptimize):
 
     use_gpu = False
-    use_multiprocessing = True
+    use_multiprocessing = False

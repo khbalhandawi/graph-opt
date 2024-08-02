@@ -10,6 +10,7 @@ import random
 import math
 from typing import Callable, Dict, Any, Union
 from concurrent.futures import ThreadPoolExecutor
+import threading
 
 from ..utilities import parallel_sampling
 
@@ -21,7 +22,7 @@ if 'ipykernel' in sys.modules:
 else:
     from tqdm import tqdm
 
-from .utilities import distinct_communities, generate_membership_combinations
+from .utilities import distinct_communities, generate_membership_combinations, generate_possible_memberships
 from .utilities_cpu import edge_sampler_cpu, spatial_random_walk, attr_sampler_cpu
 from .utilities_cpu import calc_sample_w_i_cpu, calc_sample_w_it_cpu, edge_sample_postprocess_cpu, calc_sample_w_ik_cpu, calc_sample_mpc_cpu
 from .utilities_cpu import edge_postprocess_cpu, calc_hhi_cpu, calc_w_it_cpu, calc_w_ik_cpu, calc_mpc_cpu
@@ -596,24 +597,29 @@ class BaseEvaluator(ABC):
             stream: Optional[Any] = None
         ):
 
-        self._hhi = defaultdict(float)
+        self._gloader = gloader
 
+
+        if n_communities is None:
+            self._n_communities = self._gloader.n_attr
+        else:
+            self._n_communities = n_communities
+
+        self._hhi = defaultdict(float)
         self._log_mpc = {}
         self._mpc = defaultdict(list)
         self._w_k = np.empty(0)
+        self._w_ik = np.empty((self._gloader.n_nodes_spatial,0))
+        self._w_i = np.empty(self._gloader.n_nodes_spatial)
+        self._edges_communities = np.empty((self._gloader.n_unique_edges,0))
+        self._distinct_communities = np.empty(0)
+        self._communities_dict = {}
 
         self.seed = seed
         self.random_state: Tuple[random.Random,np.random.RandomState] = random_state(self.seed)
 
         self.use_gpu = use_gpu
         self._init_gpu = False
-
-        self._gloader = gloader
-
-        if n_communities is None:
-            self._n_communities = self._gloader.n_attr
-        else:
-            self._n_communities = n_communities
 
         self._post_init(
             threads_per_block_1D=threads_per_block_1D,
@@ -622,6 +628,8 @@ class BaseEvaluator(ABC):
             stream=stream
         )
 
+        self.membership = np.empty(self._gloader.n_attr)
+
     @cpu_gpu_dispatcher('_post_init_cpu', '_post_init_gpu')
     def _post_init(self, *args, **kwargs):
         pass
@@ -629,8 +637,8 @@ class BaseEvaluator(ABC):
     @abstractmethod
     def _post_init_cpu(self, *args, **kwargs):
         self._hhi_edges = np.zeros(self._gloader.n_unique_edges,dtype=np.float32)
-        self._mpc_nodes = np.zeros(self._gloader.n_attr,dtype=np.float32)
-        self._log_mpc_nodes = np.zeros(self._gloader.n_attr,dtype=np.float32)
+        self._mpc_attrs = np.zeros(self._gloader.n_attr,dtype=np.float32)
+        self._log_mpc_attrs = np.zeros(self._gloader.n_attr,dtype=np.float32)
 
         self._edges_communities = np.zeros((self._gloader.n_unique_edges,self._n_communities),dtype=np.float32)
         self._w_it = np.zeros((self._gloader.n_nodes_spatial,self._gloader.n_attr),dtype=np.float32)
@@ -669,7 +677,7 @@ class BaseEvaluator(ABC):
         
         self._w_ik_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self._n_communities), dtype=np.float32, stream=self.stream)
         self._w_k_d = self.cuda.device_array((self._n_communities), dtype=np.float32, stream=self.stream)
-        self._mpc_nodes_d = self.cuda.device_array((self._gloader.n_attr), dtype=np.float32, stream=self.stream)
+        self._mpc_attrs_d = self.cuda.device_array((self._gloader.n_attr), dtype=np.float32, stream=self.stream)
 
         from .utilities_cuda import define_cuda_kernels_sampling_utils
 
@@ -694,12 +702,14 @@ class BaseEvaluator(ABC):
         self._w_k = np.zeros(self._n_communities)
         self._edges_communities = np.zeros((self._gloader.n_unique_edges,self._n_communities),dtype=np.float32)
         self._hhi_edges = np.zeros(self._gloader.n_unique_edges,dtype=np.float32)
-        self._mpc_nodes = np.zeros(self._gloader.n_attr,dtype=np.float32)
-        self._log_mpc_nodes = np.zeros(self._gloader.n_attr,dtype=np.float32)
+        self._mpc_attrs = np.zeros(self._gloader.n_attr,dtype=np.float32)
+        self._log_mpc_attrs = np.zeros(self._gloader.n_attr,dtype=np.float32)
 
         self._membership = value.copy()
         if self.use_gpu:
             self._membership_d = self.cuda.to_device(self._membership, stream=self.stream)
+
+            self.stream.synchronize()
 
     @property
     def communities(self)->np.ndarray:
@@ -733,10 +743,6 @@ class BaseEvaluator(ABC):
         self.membership = np.array(list(self._communities_dict.values()))
 
     @property
-    def cond_probs_community(self) -> type_cps:
-        return {edge: self._cond_probs_community[edge].copy() for edge in self._cond_probs_community.keys()}
-
-    @property
     def hhi(self) -> Dict[str,float]:
         return {edge: self._hhi[edge] for edge in self._hhi.keys()}
 
@@ -753,12 +759,12 @@ class BaseEvaluator(ABC):
         self._log_mpc = value
 
     @property
-    def mpc_nodes(self) -> np.ndarray:
-        return self._mpc_nodes.copy()
+    def mpc_attrs(self) -> np.ndarray:
+        return self._mpc_attrs.copy()
     
     @property
-    def log_mpc_nodes(self) -> np.ndarray:
-        return self._log_mpc_nodes.copy()
+    def log_mpc_attrs(self) -> np.ndarray:
+        return self._log_mpc_attrs.copy()
 
     @property
     def hhi_edges(self):
@@ -806,17 +812,10 @@ class BaseEvaluator(ABC):
     def update_scores(self, communities_dict: Dict[str,str]):
         self.communities_dict = communities_dict
 
-        if self.use_gpu:
-            self.stream.synchronize()
-        pass
-
     @abstractmethod
     def update_scores_membership(self, membership: np.ndarray):
         communities_dict = {attr: membership[i] for i,attr in enumerate(self._gloader.attr_list)}
         self.communities_dict = communities_dict
-
-        if self.use_gpu:
-            self.stream.synchronize()
 
     @cpu_gpu_dispatcher('_update_community_weights_cpu', '_update_community_weights_gpu')
     def _update_community_weights(self):
@@ -906,8 +905,8 @@ class BaseEvaluator(ABC):
         target.membership = self.membership.copy()
         target._communities_dict = deepcopy(self.communities_dict)
 
-        target._mpc_nodes = self.mpc_nodes.copy()
-        target._log_mpc_nodes = self.log_mpc_nodes.copy()
+        target._mpc_attrs = self.mpc_attrs.copy()
+        target._log_mpc_attrs = self.log_mpc_attrs.copy()
         target._hhi_edges = self.hhi_edges.copy()
         target._w_it = self.w_it.copy()
         target._w_i = self.w_i.copy()
@@ -921,7 +920,7 @@ class BaseEvaluator(ABC):
         target._w_ik_d = self.cuda.to_device(self.w_ik, stream=stream)
         target._w_k_d = self.cuda.to_device(self.w_k, stream=stream)
 
-        target._mpc_nodes_d = self.cuda.to_device(self.mpc_nodes, stream=stream)
+        target._mpc_attrs_d = self.cuda.to_device(self.mpc_attrs, stream=stream)
         target._edges_communities_d = self.cuda.to_device(self.edges_communities, stream=stream)
         target._hhi_edges_d = self.cuda.to_device(self.hhi_edges, stream=stream)
         target._membership_d = self.cuda.to_device(self.membership, stream=stream)
@@ -939,7 +938,7 @@ class BaseEvaluator(ABC):
             safe_delete(state, '_w_i_d')
             safe_delete(state, '_w_ik_d')
             safe_delete(state, '_w_k_d')
-            safe_delete(state, '_mpc_nodes_d')
+            safe_delete(state, '_mpc_attrs_d')
             safe_delete(state, '_membership_d')
 
             del state['calc_w_k_edges_gpu']
@@ -1031,18 +1030,12 @@ class ExactEvaluator(BaseEvaluator):
         self._update_mpc_scores()
         self._update_community_weights()
 
-        if self.use_gpu:
-            self.stream.synchronize()
-
     def update_scores_membership(self, membership: np.ndarray):
         super().update_scores_membership(membership)
 
         self._update_hhi_scores()
         self._update_mpc_scores()
         self._update_community_weights()
-
-        if self.use_gpu:
-            self.stream.synchronize()
 
     @cpu_gpu_dispatcher('_update_hhi_scores_cpu', '_update_hhi_scores_gpu')
     def _update_hhi_scores(self, **kwargs):
@@ -1075,12 +1068,16 @@ class ExactEvaluator(BaseEvaluator):
             self._edges_communities_d
         )
 
+        self.stream.synchronize()
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._n_communities), TPB = self.TPB_2D)
 
         self.calc_hhi_gpu[blockspergrid,threadsperblock,self.stream](
             self._edges_communities_d,
             self._hhi_edges_d
         )
+
+        self.stream.synchronize()
 
         hhi = self._hhi_edges_d.copy_to_host()
 
@@ -1106,14 +1103,14 @@ class ExactEvaluator(BaseEvaluator):
             w_it=self._w_it,
             w_ik=self._w_ik,
             w_i=self._w_i,
-            mpc=self._mpc_nodes
+            mpc=self._mpc_attrs
         )
 
-        self._log_mpc_nodes = safe_log(self._mpc_nodes)
+        self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         for attr in self._gloader.attr_list:
-            self._mpc[attr] = self._mpc_nodes[self._gloader.attr_key2i[attr]]
-            self._log_mpc[attr] = self._log_mpc_nodes[self._gloader.attr_key2i[attr]]
+            self._mpc[attr] = self._mpc_attrs[self._gloader.attr_key2i[attr]]
+            self._log_mpc[attr] = self._log_mpc_attrs[self._gloader.attr_key2i[attr]]
 
     def _update_mpc_scores_gpu(self):
         
@@ -1124,21 +1121,25 @@ class ExactEvaluator(BaseEvaluator):
             self._w_ik_d
         )
 
+        self.stream.synchronize()
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB = self.TPB_2D)
         self.calc_mpc_gpu[blockspergrid,threadsperblock,self.stream](
             self._membership_d,
             self._w_it_d,
             self._w_ik_d,
             self._w_i_d,
-            self._mpc_nodes_d
+            self._mpc_attrs_d
         )
 
-        self._mpc_nodes = self._mpc_nodes_d.copy_to_host()
-        self._log_mpc_nodes = safe_log(self._mpc_nodes)
+        self.stream.synchronize()
+
+        self._mpc_attrs = self._mpc_attrs_d.copy_to_host()
+        self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         for attr in self._gloader.attr_list:
-            self._mpc[attr] = self._mpc_nodes[self._gloader.attr_key2i[attr]]
-            self._log_mpc[attr] = self._log_mpc_nodes[self._gloader.attr_key2i[attr]]
+            self._mpc[attr] = self._mpc_attrs[self._gloader.attr_key2i[attr]]
+            self._log_mpc[attr] = self._log_mpc_attrs[self._gloader.attr_key2i[attr]]
 
     def _create_copy_instance(self, stream: Optional[Any] = None) -> 'ExactEvaluator':
         if self.use_gpu:
@@ -1301,6 +1302,8 @@ class SampleEvaluator(BaseEvaluator):
             self._sampler.n_samples_edge
         )
 
+        self.stream.synchronize()
+
         hhi_estimate = self._hhi_edges_d.copy_to_host()
 
         # Update the hhi
@@ -1329,13 +1332,13 @@ class SampleEvaluator(BaseEvaluator):
             mpc = mpc_array
         )
 
-        self._mpc_nodes = np.nansum(mpc_array,axis=0) / mpc_array.shape[0]
-        self._log_mpc_nodes = safe_log(self._mpc_nodes)
+        self._mpc_attrs = np.nansum(mpc_array,axis=0) / mpc_array.shape[0]
+        self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         # Update the mpc
         for attr in self._gloader.attr_list:
-            self._mpc[attr] = self._mpc_nodes[self._gloader.attr_key2i[attr]]
-            self._log_mpc[attr] = self._log_mpc_nodes[self._gloader.attr_key2i[attr]]
+            self._mpc[attr] = self._mpc_attrs[self._gloader.attr_key2i[attr]]
+            self._log_mpc[attr] = self._log_mpc_attrs[self._gloader.attr_key2i[attr]]
 
     def _update_mpc_scores_gpu(self):
         
@@ -1356,17 +1359,19 @@ class SampleEvaluator(BaseEvaluator):
             self._w_ik_d,
             self._w_i_d,
             self._membership_d,
-            self._mpc_nodes_d
+            self._mpc_attrs_d
         )
 
-        mpc_estimate = self._mpc_nodes_d.copy_to_host()
-        self._mpc_nodes = mpc_estimate / mpc_estimate.shape[0]
-        self._log_mpc_nodes = safe_log(self._mpc_nodes)
+        self.stream.synchronize()
+
+        mpc_estimate = self._mpc_attrs_d.copy_to_host()
+        self._mpc_attrs = mpc_estimate / mpc_estimate.shape[0]
+        self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         # Update the mpc
         for attr in self._gloader.attr_list:
-            self._mpc[attr] = self._mpc_nodes[self._gloader.attr_key2i[attr]]
-            self._log_mpc[attr] = self._log_mpc_nodes[self._gloader.attr_key2i[attr]]
+            self._mpc[attr] = self._mpc_attrs[self._gloader.attr_key2i[attr]]
+            self._log_mpc[attr] = self._log_mpc_attrs[self._gloader.attr_key2i[attr]]
 
     def update_scores(self, communities_dict: Dict[str,str]):
 
@@ -1433,6 +1438,21 @@ class SampleEvaluator(BaseEvaluator):
 
         return state
 
+
+class EvaluatorManager:
+    def __init__(self, num_streams: int, evaluator: BaseEvaluator):
+        self.evaluators = [evaluator.copy() for i in range(num_streams)]
+        self.locks = [threading.Lock() for _ in range(num_streams)]
+
+    def get_evaluator(self):
+        # Example strategy: find the first available evaluator
+        for i, lock in enumerate(self.locks):
+            if lock.acquire(False):  # Non-blocking
+                return self.evaluators[i], i, lock
+
+        raise RuntimeError("No available evaluators")
+
+
 class BaseOptimizer(ABC):
     
     def __init__(self, evaluator: ExactEvaluator | SampleEvaluator, seed: int) -> None:
@@ -1445,11 +1465,14 @@ class BaseOptimizer(ABC):
 
         self.random_state: Tuple[random.Random,np.random.RandomState] = random_state(self.seed)
 
-        self._evaluator_instances = []
+        self._f1: float = None
+        self._f2: float = None
+        self._f = -float('inf')  # Start with the worst possible increase
+
+        self._communities_dict = {}
 
     def _post_init_cpu(self, **kwargs):
-        for _ in range(self.num_streams):
-            self._evaluator_instances.append(self._evaluator.copy())
+        self._eval_manager = EvaluatorManager(self.num_streams, self._evaluator)
 
     def _post_init_gpu(
             self,
@@ -1467,15 +1490,43 @@ class BaseOptimizer(ABC):
         self.TPB_3D = threads_per_block_3D
         self._init_gpu = True
 
-        for _ in range(self.num_streams):
-            self._evaluator_instances.append(self._evaluator.copy())
+        self._eval_manager = EvaluatorManager(self.num_streams, self._evaluator)
+
+    @property
+    def f(self) -> float:
+        return self._f
     
+    @property
+    def f1(self) -> float:
+        return self._f1
+    
+    @property
+    def f2(self) -> float:
+        return self._f2
+
+    @property
+    def communities_dict(self) -> Dict[str,int]:
+        return self._communities_dict.copy()
+
+    @property
+    def communities_history(self) -> List[Dict[str,int]]:
+        return self._communities_history.copy()
+    
+    @property
+    def f_history(self) -> List[float]:
+        return self._f_history.copy()
+    
+    @property
+    def multi_history(self) -> List[Tuple[float,float]]:
+        return self._multi_history.copy()
+
+    @abstractmethod
+    def optimize(self, *args, **kwargs):
+        pass
+
     @cpu_gpu_dispatcher('_post_init_cpu', '_post_init_gpu')
     def _post_init(self, **kwargs):
         pass
-
-    def _to_community_dict(self, membership: np.ndarray) -> Dict[str,int]:
-        return {attr: membership[i] for i, attr in enumerate(self._evaluator._gloader.attr_list)}
 
     @_jsonmode
     def save(self, directory=None, **kwargs):
@@ -1503,6 +1554,149 @@ class BaseOptimizer(ABC):
                 dtype = data_dict["dtype"]
                 data = dtype_load_func.get(dtype, load_dict)(data)
                 setattr(self, data_dict["name"], data)
+
+
+class BruteForce(BaseOptimizer):
+
+    def __init__(
+            self, 
+            evaluator: ExactEvaluator | SampleEvaluator, 
+            seed: int, 
+            weights: Optional[Tuple[float,float]] = (0.5,0.5),
+            num_streams: Optional[int] = 1,
+            use_gpu: Optional[bool] = False
+        ) -> None:
+        super().__init__(evaluator, seed)
+
+        self.weights = weights
+        self.num_streams = num_streams
+        self.use_gpu = use_gpu
+
+        self._memberships = list(generate_possible_memberships(
+            self._evaluator._gloader.n_attr,
+            self._evaluator.n_communities
+        ))
+
+        self._post_init()
+
+    def optimize(
+            self,
+            max_iterations: Optional[int] = None,
+            rtol: Optional[float] = 1e-12,
+            multiprocess: Optional[bool] = True
+        ):
+
+        max_iterations = max_iterations or len(self._memberships)
+
+        with tqdm(total=len(self._memberships), desc="Outer Loop", position=0, leave=False) as pbar_outer:
+    
+            if multiprocess:
+                vargs_iterator = [membership for i,membership in enumerate(self._memberships)]
+                vkwargs_iterator = [{},] * len(vargs_iterator)
+                fargs = [
+                    self.weights, 
+                    self._evaluator,
+                ]
+                fkwargs = {}
+
+                results = parallel_sampling(
+                    self._process_batch,
+                    vargs_iterator,
+                    vkwargs_iterator,
+                    fargs,
+                    fkwargs,
+                    n_jobs=self.num_streams
+                )
+
+                for i, (f, x) in enumerate(results): 
+                    if f - self._f > rtol:
+
+                        self._evaluator.update_scores_membership(x)
+                        self._communities_dict = self._evaluator.communities_dict
+
+                        # Calculate the initial mean hhi over all routes
+                        self._f1 = -np.mean(list(self._evaluator.hhi.values()))
+                        self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
+                        self._f = multiobjective(self._f1,self._f2,self.weights)
+
+                        # log history
+                        self._communities_history.append(self._communities_dict)
+                        self._f_history.append(self._f)
+                        self._multi_history.append((self._f1,self._f2))
+
+                    pbar_outer.update(1)
+            else:
+                # Use ThreadPoolExecutor to parallelize the loop
+                with ThreadPoolExecutor(max_workers=self.num_streams) as executor:
+                    futures = []
+                    for batch_index, (membership) in enumerate(self._memberships):
+                        future = executor.submit(
+                            self._process_batch_thread,
+                            self.weights, 
+                            membership,
+                            self._eval_manager, 
+                        )
+                        futures.append(future)
+
+                    # Collect results and update max_increase and best_x
+                    for i,future in enumerate(futures):
+                        f, x = future.result()
+
+                        if f - self._f > rtol:
+
+                            self._evaluator.update_scores_membership(x)
+                            self._communities_dict = self._evaluator.communities_dict
+
+                            # Calculate the initial mean hhi over all routes
+                            self._f1 = -np.mean(list(self._evaluator.hhi.values()))
+                            self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
+                            self._f = multiobjective(self._f1,self._f2,self.weights)
+                            # self._f = f
+
+                            # log history
+                            self._communities_history.append(self._communities_dict)
+                            self._f_history.append(self._f)
+                            self._multi_history.append((self._f1,self._f2))
+
+                        if i > max_iterations:
+                            break
+
+                        pbar_outer.update(1)
+
+    @staticmethod
+    def _process_batch(
+            weights: Tuple[float,float],
+            membership: np.ndarray,
+            evaluator: ExactEvaluator | SampleEvaluator,
+        ):
+        # Perform stochastic evaluation using the selected stream
+
+        evaluator.update_scores_membership(membership)
+
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f = multiobjective(f1, f2, weights=weights)
+
+        return f, membership
+
+    @staticmethod
+    def _process_batch_thread(
+            weights: Tuple[float,float],
+            membership: np.ndarray,
+            eval_manager: EvaluatorManager,
+        ):
+
+        evaluator, stream_id, lock = eval_manager.get_evaluator()
+        try:
+            evaluator.update_scores_membership(membership)
+        finally:
+            lock.release()
+
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f = multiobjective(f1, f2, weights=weights)
+
+        return f, membership
 
 class GreedyOptimizer(BaseOptimizer):
 
@@ -1544,38 +1738,10 @@ class GreedyOptimizer(BaseOptimizer):
         self._post_init()
 
     @property
-    def f(self) -> float:
-        return self._f
-    
-    @property
-    def f1(self) -> float:
-        return self._f1
-    
-    @property
-    def f2(self) -> float:
-        return self._f2
-
-    @property
     def membership_pairs(self) -> np.ndarray:
         return self._membership_pairs.copy()
 
-    @property
-    def communities_dict(self) -> Dict[str,int]:
-        return self._communities_dict.copy()
-
-    @property
-    def communities_history(self) -> List[Dict[str,int]]:
-        return self._communities_history.copy()
-    
-    @property
-    def f_history(self) -> List[float]:
-        return self._f_history.copy()
-    
-    @property
-    def multi_history(self) -> List[Tuple[float,float]]:
-        return self._multi_history.copy()
-
-    def greedy_optimize(
+    def optimize(
             self,
             max_iterations: Optional[int] = 1000,
             epsilon: Optional[float] = 0.1,
@@ -1629,13 +1795,15 @@ class GreedyOptimizer(BaseOptimizer):
                             fkwargs = {}
 
                             results = parallel_sampling(
-                                _process_batch,
+                                self._process_batch,
                                 vargs_iterator,
                                 vkwargs_iterator,
                                 fargs,
                                 fkwargs,
                                 n_jobs=self.num_streams
                             )
+
+                            pbar_inner.update(len(sample_pairs))
                         else:
                             # Use ThreadPoolExecutor to parallelize the loop
                             results = []
@@ -1643,14 +1811,12 @@ class GreedyOptimizer(BaseOptimizer):
                                 futures = []
                                 for batch_index, (community_i, community_j) in enumerate(sample_pairs):
                                     future = executor.submit(
-                                        _process_batch_thread,
-                                        batch_index,
+                                        self._process_batch_thread,
                                         community_i,
                                         community_j,
-                                        self.num_streams, 
                                         self.weights, 
                                         self._membership_pairs[(community_i, community_j)].copy(),
-                                        self._evaluator_instances, 
+                                        self._eval_manager, 
                                         hhi_base, 
                                         self._f
                                     )
@@ -1669,7 +1835,7 @@ class GreedyOptimizer(BaseOptimizer):
                                 improvement_sample = True
 
                         if self.use_gpu:
-                            for evaluator in self._evaluator_instances:
+                            for evaluator in self._eval_manager.evaluators:
                                 evaluator.stream.synchronize()
 
                         if improvement_sample:
@@ -1677,10 +1843,10 @@ class GreedyOptimizer(BaseOptimizer):
 
                 # If the maximum increase is greater than 0, merge these two communities and update the mean hhi
                 if max_increase > 0:
-
-                    self._communities_dict = self._to_community_dict(self.membership_pairs[best_x])
-                    self._evaluator.update_scores(self._communities_dict)
                     
+                    self._evaluator.update_scores_membership(self.membership_pairs[best_x])
+                    self._communities_dict = self._evaluator.communities_dict
+
                     # Calculate the initial mean hhi over all routes
                     self._f1 = -np.mean(list(self._evaluator.hhi.values()))
                     self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
@@ -1741,61 +1907,59 @@ class GreedyOptimizer(BaseOptimizer):
 
         return sample_is_pairs + sample_uni_pairs
 
+    @staticmethod
+    def _process_batch(
+            community_i: int,
+            community_j: int,
+            weights: Tuple[float,float],
+            membership_pairs: Dict[Tuple[int,int],np.ndarray],
+            evaluator: ExactEvaluator | SampleEvaluator,
+            hhi_base: np.ndarray,
+            f: float
+        ):
+        # Perform stochastic evaluation using the selected stream
 
-def _process_batch(
-        community_i: int,
-        community_j: int,
-        weights: Tuple[float,float],
-        membership_pairs: Dict[Tuple[int,int],np.ndarray],
-        evaluator: ExactEvaluator | SampleEvaluator,
-        hhi_base: np.ndarray,
-        f: float
-    ):
-    # Perform stochastic evaluation using the selected stream
+        evaluator.update_scores_membership(membership_pairs[(community_i, community_j)])
 
-    evaluator.update_scores_membership(membership_pairs[(community_i, community_j)])
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f_new = multiobjective(f1, f2, weights=weights)
 
-    f1 = -np.mean(list(evaluator.hhi.values()))
-    f2 = np.mean(list(evaluator.log_mpc.values()))
-    f_new = multiobjective(f1, f2, weights=weights)
+        # Assuming your matrices are named matrix1 and matrix2
+        hhi_new = np.sort(list(evaluator.hhi.values()))
+        hhi_base_sorted = np.sort(hhi_base)
+        distributions_changed = np.any(hhi_new != hhi_base_sorted)
 
-    # Assuming your matrices are named matrix1 and matrix2
-    hhi_new = np.sort(list(evaluator.hhi.values()))
-    hhi_base_sorted = np.sort(hhi_base)
-    distributions_changed = np.any(hhi_new != hhi_base_sorted)
+        increase = f_new - f if np.any(distributions_changed) else 0.0
 
-    increase = f_new - f if np.any(distributions_changed) else 0.0
+        return increase, community_i, community_j
 
-    return increase, community_i, community_j
+    @staticmethod
+    def _process_batch_thread(
+            community_i: int,
+            community_j: int,
+            weights: Tuple[float,float],
+            membership: np.ndarray,
+            eval_manager: EvaluatorManager,
+            hhi_base: np.ndarray,
+            f: float
+        ):
 
-def _process_batch_thread(
-        batch_index: int,
-        community_i: int,
-        community_j: int,
-        num_streams: int,
-        weights: Tuple[float,float],
-        membership: np.ndarray,
-        evaluator_instances: List[ExactEvaluator | SampleEvaluator],
-        hhi_base: np.ndarray,
-        f: float
-    ):
+        evaluator, stream_id, lock = eval_manager.get_evaluator()
+        try:
+            evaluator.update_scores_membership(membership)
+        finally:
+            lock.release()
 
-    stream_id = batch_index % num_streams
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f_new = multiobjective(f1, f2, weights=weights)
 
-    # Perform stochastic evaluation using the selected stream
-    evaluator = evaluator_instances[stream_id]
+        # Assuming your matrices are named matrix1 and matrix2
+        hhi_new = np.sort(list(evaluator.hhi.values()))
+        hhi_base_sorted = np.sort(hhi_base)
+        distributions_changed = np.any(hhi_new != hhi_base_sorted)
 
-    evaluator.update_scores_membership(membership)
+        increase = f_new - f if np.any(distributions_changed) else 0.0
 
-    f1 = -np.mean(list(evaluator.hhi.values()))
-    f2 = np.mean(list(evaluator.log_mpc.values()))
-    f_new = multiobjective(f1, f2, weights=weights)
-
-    # Assuming your matrices are named matrix1 and matrix2
-    hhi_new = np.sort(list(evaluator.hhi.values()))
-    hhi_base_sorted = np.sort(hhi_base)
-    distributions_changed = np.any(hhi_new != hhi_base_sorted)
-
-    increase = f_new - f if np.any(distributions_changed) else 0.0
-
-    return increase, community_i, community_j
+        return increase, community_i, community_j
