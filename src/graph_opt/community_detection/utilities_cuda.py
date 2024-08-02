@@ -199,6 +199,61 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
                 cuda.atomic.add(edges_hhi, i, cp*cp)  # Pass the array and index separately
 
     @cuda.jit
+    def calc_w_it(
+            adj: DeviceNDArray,
+            adj3: DeviceNDArray,
+            w_it: DeviceNDArray,
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_unique_edges, n_attr = adj3.shape
+        n_nodes, n_attr = w_it.shape
+
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_attr, dy):
+                w_it[i, j] = 0
+
+        cuda.syncthreads()
+
+        # Grid stride loop
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_attr, dy):
+
+                source = adj[i,0]
+                cuda.atomic.add(w_it, (source, j), adj3[i, j])
+
+    @cuda.jit
+    def calc_w_i(
+            w_it: DeviceNDArray,
+            w_i: DeviceNDArray,
+        ):
+
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        n_nodes, n_attr = w_it.shape
+
+        for i in range(x, n_nodes, dx):
+            w_i[i] = 0
+
+        cuda.syncthreads()
+
+        n_nodes, n_attr = w_it.shape
+
+        # Grid stride loop
+        for i in range(x, n_nodes, dx):
+            for j in range(n_attr):
+                cuda.atomic.add(w_i, i, w_it[i, j])
+
+    @cuda.jit
     def calc_w_ik(
             membership: DeviceNDArray,
             w_it: DeviceNDArray,
@@ -251,7 +306,7 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
                     k = membership[t]
                     cuda.atomic.add(mpc, t, w_it[i, t] * w_ik[i, k] / (w_i[i] ** 2))
 
-    return edge_postprocess, calc_hhi, calc_w_ik, calc_mpc
+    return edge_postprocess, calc_hhi, calc_w_it, calc_w_i, calc_w_ik, calc_mpc
 
 def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Callable]:
 

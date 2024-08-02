@@ -13,6 +13,9 @@ import functools
 
 from typing import Optional, Tuple, Callable, List, Any, Dict, Union
 
+mp.set_start_method('forkserver',force=True)
+# mp.set_start_method('spawn')  # or 'forkserver' if on Unix and it suits your needs better
+
 def _default_if_none(value, default, name, ensure_not_none=True):
     value = value if value is not None else default
     if ensure_not_none and value is None:
@@ -206,7 +209,7 @@ def parallel_sampling(func:Callable,
         n_tasks_child = math.ceil(len(args_iter)/n_jobs)
         reset_every = math.floor(n_tasks_child*(1/100))
         print('Start method: %s\nMax tasks per child: %i' %(mp.get_start_method(),reset_every))
-        pool = myPool(processes=n_jobs,maxtasksperchild=reset_every)
+        pool = myPool(processes=n_jobs)#,maxtasksperchild=reset_every)
 
         results = starmap_with_kwargs(pool, func, args_iter, kwargs_iter)
         pool.terminate()

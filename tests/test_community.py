@@ -4,6 +4,7 @@ from doctest import debug
 from ipaddress import v4_int_to_packed
 from optparse import Option
 from igraph import Graph
+from matplotlib import use
 import pytest
 import os
 
@@ -11,17 +12,11 @@ from sklearn.covariance import log_likelihood
 
 from ..community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, GreedyOptimizer
 from ..community_detection.utilities import same_community
-from ..community_detection.utilities_cuda import define_cuda_kernels_sampling, define_cuda_kernels_deterministic, define_cuda_kernels_stochastic
 from ..utilities import cuda_blocks
 
 import numpy as np
 import networkx as nx
-import json
 import os
-import math
-import itertools
-from scipy.special import kl_div
-from numba import cuda
 
 from typing import Optional, Tuple, Dict, List
 
@@ -120,6 +115,7 @@ def get_bfs_probabilities(
                 'HT': 3,
                 'VT': 4
             },
+            "membership_test": np.array([0, 1, 2, 3, 4]),
             "test_HHI": {
                 ('0', '1'): 0.52,
                 ('0', '2'): 1.0,
@@ -145,6 +141,7 @@ def get_bfs_probabilities(
                 'HT': 3,
                 'VT': 4
             },
+            "membership_test": np.array([1, 1, 2, 3, 4]),
             "test_HHI": {
                 ('0', '1'): 0.52,
                 ('0', '2'): 1.0,
@@ -170,6 +167,7 @@ def get_bfs_probabilities(
                 'HT': 3,
                 'VT': 4
             },
+            "membership_test": np.array([0, 1, 4, 3, 4]),
             "test_HHI": {
                 ('0', '1'): 0.52,
                 ('0', '2'): 1.0,
@@ -195,6 +193,7 @@ def get_bfs_probabilities(
                 'HT': 4,
                 'VT': 4
             },
+            "membership_test": np.array([0, 1, 2, 4, 4]),
             "test_HHI": {
                 ('0', '1'): 1.0,
                 ('0', '2'): 1.0,
@@ -220,6 +219,7 @@ def get_bfs_probabilities(
                 'HT': 3,
                 'VT': 3
             },
+            "membership_test": np.array([0, 1, 2, 3, 3]),
             "test_HHI": {
                 ('0', '1'): 1.0,
                 ('0', '2'): 1.0,
@@ -274,116 +274,12 @@ def example_case_param(request):
 
     param = request.param
     communities_test = param["merge_communities_test"]
+    membership_test = param["membership_test"]
     test_HHI = param["test_HHI"]
     w_ik = param["w_ik"]
     n_communities = param["n_communities"]
 
-    return communities_test, n_communities, test_HHI, w_it, w_i, w_ik, p_it
-
-@pytest.fixture(scope="class",
-    params=[
-        {
-            "community_to_merge": 0,
-            "new_community": 1,
-            "merge_communities_test": {
-                'AT': 1,
-                'BT': 1,
-                'CT': 2,
-                'HT': 3,
-                'VT': 4
-            },
-            "test_HHI": {
-                ('0', '1'): 5200.0 / 10000,
-                ('0', '2'): 10000.0 / 10000,
-                ('0', '4'): 10000.0 / 10000,
-                ('1', '2'): 10000.0 / 10000,
-                ('3', '4'): 6800.0 / 10000,
-                ('4', '0'): 10000.0 / 10000
-            },
-            "test_weights_dict": {
-                'AT': 0,
-                'BT': 0,
-                'CT': 0,
-                'HT': 0,
-                'VT': 4800
-            }
-        },
-        {
-            "community_to_merge": 2,
-            "new_community": 4,
-            "merge_communities_test": {
-                'AT': 0,
-                'BT': 1,
-                'CT': 4,
-                'HT': 3,
-                'VT': 4
-            },
-            "test_HHI": {
-                ('0', '1'): 5200.0 / 10000,
-                ('0', '2'): 10000.0 / 10000,
-                ('0', '4'): 10000.0 / 10000,
-                ('1', '2'): 10000.0 / 10000,
-                ('3', '4'): 6800.0 / 10000,
-                ('4', '0'): 10000.0 / 10000
-            },
-            "test_weights_dict": {
-                'AT': 0,
-                'BT': 0,
-                'CT': 7000,
-                'HT': 0,
-                'VT': 6800 # 4800 + 2000
-            }
-        },
-        {
-            "community_to_merge": 3,
-            "new_community": 4,
-            "merge_communities_test": {
-                'AT': 0,
-                'BT': 1,
-                'CT': 2,
-                'HT': 4,
-                'VT': 4
-            },
-            "test_HHI": {
-                ('0', '1'): 10000.0 / 10000,
-                ('0', '2'): 10000.0 / 10000,
-                ('0', '4'): 10000.0 / 10000,
-                ('1', '2'): 10000.0 / 10000,
-                ('3', '4'): 6800.0 / 10000,
-                ('4', '0'): 10000.0 / 10000
-            },
-            "test_weights_dict": {
-                'AT': 0,
-                'BT': 0,
-                'CT': 0,
-                'HT': 7000,
-                'VT': 8000
-            }
-        },
-    ],
-    ids=[
-        'no change in scores',
-        'change in airline scores',
-        'change in all scores'
-    ]
-)
-def example_merge(request, example_case):
-    MG, nodes_airlines_dict, \
-    test_HHI, test_weights_dict, \
-    test_weights_individual_dict, \
-    init_communities_test = example_case
-
-    param = request.param
-    community_to_merge = param["community_to_merge"]
-    new_community = param["new_community"]
-    merge_communities_test = param["merge_communities_test"]
-    test_HHI = param["test_HHI"]
-    test_weights_dict = param["test_weights_dict"]
-
-    return MG, \
-           community_to_merge, new_community, \
-           merge_communities_test, test_HHI, \
-           test_weights_dict, test_weights_individual_dict
+    return communities_test, membership_test, n_communities, test_HHI, w_it, w_i, w_ik, p_it
 
 @pytest.fixture(scope="class",
     params=[
@@ -452,148 +348,29 @@ def test_cuda_blocks():
 
     return
 
-# @pytest.mark.parametrize("test_vector, threshold, expected", [
-#     (np.array([0, 0, 0, 40, 60]), 0.3, 3),
-#     (np.array([0, 40, 0, 0, 60]), 0.3, 1),
-#     (np.array([0, 0, 0, 40, 60]), 0.4, 4),
-#     (np.array([0, 40, 0, 0, 60]), 0.5, 4),
-# ], ids=['case 1', 'case 2', 'case 3', 'case 4'])
-# def test_sampler_deterministic(test_vector, threshold, expected):
+@pytest.mark.parametrize("test_vector, threshold, expected", [
+    (np.array([0, 0, 0, 40, 60]), 0.3, 3),
+    (np.array([0, 40, 0, 0, 60]), 0.3, 1),
+    (np.array([0, 0, 0, 40, 60]), 0.4, 4),
+    (np.array([0, 40, 0, 0, 60]), 0.5, 4),
+], ids=['case 1', 'case 2', 'case 3', 'case 4'])
+def test_sampler_deterministic(test_vector, threshold, expected):
 
-#     from ..utilities_cuda import cumsum_h, searchsorted_h
+    from ..utilities_cuda import cumsum_h, searchsorted_h
 
-#     cumsum = np.zeros_like(test_vector)
+    cumsum = np.zeros_like(test_vector)
 
-#     cumsum_h(test_vector,cumsum)
-#     chosen = searchsorted_h(cumsum,threshold)
+    cumsum_h(test_vector,cumsum)
+    chosen = searchsorted_h(cumsum,threshold)
 
-#     assert chosen == expected
-
-# @pytest.mark.parametrize("test_vector, expected", [
-#     (np.array([0, 0, 0, 40, 60]), np.array([0,0,0,0.4,0.6])),
-#     (np.array([0, 40, 0, 0, 60]), np.array([0,0.4,0,0.0,0.6])),
-# ], ids=['case 1', 'case 2'])
-# def test_sampler(test_vector, expected):
-
-#     from ..utilities_cuda import cumsum_h, searchsorted_h
-#     import random
-#     random.seed(seed)
-#     n_samples = 50
-
-#     cumsum = np.zeros_like(test_vector)
-#     counts = np.zeros_like(test_vector)
-
-#     cumsum_h(test_vector,cumsum)
-
-#     for _ in range(n_samples):
-#         threshold = random.random()
-#         chosen = searchsorted_h(cumsum,threshold)
-#         counts[chosen] += 1
-
-#     p = counts / counts.sum()
-
-#     assert np.allclose(p,expected,rtol=1e-1)
-
-# @pytest.mark.parametrize("reduced_counts_base, reduced_counts", [
-#     (
-#         np.array(
-#             [
-#                 [  0,   0,   0, 191, 309],
-#                 [500,   0,   0,   0,   0],
-#                 [  0,   0, 500,   0,   0],
-#                 [  0, 500,   0,   0,   0],
-#                 [  0,   0, 399, 101,   0],
-#                 [  0,   0,   0,   0, 500]
-#             ], dtype = np.int32
-#         ),
-#         np.array(
-#             [
-#                 [  0,   0,   0, 191, 309],
-#                 [500,   0,   0,   0,   0],
-#                 [  0,   0, 500,   0,   0],
-#                 [  0, 500,   0,   0,   0],
-#                 [  0,   0,   0, 399, 101],
-#                 [  0,   0,   0,   0, 500]
-#             ], dtype = np.int32
-#         )
-#     ),
-#     (
-#         np.array(
-#             [
-#                 [  0,   0,   0, 191, 309],
-#                 [500,   0,   0,   0,   0],
-#                 [  0,   0, 500,   0,   0],
-#                 [  0, 500,   0,   0,   0],
-#                 [  0,   0, 399, 101,   0],
-#                 [  0,   0,   0,   0, 500]
-#             ], dtype = np.int32
-#         ),
-#         np.array(
-#             [
-#                 [  0,   0,   0, 191, 309],
-#                 [500,   0,   0,   0,   0],
-#                 [  0,   0, 500,   0,   0],
-#                 [  0, 500,   0,   0,   0],
-#                 [  0,   0,   0, 500,   0],
-#                 [  0,   0,   0,   0, 500]
-#             ], dtype = np.int32
-#         )
-#     )
-# ], ids=['no difference', 'difference'])
-# def test_hist_diff(reduced_counts_base, reduced_counts):
-
-#     kernels = define_cuda_kernels_stochastic(1, 1, 500, 1, 1)
-
-#     set_membership             = kernels[0]
-#     spatial_random_walk        = kernels[1]
-#     attr_sampler               = kernels[2]
-#     attr_source_postprocess    = kernels[3]
-#     edge_sampler               = kernels[4]
-#     init_edge_counts           = kernels[5]
-#     edge_postprocess           = kernels[6]
-#     check_edge_distribution    = kernels[7]
-#     load_counts                = kernels[8]
-#     edge_histogram             = kernels[9]
-#     copy_reduced_counts        = kernels[10]
-#     init_attr                  = kernels[11]
-#     init_node_weights          = kernels[12]
-#     init_community             = kernels[13]
-#     node_weight                = kernels[14]
-#     attr_weight                = kernels[15]
-#     community_weight           = kernels[16]
-#     attr_postprocess           = kernels[17]
-
-#     reduced_counts_base_d = cuda.to_device(reduced_counts_base)
-#     reduced_counts_d = cuda.to_device(reduced_counts)
-#     distributions_changed_d = cuda.device_array(reduced_counts.shape[0], dtype=np.int32)
-
-#     reduced_counts_base_h = reduced_counts_base
-#     reduced_counts_h = reduced_counts
-#     # Assuming your matrices are named matrix1 and matrix2
-#     hhi_new = np.sort(reduced_counts_h, axis=1)
-#     hhi_base = np.sort(reduced_counts_base_h, axis=1)
-#     distributions_changed_test = np.any(hhi_new != hhi_base, axis=1)
-
-#     nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(reduced_counts.shape[0], ), TPB = 8)
-
-#     check_edge_distribution[threadsperblock,blockspergrid](
-#         reduced_counts_base_d,
-#         reduced_counts_d,
-#         distributions_changed_d
-#     )
-
-#     cuda.synchronize()
-
-#     distributions_changed = distributions_changed_d.copy_to_host()
-#     distributions_changed = distributions_changed > 0
-
-#     assert np.all(distributions_changed_test == distributions_changed)
+    assert chosen == expected
 
 class _TestDeterministic():
     num_streams = 4
     tile_size = 2
     threads_per_block = 8
     use_gpu = False
+    update_membership = False
 
     @pytest.fixture(scope="function")
     def read_graph(self) -> GraphLoader:
@@ -615,7 +392,7 @@ class _TestDeterministic():
     def test_evaluator(self, read_graph: GraphLoader, example_case_param):
 
         graph = read_graph
-        init_communities_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
 
         test_class = ExactEvaluator(
             gloader=graph, 
@@ -628,7 +405,10 @@ class _TestDeterministic():
             stream=None
         )
 
-        test_class.update_scores(communities_dict=init_communities_test)
+        if self.update_membership:
+            test_class.update_scores_membership(membership_test)
+        else:
+            test_class.update_scores(communities_dict=init_communities_test)
         
         # check all keys in test dictionary are present
         assert all(key in test_HHI.keys() for key in test_class.hhi)
@@ -653,7 +433,7 @@ class _TestDeterministic():
     def test_save_load(self, read_graph: GraphLoader, example_case_param, tmp_path):
 
         graph = read_graph
-        init_communities_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
 
         test_class = ExactEvaluator(
             gloader=graph, 
@@ -669,7 +449,10 @@ class _TestDeterministic():
         directory = tmp_path / "test_save"
         directory.mkdir()
 
-        test_class.update_scores(communities_dict=init_communities_test)
+        if self.update_membership:
+            test_class.update_scores_membership(membership_test)
+        else:
+            test_class.update_scores(communities_dict=init_communities_test)
 
         test_class.save(directory=directory)
 
@@ -732,6 +515,7 @@ class _TestStochastic():
     n_walks = 10000
     use_gpu = False
     tolerance = 1e-1
+    update_membership = True
 
     @pytest.fixture(scope="function")
     def read_graph(self) -> Tuple[GraphLoader, NeighbourSampler]:
@@ -764,7 +548,7 @@ class _TestStochastic():
     def test_evaluator(self, read_graph: GraphLoader, example_case_param):
 
         graph, sampler = read_graph
-        init_communities_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
 
         test_p_ik = defaultdict(dict)
         for node_id,(node,ks) in enumerate(test_w_ik.items()):
@@ -787,7 +571,10 @@ class _TestStochastic():
             stream=None
         )
 
-        test_class.update_scores(communities_dict=init_communities_test)
+        if self.update_membership:
+            test_class.update_scores_membership(membership_test)
+        else:
+            test_class.update_scores(communities_dict=init_communities_test)
         
         # check all keys in test dictionary are present
         assert all(key in test_HHI.keys() for key in test_class.hhi)
@@ -812,12 +599,13 @@ class _TestStochastic():
                 else:
                     assert test_class.w_i[node_id] == 0
 
-        assert same_community(init_communities_test,test_class.communities_dict)
+        if not self.update_membership:
+            assert same_community(init_communities_test,test_class.communities_dict)
 
     def test_save_load(self, read_graph: GraphLoader, example_case_param, tmp_path):
 
         graph, sampler = read_graph
-        init_communities_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
 
         test_class = SampleEvaluator(
             gloader=graph,
@@ -834,7 +622,10 @@ class _TestStochastic():
         directory = tmp_path / "test_save"
         directory.mkdir()
 
-        test_class.update_scores(communities_dict=init_communities_test)
+        if self.update_membership:
+            test_class.update_scores_membership(membership_test)
+        else:
+            test_class.update_scores(communities_dict=init_communities_test)
 
         test_class.save(directory=directory)
 
@@ -886,7 +677,6 @@ class TestStochasticCPU(_TestStochastic):
 
     use_gpu = False
 
-
 class TestStochasticGPU(_TestStochastic):
 
     use_gpu = True
@@ -895,12 +685,12 @@ class TestStochasticGPU(_TestStochastic):
 class _TestGreedyOptimize():
 
     epsilon = 0.5
-    rtol = 0.0
+    rtol = 1e-3
     n_samples_edge=500
-    walk_length=1
+    walk_length=6
     threads_per_block=8
     n_walks = 1000
-    num_streams = 8
+    num_streams = 2
 
     @pytest.fixture(scope="function")
     def read_graph(self) -> Tuple[GraphLoader, NeighbourSampler]:
@@ -929,23 +719,61 @@ class _TestGreedyOptimize():
 
         return graph, sampler
 
-    @pytest.mark.parametrize("n_sample_pairs", [100, 8], ids=['no sampling', '8 samples'])
-    def test_optimize(self, read_graph: Tuple[GraphLoader, NeighbourSampler], optimization_cases, n_sample_pairs):
-        
-        graph, sampler = read_graph
-        weights, test_communities_dict = optimization_cases
+    @pytest.fixture(scope="function",
+        params=[
+            {
+                "type": "exact",
+            },
+            {
+                "type": "sample",
+            },
+        ],
+        ids=[
+            'exact',
+            'neighbourhood_sample',
+        ]
+    )
+    def get_evaluator(self, read_graph: Tuple[GraphLoader, NeighbourSampler], request) -> ExactEvaluator:
 
-        evaluator = SampleEvaluator(
-            gloader=graph,
-            sampler=sampler,
-            seed=seed,
-            use_gpu=self.use_gpu,
-            n_communities=None, 
-            threads_per_block_1D=self.threads_per_block,
-            threads_per_block_2D=self.threads_per_block,
-            threads_per_block_3D=self.threads_per_block,
-            stream=None
-        )
+        graph, sampler = read_graph
+
+        param = request.param
+
+        if param["type"] == 'sample':
+            return SampleEvaluator(
+                gloader=graph,
+                sampler=sampler,
+                seed=seed,
+                use_gpu=self.use_gpu,
+                n_communities=None, 
+                threads_per_block_1D=self.threads_per_block,
+                threads_per_block_2D=self.threads_per_block,
+                threads_per_block_3D=self.threads_per_block,
+                stream=None
+            )
+
+        elif param["type"] == 'exact':
+            return ExactEvaluator(
+                gloader=graph,
+                seed=seed,
+                use_gpu=self.use_gpu,
+                n_communities=None, 
+                threads_per_block_1D=self.threads_per_block,
+                threads_per_block_2D=self.threads_per_block,
+                threads_per_block_3D=self.threads_per_block,
+                stream=None
+            )
+
+    @pytest.mark.parametrize("n_sample_pairs", [100, 8], ids=['no sampling', '8 samples'])
+    def test_optimize(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_evaluator: SampleEvaluator | ExactEvaluator, 
+        n_sample_pairs: int
+    ):
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_evaluator
 
         optimizer = GreedyOptimizer(
             evaluator=evaluator,
@@ -959,7 +787,8 @@ class _TestGreedyOptimize():
             max_iterations = 1000,
             epsilon = self.epsilon,
             rtol = self.rtol,
-            n_sample_pairs = n_sample_pairs
+            n_sample_pairs = n_sample_pairs,
+            multiprocess=self.use_multiprocessing
         )
 
         assert same_community(optimizer.communities_dict, test_communities_dict)
@@ -967,63 +796,10 @@ class _TestGreedyOptimize():
 class TestGreedyOptimizeGPU(_TestGreedyOptimize):
 
     use_gpu = True
+    use_multiprocessing = False
 
 
-class TestExactOptimizeCPU(_TestGreedyOptimize):
+class TestGreedyOptimizeCPU(_TestGreedyOptimize):
 
     use_gpu = False
-
-
-# @pytest.mark.dependency()
-# def test_sampler(self,example_case_param):
-
-#     MG, nodes_airlines_dict, \
-#     test_HHI, test_weights_dict, \
-#     test_weights_individual_dict, \
-#     init_communities_test = example_case_param
-
-#     test_class = ExactEvaluator(MG, communities_dict=init_communities_test)
-#     n_omit_samples = int(test_class.n_communities*(test_class.n_communities+1)/2)
-#     n_test_samples = test_class.n_communities**2 - n_omit_samples
-
-#     assert test_class.n_communities**2 - len(test_class._sampled_communities_pairs) == n_test_samples
-
-#     while samples:=test_class._sample_community_pairs(3):
-#         assert len(samples) <= n_test_samples
-
-# @pytest.mark.dependency()
-# def test_sampler_dist(self,example_case_param):
-
-    # n_samples = 1000
-
-    # MG, nodes_airlines_dict, \
-    # test_HHI, test_weights_dict, \
-    # test_weights_individual_dict, \
-    # init_communities_test = example_case_param
-
-    # test_class = ExactEvaluator(MG, communities_dict=init_communities_test)
-
-    # all_samples = list(itertools.product(range(test_class.n_communities), range(test_class.n_communities)))
-    # all_samples_dict = {pair : i for i,pair in enumerate(all_samples)}
-    # diag_mask = np.array([True if i==j else False for i,j in all_samples])
-
-    # probabilities = test_class.bfs_degree_community[all_samples] / np.sum(test_class.bfs_degree_community)
-    # probabilities_pairs = probabilities[:,0] * probabilities[:,1]
-    # probabilities_pairs[diag_mask] = 0.0
-    # probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
-
-
-    # samples = test_class._sample_community_pairs(n_samples,replace=True)
-    # samples_indices = [all_samples_dict[pair] for pair in samples]
-
-    # # Compute the empirical PMF
-    # unique, counts = np.unique(samples_indices, return_counts=True)
-    # counts_full = np.zeros_like(probabilities_pairs)
-    # counts_full[unique] = counts
-    # empirical_pmf = counts_full / len(samples_indices)
-
-    # kl_divergence = kl_div(empirical_pmf + 1e-10, probabilities_pairs + 1e-10)
-
-    # assert np.mean(empirical_pmf - probabilities_pairs) <= 1e-3
-
-    # return
+    use_multiprocessing = True

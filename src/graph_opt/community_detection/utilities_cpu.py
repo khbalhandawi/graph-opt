@@ -261,7 +261,7 @@ def calc_sample_w_it_cpu(T_ijk, w_it):
                     if t == current_attr:
                         w_it[i, t] += 1
 
-def edge_sample_postprocess_cpu(samples, membership, n_communities, counts):
+def edge_sample_postprocess_cpu(samples, membership, counts):
     n_unique_edges, n_samples_edges = samples.shape
 
     # Expand samples to index membership
