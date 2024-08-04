@@ -221,64 +221,72 @@ def calc_mpc_cpu(
             k = membership[t]
             mpc[t] += w_it[i, t] * w_ik[i, k]
 
-def calc_p_it_L(
-        adj_weight,
+@numba.njit
+def calc_p_iv_cpu(
         adj_sparse,
-        adj_multi_attr_sparse, 
-        adj_multi_attr_type, 
-        adj_multi_attr_weight, 
+        adj_weight,
+        w_i,
+        p_iv
+    ):
+
+    n_nodes = w_i.shape[0]
+    n_global_edges = adj_sparse.shape[0]
+
+    for i in range(n_nodes):
+        for v in range(n_nodes):
+
+            p_iv[i,v] = 0.0
+            for global_edge_index in range(n_global_edges):
+                source, target = adj_sparse[global_edge_index]
+
+                if source != i or target != v:
+                    continue
+
+                edge_weight = adj_weight[global_edge_index]
+                p_iv[i,v] = edge_weight / w_i[source]
+                break
+
+@numba.njit
+def calc_p_iv_t_cpu(
+        adj_multi_attr_sparse,
+        adj_multi_attr_type,
+        adj_multi_attr_weight,
         adj_multi_attr_index,
-        w_i, 
+        adj_weight,
+        p_iv_t
+    ):
+
+    n_edges = adj_multi_attr_sparse.shape[0]
+    n_nodes = p_iv_t.shape[0]
+    n_attr = p_iv_t.shape[2]
+
+    for i in range(n_nodes):
+        for v in range(n_nodes):
+            for t in range(n_attr):
+
+                p_iv_t[i,v,t] = 0.0
+                for edge_index in range(n_edges):
+
+                    source, target = adj_multi_attr_sparse[edge_index]
+                    attr_current = adj_multi_attr_type[edge_index]
+
+                    if source != i or attr_current != t or target != v:
+                        continue
+
+                    attr_weight = adj_multi_attr_weight[edge_index]
+                    edge_weight = adj_weight[adj_multi_attr_index[edge_index]]
+                    p_iv_t[i,v,t] = (attr_weight / edge_weight)
+
+                    break
+
+def calc_p_it_L(
+        p_iv,
+        p_iv_t,
         L, 
         p_it
     ):
 
-    n_global_edges = adj_sparse.shape[0]
-    n_edges = adj_multi_attr_sparse.shape[0]
     n_nodes, n_attr = p_it.shape
-
-    @numba.njit
-    def calc_p_iv_cpu(
-            i,
-            v,
-        ):
-
-        p_iv = 0.0
-        for global_edge_index in range(n_global_edges):
-            source, target = adj_sparse[global_edge_index]
-
-            if source != i or target != v:
-                continue
-
-            edge_weight = adj_weight[global_edge_index]
-            p_iv = edge_weight / w_i[source]  # Normalize weight to create transition probability P_i(v)
-            break
-
-        return p_iv
-
-    @numba.njit
-    def calc_p_iv_t_cpu(
-            i,
-            v,
-            t,
-        ):
-
-        p_iv_t = 0.0
-        for edge_index in range(n_edges):
-
-            source, target = adj_multi_attr_sparse[edge_index]
-            attr_current = adj_multi_attr_type[edge_index]
-
-            if source != i or attr_current != t or target != v:
-                continue
-
-            attr_weight = adj_multi_attr_weight[edge_index]
-            edge_weight = adj_weight[adj_multi_attr_index[edge_index]]
-            p_iv_t = (attr_weight / edge_weight)
-
-            break
-
-        return p_iv_t
 
     # Function to recursively calculate p(t|i,L)
     def calc_p_t_i(i, t, depth):
@@ -289,19 +297,15 @@ def calc_p_it_L(
         sum_v = 0.0
         
         for v in range(n_nodes):
-            
-            p_iv = calc_p_iv_cpu(i, v)
-            p_iv_t = calc_p_iv_t_cpu(i, v, t)
-            
+                        
             sum_t_prime = 0.0
 
             for t_prime in range(n_attr):
-                p_iv_t_prime = calc_p_iv_t_cpu(i, v, t_prime)
                 p_t_v = calc_p_t_i(v, t, depth - 1)
 
-                sum_t_prime += p_iv_t_prime * p_t_v
+                sum_t_prime += p_iv_t[i, v, t_prime] * p_t_v
 
-            sum_v += p_iv * (p_iv_t + sum_t_prime)
+            sum_v += p_iv[i,v] * (p_iv_t[i, v, t] + sum_t_prime)
 
         return sum_v
                 
@@ -311,65 +315,15 @@ def calc_p_it_L(
             p_it[i,t] = calc_p_t_i(i, t, L) / L
 
 def calc_p_ik_L(
-        adj_weight,
-        adj_sparse,
-        adj_multi_attr_sparse, 
-        adj_multi_attr_type, 
-        adj_multi_attr_weight, 
-        adj_multi_attr_index,
-        w_i, 
+        p_iv,
+        p_iv_t,
         L, 
         membership,
         n_attr,
         p_ik
     ):
 
-    n_global_edges = adj_sparse.shape[0]
-    n_edges = adj_multi_attr_sparse.shape[0]
     n_nodes, n_communities = p_ik.shape
-
-    @numba.njit
-    def calc_p_iv_cpu(
-            i,
-            v,
-        ):
-
-        p_iv = 0.0
-        for global_edge_index in range(n_global_edges):
-            source, target = adj_sparse[global_edge_index]
-
-            if source != i or target != v:
-                continue
-
-            edge_weight = adj_weight[global_edge_index]
-            p_iv = edge_weight / w_i[source]  # Normalize weight to create transition probability P_i(v)
-            break
-
-        return p_iv
-
-    @numba.njit
-    def calc_p_iv_t_cpu(
-            i,
-            v,
-            t,
-        ):
-
-        p_iv_t = 0.0
-        for edge_index in range(n_edges):
-
-            source, target = adj_multi_attr_sparse[edge_index]
-            attr_current = adj_multi_attr_type[edge_index]
-
-            if source != i or attr_current != t or target != v:
-                continue
-
-            attr_weight = adj_multi_attr_weight[edge_index]
-            edge_weight = adj_weight[adj_multi_attr_index[edge_index]]
-            p_iv_t = (attr_weight / edge_weight)
-
-            break
-
-        return p_iv_t
 
     # Function to recursively calculate p(k|i,L)
     def calc_p_k_i(i, k, depth):
@@ -380,23 +334,21 @@ def calc_p_ik_L(
         sum_v = 0.0
         
         for v in range(n_nodes):
-            
-            p_iv = calc_p_iv_cpu(i, v)
 
             p_iv_k = 0.0
             for t in range(n_attr):
                 if membership[t] == k:
-                    p_iv_k += calc_p_iv_t_cpu(i, v, t)
+                    p_iv_k += p_iv_t[i, v, t]
             
             sum_t_prime = 0.0
 
             for t_prime in range(n_attr):
-                p_iv_t_prime = calc_p_iv_t_cpu(i, v, t_prime)
+                p_iv_t_prime = p_iv_t[i, v, t_prime]
                 p_t_v = calc_p_k_i(v, k, depth - 1)
 
                 sum_t_prime += p_iv_t_prime * p_t_v
 
-            sum_v += p_iv * (p_iv_k + sum_t_prime)
+            sum_v += p_iv[i,v] * (p_iv_k + sum_t_prime)
 
         return sum_v
                 

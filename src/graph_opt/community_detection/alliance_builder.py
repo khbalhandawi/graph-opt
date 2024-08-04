@@ -25,7 +25,7 @@ else:
 from .utilities import distinct_communities, generate_membership_combinations, generate_possible_memberships
 from .utilities_cpu import edge_sampler_cpu, spatial_random_walk, attr_sampler_cpu
 from .utilities_cpu import calc_sample_w_i_cpu, calc_sample_w_it_cpu, edge_sample_postprocess_cpu, calc_sample_w_ik_cpu, calc_sample_mpc_cpu
-from .utilities_cpu import edge_postprocess_cpu, calc_hhi_cpu, calc_w_it_cpu, calc_w_ik_cpu, calc_mpc_cpu, calc_p_it_L, calc_p_ik_L
+from .utilities_cpu import edge_postprocess_cpu, calc_hhi_cpu, calc_w_it_cpu, calc_w_ik_cpu, calc_mpc_cpu, calc_p_iv_cpu, calc_p_iv_t_cpu, calc_p_it_L, calc_p_ik_L
 
 from ..utilities import _default_if_none, cpu_gpu_dispatcher, cuda_blocks, safe_log, serialize, deserialize
 
@@ -992,9 +992,11 @@ class ExactEvaluator(BaseEvaluator):
         self.walk_length = walk_length
         super().__init__(gloader, use_gpu, n_communities, threads_per_block_1D, threads_per_block_2D, threads_per_block_3D, stream)
 
-
     def _post_init_cpu(self, *args, **kwargs):
         super()._post_init_cpu(args, kwargs)
+
+        self._p_iv = np.zeros((self._gloader.n_nodes_spatial,self._gloader.n_nodes_spatial),dtype=np.float32)
+        self._p_iv_t = np.zeros((self._gloader.n_nodes_spatial,self._gloader.n_nodes_spatial, self._gloader.n_attr),dtype=np.float32)
 
         calc_w_it_cpu(
             adj=self._gloader._adj_sparse,
@@ -1004,14 +1006,25 @@ class ExactEvaluator(BaseEvaluator):
 
         self._w_i = np.sum(self._w_it,axis=1)
 
+        calc_p_iv_cpu(
+            adj_sparse = self._gloader._adj_sparse,
+            adj_weight = self._gloader._adj,
+            w_i = self._w_i,
+            p_iv = self._p_iv
+        )
+
+        calc_p_iv_t_cpu(
+            adj_multi_attr_sparse = self._gloader._adj_multi_attr_sparse,
+            adj_multi_attr_type = self._gloader._adj_multi_attr_type,
+            adj_multi_attr_weight = self._gloader._adj_multi_attr,
+            adj_multi_attr_index = self._gloader._adj_multi_attr_index,
+            adj_weight = self._gloader._adj,
+            p_iv_t = self._p_iv_t
+        )
+
         calc_p_it_L(
-            self._gloader._adj,
-            self._gloader._adj_sparse,
-            self._gloader._adj_multi_attr_sparse,
-            self._gloader._adj_multi_attr_type,
-            self._gloader._adj_multi_attr,
-            self._gloader._adj_multi_attr_index,
-            self._w_i,
+            p_iv = self._p_iv,
+            p_iv_t = self._p_iv_t,
             L=self.walk_length,
             p_it=self._w_it
         )
@@ -1131,13 +1144,8 @@ class ExactEvaluator(BaseEvaluator):
         self._w_ik = np.zeros((self._gloader.n_nodes_spatial,self._n_communities),dtype=np.float32)
 
         calc_p_ik_L(
-            self._gloader._adj,
-            self._gloader._adj_sparse,
-            self._gloader._adj_multi_attr_sparse,
-            self._gloader._adj_multi_attr_type,
-            self._gloader._adj_multi_attr,
-            self._gloader._adj_multi_attr_index,
-            self._w_i,
+            p_iv=self._p_iv,
+            p_iv_t=self._p_iv_t,
             L=self.walk_length,
             membership=self._membership,
             n_attr=self._gloader.n_attr,
@@ -1151,6 +1159,7 @@ class ExactEvaluator(BaseEvaluator):
             mpc=self._mpc_attrs
         )
 
+        self._mpc_attrs /= self._gloader.n_nodes_spatial
         self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         for attr in self._gloader.attr_list:
@@ -1595,6 +1604,8 @@ class BaseOptimizer(ABC):
             with open(f'{directory}/{name}.json', 'w') as f:
                 json.dump(serialize(data), f, indent=4)
 
+        self._evaluator.save(directory, **kwargs)
+
     @_jsonmode
     def load(self, directory=None, **kwargs):
         data_to_load = {
@@ -1610,6 +1621,7 @@ class BaseOptimizer(ABC):
                 data = dtype_load_func.get(dtype, load_dict)(data)
                 setattr(self, data_dict["name"], data)
 
+        self._evaluator.load(directory, **kwargs)
 
 class BruteForce(BaseOptimizer):
 
@@ -1632,56 +1644,48 @@ class BruteForce(BaseOptimizer):
             self._evaluator.n_communities
         ))
 
+        self._results_library = {}
+
         self._post_init()
+
+    @property
+    def results_library(self) -> Dict[np.ndarray, Dict[str,Any]]:
+        return deepcopy(self._results_library)
 
     def optimize(
             self,
             max_iterations: Optional[int] = None,
             rtol: Optional[float] = 1e-12,
-            multiprocess: Optional[bool] = True
+            multiprocess: Optional[bool] = True,
+            postporcess_all: Optional[bool] = False
         ):
 
         max_iterations = max_iterations or len(self._memberships)
 
-        with tqdm(total=len(self._memberships), desc="Outer Loop", position=0, leave=False) as pbar_outer:
-    
-            if multiprocess:
-                vargs_iterator = [(membership,) for i,membership in enumerate(self._memberships)]
-                vkwargs_iterator = [{},] * len(vargs_iterator)
-                fargs = [
-                    self.weights, 
-                    self._evaluator,
-                ]
-                fkwargs = {}
 
-                results = parallel_sampling(
-                    self._process_batch,
-                    vargs_iterator,
-                    vkwargs_iterator,
-                    fargs,
-                    fkwargs,
-                    n_jobs=self.num_streams
-                )
+        if multiprocess:
+            vargs_iterator = [(membership,) for i,membership in enumerate(self._memberships)]
+            vkwargs_iterator = [{},] * len(vargs_iterator)
+            fargs = [
+                self.weights, 
+                self._evaluator,
+            ]
+            fkwargs = {}
 
-                for i, (f, x) in enumerate(results): 
-                    if f - self._f > rtol:
+            results = parallel_sampling(
+                self._process_batch,
+                vargs_iterator,
+                vkwargs_iterator,
+                fargs,
+                fkwargs,
+                n_jobs=self.num_streams
+            )
 
-                        self._evaluator.update_scores_membership(x)
-                        self._communities_dict = self._evaluator.communities_dict
+        else:
+            with tqdm(total=len(self._memberships), desc="memberships evaluated", position=0, leave=False) as pbar_outer:
 
-                        # Calculate the initial mean hhi over all routes
-                        self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-                        self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
-                        self._f = multiobjective(self._f1,self._f2,self.weights)
-
-                        # log history
-                        self._communities_history.append(self._communities_dict)
-                        self._f_history.append(self._f)
-                        self._multi_history.append((self._f1,self._f2))
-
-                    pbar_outer.update(1)
-            else:
                 # Use ThreadPoolExecutor to parallelize the loop
+                results = []
                 with ThreadPoolExecutor(max_workers=self.num_streams) as executor:
                     futures = []
                     for batch_index, (membership) in enumerate(self._memberships):
@@ -1695,28 +1699,56 @@ class BruteForce(BaseOptimizer):
 
                     # Collect results and update max_increase and best_x
                     for i,future in enumerate(futures):
-                        f, x = future.result()
-
-                        if f - self._f > rtol:
-
-                            self._evaluator.update_scores_membership(x)
-                            self._communities_dict = self._evaluator.communities_dict
-
-                            # Calculate the initial mean hhi over all routes
-                            self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-                            self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
-                            self._f = multiobjective(self._f1,self._f2,self.weights)
-                            # self._f = f
-
-                            # log history
-                            self._communities_history.append(self._communities_dict)
-                            self._f_history.append(self._f)
-                            self._multi_history.append((self._f1,self._f2))
-
-                        if i > max_iterations:
-                            break
-
+                        results.append(future.result())
                         pbar_outer.update(1)
+
+        with tqdm(total=len(self._memberships), desc="postprocessing results", position=0, leave=False) as pbar_post:
+            for i, (f, x) in enumerate(results): 
+                
+                if postporcess_all:
+
+                    self._evaluator.update_scores_membership(x)
+
+                    # Calculate the initial mean hhi over all routes
+                    f1 = -np.mean(list(self._evaluator.hhi.values()))
+                    f2 = np.mean(list(self._evaluator.log_mpc.values()))
+                    f = multiobjective(self._f1,self._f2,self.weights)
+
+                    self._results_library[x] = {
+                        'f': f,
+                        'f1': f1,
+                        'f2': f2,
+                        'hhi': self._evaluator.hhi,
+                        'mpc': self._evaluator.mpc,
+                    }
+
+                    if f - self._f > rtol:
+                        self._f1 = f1
+                        self._f2 = f2
+                        self._f = f
+                        self._communities_dict = self._evaluator.communities_dict
+                        self._communities_history.append(self._communities_dict)
+                        self._f_history.append(self._f)
+                        self._multi_history.append((self._f1,self._f2))
+
+                else:
+
+                    # log history
+                    if f - self._f > rtol:
+
+                        self._evaluator.update_scores_membership(x)
+
+                        # Calculate the initial mean hhi over all routes
+                        self._f1 = -np.mean(list(self._evaluator.hhi.values()))
+                        self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
+                        self._f = multiobjective(self._f1,self._f2,self.weights)
+
+                        self._communities_dict = self._evaluator.communities_dict
+                        self._communities_history.append(self._communities_dict)
+                        self._f_history.append(self._f)
+                        self._multi_history.append((self._f1,self._f2))
+
+                pbar_post.update(1)
 
     @staticmethod
     def _process_batch(
@@ -1752,6 +1784,18 @@ class BruteForce(BaseOptimizer):
         f = multiobjective(f1, f2, weights=weights)
 
         return f, membership
+
+    @_jsonmode
+    def save(self, directory=None, **kwargs):
+        super().save(directory, **kwargs)
+        with open(f'{directory}/results_library.json', 'w') as f:
+            json.dump(serialize(self.results_library), f, indent=4)
+
+    @_jsonmode
+    def load(self, directory=None, **kwargs):
+        super().load(directory, **kwargs)
+        with open(f'{directory}/results_library.json', 'r') as f:
+            self._results_library = deserialize(json.load(f))
 
 class GreedyOptimizer(BaseOptimizer):
 

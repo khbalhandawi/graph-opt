@@ -6,7 +6,11 @@ import math
 import multiprocessing as mp
 import multiprocessing.pool as mpp
 from itertools import repeat
-import tqdm
+import sys
+if 'ipykernel' in sys.modules:
+    from tqdm.notebook import tqdm
+else:
+    from tqdm import tqdm
 import inspect
 from networkx import Graph, DiGraph
 import functools
@@ -163,8 +167,8 @@ def starmap_with_kwargs(pool, fn, args_iter, kwargs_iter):
     https://stackoverflow.com/questions/45718523/pass-kwargs-to-starmap-while-using-pool-in-python
     """
     args_for_starmap = zip(repeat(fn), args_iter, kwargs_iter)
-    # return pool.starmap(apply_args_and_kwargs, tqdm.tqdm(args_for_starmap, total=len(args_iter)))
-    return list(tqdm.tqdm(pool.istarmap(apply_args_and_kwargs, args_for_starmap), total=len(args_iter)))
+    # return pool.starmap(apply_args_and_kwargs, tqdm(args_for_starmap, total=len(args_iter)))
+    return list(tqdm(pool.istarmap(apply_args_and_kwargs, args_for_starmap), total=len(args_iter)))
 
 def apply_args_and_kwargs(fn, args, kwargs):
     return fn(*args, **kwargs)
