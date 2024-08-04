@@ -209,7 +209,6 @@ def calc_mpc_cpu(
         membership,
         w_it,
         w_ik,
-        w_i,
         mpc,
     ):
 
@@ -219,9 +218,192 @@ def calc_mpc_cpu(
     # Grid stride loop
     for t in range(n_attr):
         for i in range(n_nodes):
-            if w_i[i] > 0.0:
-                k = membership[t]
-                mpc[t] += w_it[i, t] * w_ik[i, k] / (w_i[i] ** 2)
+            k = membership[t]
+            mpc[t] += w_it[i, t] * w_ik[i, k]
+
+def calc_p_it_L(
+        adj_weight,
+        adj_sparse,
+        adj_multi_attr_sparse, 
+        adj_multi_attr_type, 
+        adj_multi_attr_weight, 
+        adj_multi_attr_index,
+        w_i, 
+        L, 
+        p_it
+    ):
+
+    n_global_edges = adj_sparse.shape[0]
+    n_edges = adj_multi_attr_sparse.shape[0]
+    n_nodes, n_attr = p_it.shape
+
+    @numba.njit
+    def calc_p_iv_cpu(
+            i,
+            v,
+        ):
+
+        p_iv = 0.0
+        for global_edge_index in range(n_global_edges):
+            source, target = adj_sparse[global_edge_index]
+
+            if source != i or target != v:
+                continue
+
+            edge_weight = adj_weight[global_edge_index]
+            p_iv = edge_weight / w_i[source]  # Normalize weight to create transition probability P_i(v)
+            break
+
+        return p_iv
+
+    @numba.njit
+    def calc_p_iv_t_cpu(
+            i,
+            v,
+            t,
+        ):
+
+        p_iv_t = 0.0
+        for edge_index in range(n_edges):
+
+            source, target = adj_multi_attr_sparse[edge_index]
+            attr_current = adj_multi_attr_type[edge_index]
+
+            if source != i or attr_current != t or target != v:
+                continue
+
+            attr_weight = adj_multi_attr_weight[edge_index]
+            edge_weight = adj_weight[adj_multi_attr_index[edge_index]]
+            p_iv_t = (attr_weight / edge_weight)
+
+            break
+
+        return p_iv_t
+
+    # Function to recursively calculate p(t|i,L)
+    def calc_p_t_i(i, t, depth):
+
+        if depth == 0:
+            return 0.0
+        
+        sum_v = 0.0
+        
+        for v in range(n_nodes):
+            
+            p_iv = calc_p_iv_cpu(i, v)
+            p_iv_t = calc_p_iv_t_cpu(i, v, t)
+            
+            sum_t_prime = 0.0
+
+            for t_prime in range(n_attr):
+                p_iv_t_prime = calc_p_iv_t_cpu(i, v, t_prime)
+                p_t_v = calc_p_t_i(v, t, depth - 1)
+
+                sum_t_prime += p_iv_t_prime * p_t_v
+
+            sum_v += p_iv * (p_iv_t + sum_t_prime)
+
+        return sum_v
+                
+    # Calculate p(t|i,L) for each node and attribute
+    for i in range(n_nodes):
+        for t in range(n_attr):
+            p_it[i,t] = calc_p_t_i(i, t, L) / L
+
+def calc_p_ik_L(
+        adj_weight,
+        adj_sparse,
+        adj_multi_attr_sparse, 
+        adj_multi_attr_type, 
+        adj_multi_attr_weight, 
+        adj_multi_attr_index,
+        w_i, 
+        L, 
+        membership,
+        n_attr,
+        p_ik
+    ):
+
+    n_global_edges = adj_sparse.shape[0]
+    n_edges = adj_multi_attr_sparse.shape[0]
+    n_nodes, n_communities = p_ik.shape
+
+    @numba.njit
+    def calc_p_iv_cpu(
+            i,
+            v,
+        ):
+
+        p_iv = 0.0
+        for global_edge_index in range(n_global_edges):
+            source, target = adj_sparse[global_edge_index]
+
+            if source != i or target != v:
+                continue
+
+            edge_weight = adj_weight[global_edge_index]
+            p_iv = edge_weight / w_i[source]  # Normalize weight to create transition probability P_i(v)
+            break
+
+        return p_iv
+
+    @numba.njit
+    def calc_p_iv_t_cpu(
+            i,
+            v,
+            t,
+        ):
+
+        p_iv_t = 0.0
+        for edge_index in range(n_edges):
+
+            source, target = adj_multi_attr_sparse[edge_index]
+            attr_current = adj_multi_attr_type[edge_index]
+
+            if source != i or attr_current != t or target != v:
+                continue
+
+            attr_weight = adj_multi_attr_weight[edge_index]
+            edge_weight = adj_weight[adj_multi_attr_index[edge_index]]
+            p_iv_t = (attr_weight / edge_weight)
+
+            break
+
+        return p_iv_t
+
+    # Function to recursively calculate p(k|i,L)
+    def calc_p_k_i(i, k, depth):
+
+        if depth == 0:
+            return 0.0
+        
+        sum_v = 0.0
+        
+        for v in range(n_nodes):
+            
+            p_iv = calc_p_iv_cpu(i, v)
+
+            p_iv_k = 0.0
+            for t in range(n_attr):
+                if membership[t] == k:
+                    p_iv_k += calc_p_iv_t_cpu(i, v, t)
+            
+            sum_t_prime = 0.0
+
+            for t_prime in range(n_attr):
+                p_iv_t_prime = calc_p_iv_t_cpu(i, v, t_prime)
+                p_t_v = calc_p_k_i(v, k, depth - 1)
+
+                sum_t_prime += p_iv_t_prime * p_t_v
+
+            sum_v += p_iv * (p_iv_k + sum_t_prime)
+
+        return sum_v
+                
+    # Calculate p(t|i,L) for each node and attribute
+    for i in range(n_nodes):
+        for k in range(n_communities):
+            p_ik[i,k] = calc_p_k_i(i, k, L) / L
 
 # Sampling evaluation functions
 @numba.njit
@@ -293,15 +475,14 @@ def calc_sample_w_ik_cpu(T_ijk, membership, w_ik):
                         w_ik[i, k] += 1
 
 @numba.njit
-def calc_sample_mpc_cpu(w_it, w_ik, w_i, membership, mpc):
+def calc_sample_mpc_cpu(w_it, w_ik, membership, mpc):
     n_nodes, n_attr = w_it.shape
 
     # Iterate over each sample and walk step
     for i in range(n_nodes):
         for j in range(n_attr):
             attr_community = membership[j]
-            if w_i[i] > 0:
-                mpc[i,j] = (w_ik[i,attr_community] * w_it[i,j]) / (w_i[i]*w_i[i])
+            mpc[i,j] = (w_ik[i,attr_community] * w_it[i,j])
 
 # Optimization functions
 def calc_membership_pairs_cpu(membership: np.ndarray, membership_pairs: np.ndarray, n_communities: int):

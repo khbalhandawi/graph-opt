@@ -282,6 +282,25 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
                 cuda.atomic.add(w_ik[i], k, w_it[i,j])
 
     @cuda.jit
+    def normalize_w_ix(
+            w_ix: DeviceNDArray,
+            w_i: DeviceNDArray,
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_nodes, n_attr = w_ix.shape
+
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_attr, dy):
+                if w_i[i] > 0:
+                    w_ix[i, j] /= w_i[i]
+
+    @cuda.jit
     def calc_mpc(
             membership: DeviceNDArray,
             w_it: DeviceNDArray,
@@ -312,7 +331,7 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
                     k = membership[t]
                     cuda.atomic.add(mpc, t, w_it[i, t] * w_ik[i, k] / (w_i[i] ** 2))
 
-    return edge_postprocess, calc_hhi, calc_w_it, calc_w_i, calc_w_ik, calc_mpc
+    return edge_postprocess, calc_hhi, calc_w_it, calc_w_i, calc_w_ik, normalize_w_ix, calc_mpc
 
 def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Callable]:
 
@@ -498,7 +517,6 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
     def calc_sample_mpc(
             w_it:DeviceNDArray,
             w_ik:DeviceNDArray,
-            w_i:DeviceNDArray,
             membership:DeviceNDArray,
             mpc:DeviceNDArray
         ):
@@ -519,10 +537,7 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
             for j in range(y, n_attr, dy):
 
                 attr_community = membership[j]
-                if w_i[i] > 0:
-                    mpc_ij = (w_ik[i,attr_community] * w_it[i,j]) / (w_i[i]*w_i[i])
-                else:
-                    mpc_ij = 0.0
+                mpc_ij = (w_ik[i,attr_community] * w_it[i,j])
 
                 cuda.atomic.add(mpc, j, mpc_ij)
 

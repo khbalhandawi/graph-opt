@@ -371,6 +371,8 @@ class _TestDeterministic():
     threads_per_block = 8
     use_gpu = False
     update_membership = False
+    walk_length = 1
+    tolerance = 1e-6
 
     @pytest.fixture(scope="function")
     def read_graph(self) -> GraphLoader:
@@ -394,11 +396,21 @@ class _TestDeterministic():
         graph = read_graph
         init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
 
+        test_p_ik = defaultdict(dict)
+        for node_id,(node,ks) in enumerate(test_w_ik.items()):
+            for k in ks.keys():
+
+                if test_w_i[node_id] > 0:
+                    test_p_ik[node_id][k] = test_w_ik[node_id][k] / test_w_i[node_id]
+                else:
+                    test_p_ik[node_id][k] = 0.0
+
         test_class = ExactEvaluator(
             gloader=graph, 
             seed=seed, 
             use_gpu=self.use_gpu,
             n_communities=n_communities, 
+            walk_length=self.walk_length,
             threads_per_block_1D=self.threads_per_block,
             threads_per_block_2D=self.threads_per_block,
             threads_per_block_3D=self.threads_per_block,
@@ -419,11 +431,20 @@ class _TestDeterministic():
         for node_id,(node,attrs) in enumerate(test_w_it.items()):
             for attr in attrs.keys():
                 attr_id = test_class._gloader.attr_key2i[attr]
-                assert abs(test_w_it[node][attr] - test_class.w_it[node_id][attr_id]) < tolerance
+
+                if test_w_i[node_id] > 0:
+                    assert abs(test_p_it[node][attr] - test_class.w_it[node_id][attr_id]) < self.tolerance
+                else:
+                    assert test_class.w_i[node_id] == 0
 
         for node_id,(node,ks) in enumerate(test_w_ik.items()):
             for k in ks.keys():
-                assert abs(test_w_ik[node][k] - test_class.w_ik[node_id][k]) < tolerance
+                
+                if test_w_i[node_id] > 0:
+                    assert abs(test_p_ik[node].get(k,0) - test_class.w_ik[node_id][k]) < self.tolerance
+                else:
+                    assert test_class.w_i[node_id] == 0
+
 
         for node_id,(node,value) in enumerate(test_w_i.items()):
             assert abs(test_w_i[node] - test_class.w_i[node_id]) < tolerance
@@ -510,7 +531,7 @@ class TestDeterministicGPU(_TestDeterministic):
 class _TestStochastic():
 
     n_samples_edge=5000
-    walk_length=1
+    walk_length=3
     threads_per_block=8
     n_walks = 10000
     use_gpu = False
@@ -672,6 +693,43 @@ class _TestStochastic():
             else:
                 assert getattr(test_class,attr["name"]) == test_data[name]
 
+    def test_with_exact(self, read_graph: GraphLoader, example_case_param):
+
+        graph, sampler = read_graph
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_ik, test_p_it = example_case_param
+
+        test_class = SampleEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            seed=seed,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities, 
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        test_class.update_scores_membership(membership_test)
+
+        test_class_exact = ExactEvaluator(
+            gloader=graph,
+            seed=seed,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities, 
+            walk_length=self.walk_length,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        test_class_exact.update_scores(communities_dict=init_communities_test)
+
+        if not self.use_gpu:
+            assert np.allclose(test_class.w_it / (self.walk_length * self.n_walks), test_class_exact.w_it, rtol=1e-1)
+            assert np.allclose(test_class.w_ik / (self.walk_length * self.n_walks), test_class_exact.w_ik, rtol=1e-1)
+        assert np.allclose(test_class.hhi_edges, test_class_exact.hhi_edges, rtol=1e-1)
 
 class TestStochasticCPU(_TestStochastic):
 
@@ -687,7 +745,7 @@ class _TestOptimize():
     epsilon = 0.5
     rtol = 1e-6
     n_samples_edge=500
-    walk_length=6
+    walk_length=3
     threads_per_block=8
     n_walks = 1000
     num_streams = 2

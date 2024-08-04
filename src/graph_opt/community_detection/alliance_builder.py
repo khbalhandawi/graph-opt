@@ -25,12 +25,22 @@ else:
 from .utilities import distinct_communities, generate_membership_combinations, generate_possible_memberships
 from .utilities_cpu import edge_sampler_cpu, spatial_random_walk, attr_sampler_cpu
 from .utilities_cpu import calc_sample_w_i_cpu, calc_sample_w_it_cpu, edge_sample_postprocess_cpu, calc_sample_w_ik_cpu, calc_sample_mpc_cpu
-from .utilities_cpu import edge_postprocess_cpu, calc_hhi_cpu, calc_w_it_cpu, calc_w_ik_cpu, calc_mpc_cpu
+from .utilities_cpu import edge_postprocess_cpu, calc_hhi_cpu, calc_w_it_cpu, calc_w_ik_cpu, calc_mpc_cpu, calc_p_it_L, calc_p_ik_L
 
 from ..utilities import _default_if_none, cpu_gpu_dispatcher, cuda_blocks, safe_log, serialize, deserialize
 
 from typing import Dict, List, Union, Tuple, Optional, NewType
 from ..random_settings import random_state
+
+__all__ = [
+    'GraphLoader',
+    'BaseSampler',
+    'NeighbourSampler',
+    'ExactEvaluator',
+    'SampleEvaluator',
+    'GreedyOptimizer',
+    'BruteForce',
+]
 
 type_cp = NewType('type_cp', Dict[int,float])
 type_cps = NewType('type_cps', Dict[Tuple[int, int], type_cp])
@@ -116,6 +126,10 @@ class GraphLoader:
         self._adj3 = np.empty(0)
         self._adj_dense_index = np.empty(0)
         self._adj = np.empty(0)
+        self._adj_multi_attr = np.zeros((nx.number_of_edges(self.G),), dtype=np.float32)
+        self._adj_multi_attr_type = np.zeros((nx.number_of_edges(self.G),), dtype=np.int32)
+        self._adj_multi_attr_index = np.zeros((nx.number_of_edges(self.G),), dtype=np.int32)
+        self._adj_multi_attr_sparse = np.zeros((nx.number_of_edges(self.G), 2), dtype=np.int32)
 
         self.seed = seed
         self.random_state: Tuple[random.Random,np.random.RandomState] = random_state(self.seed)
@@ -213,11 +227,26 @@ class GraphLoader:
             for u,v,key in self.edge_pair2pairkey_list[edge]:
                 self.edge_pairkey2ui[(u,v,key)] = i
 
+        adj_multi_attr = np.zeros((nx.number_of_edges(self.G),), dtype=np.float32)
+        adj_multi_attr_type = np.zeros((nx.number_of_edges(self.G),), dtype=np.int32)
+        adj_multi_attr_index = np.zeros((nx.number_of_edges(self.G),), dtype=np.int32)
+        adj_multi_attr_sparse = np.zeros((nx.number_of_edges(self.G), 2), dtype=np.int32)
+        for i, (u, v, key, data) in enumerate(self.G.edges(keys=True, data=True)):
+            adj_multi_attr[i] = data['weight']
+            adj_multi_attr_type[i] = self.attr_key2i[data['edge_type']]
+            adj_multi_attr_index[i] = self.edge_pair2ui[(u,v)]
+            adj_multi_attr_sparse[i] = np.array([self.node_spatial_key2i[u], self.node_spatial_key2i[v]])
+
+
         self._cp = cp
         self._adj3 = adj3
         self._adj = adj
         self._adj_dense_index = adj_dense_index    
         self._node_spatial_degree = np.array(self.node_spatial_degree)
+        self._adj_multi_attr = adj_multi_attr
+        self._adj_multi_attr_type = adj_multi_attr_type
+        self._adj_multi_attr_index = adj_multi_attr_index 
+        self._adj_multi_attr_sparse = adj_multi_attr_sparse
 
     def __del__(self):
         if self.use_gpu and self._init_gpu:
@@ -324,7 +353,6 @@ class NeighbourSampler(BaseSampler):
             threads_per_block_1D: Optional[int] = 484,
             threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 22,
             threads_per_block_3D: Optional[Union[int,Tuple[int,int,int]]] = 8,
-            stream: Optional[Any] = None
         ) -> None:
         super().__init__(gloader, seed, use_gpu, threads_per_block_1D, threads_per_block_2D, threads_per_block_3D)
 
@@ -965,12 +993,15 @@ class ExactEvaluator(BaseEvaluator):
             seed: int = None,
             use_gpu: Optional[bool] = False,
             n_communities: Optional[int] = None,
+            walk_length: Optional[int] = 3,
             threads_per_block_1D: Optional[int] = 484,
             threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 22,
             threads_per_block_3D: Optional[Union[int,Tuple[int,int,int]]] = 8,
             stream: Optional[Any] = None
         ) -> None:
-        super().__init__(gloader, seed, use_gpu, n_communities, threads_per_block_1D, threads_per_block_2D, threads_per_block_3D, stream) 
+        self.walk_length = walk_length
+        super().__init__(gloader, seed, use_gpu, n_communities, threads_per_block_1D, threads_per_block_2D, threads_per_block_3D, stream)
+
 
     def _post_init_cpu(self, *args, **kwargs):
         super()._post_init_cpu(args, kwargs)
@@ -982,6 +1013,21 @@ class ExactEvaluator(BaseEvaluator):
         )
 
         self._w_i = np.sum(self._w_it,axis=1)
+
+        calc_p_it_L(
+            self._gloader._adj,
+            self._gloader._adj_sparse,
+            self._gloader._adj_multi_attr_sparse,
+            self._gloader._adj_multi_attr_type,
+            self._gloader._adj_multi_attr,
+            self._gloader._adj_multi_attr_index,
+            self._w_i,
+            L=self.walk_length,
+            p_it=self._w_it
+        )
+
+        return None
+
 
     def _post_init_gpu(
             self,
@@ -1001,7 +1047,8 @@ class ExactEvaluator(BaseEvaluator):
         self.calc_w_it_gpu                  : Callable = kernels[2]
         self.calc_w_i_gpu                   : Callable = kernels[3]
         self.calc_w_ik_gpu                  : Callable = kernels[4]
-        self.calc_mpc_gpu                   : Callable = kernels[5]
+        self.normalize_w_ix_gpu             : Callable = kernels[5]
+        self.calc_mpc_gpu                   : Callable = kernels[6]
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._gloader.n_attr), TPB = self.TPB_2D)
 
@@ -1092,17 +1139,25 @@ class ExactEvaluator(BaseEvaluator):
     def _update_mpc_scores_cpu(self):
 
         self._w_ik = np.zeros((self._gloader.n_nodes_spatial,self._n_communities),dtype=np.float32)
-        calc_w_ik_cpu(
+
+        calc_p_ik_L(
+            self._gloader._adj,
+            self._gloader._adj_sparse,
+            self._gloader._adj_multi_attr_sparse,
+            self._gloader._adj_multi_attr_type,
+            self._gloader._adj_multi_attr,
+            self._gloader._adj_multi_attr_index,
+            self._w_i,
+            L=self.walk_length,
             membership=self._membership,
-            w_it=self._w_it,
-            w_ik=self._w_ik
+            n_attr=self._gloader.n_attr,
+            p_ik=self._w_ik
         )
 
         calc_mpc_cpu(
             membership=self._membership,
             w_it=self._w_it,
             w_ik=self._w_ik,
-            w_i=self._w_i,
             mpc=self._mpc_attrs
         )
 
@@ -1130,6 +1185,20 @@ class ExactEvaluator(BaseEvaluator):
             self._w_ik_d,
             self._w_i_d,
             self._mpc_attrs_d
+        )
+
+        self.stream.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB = self.TPB_2D)
+        self.normalize_w_ix_gpu[blockspergrid,threadsperblock,self.stream](
+            self._w_it_d,
+            self._w_i_d,
+        )
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
+        self.normalize_w_ix_gpu[blockspergrid,threadsperblock,self.stream](
+            self._w_ik_d,
+            self._w_i_d,
         )
 
         self.stream.synchronize()
@@ -1327,10 +1396,11 @@ class SampleEvaluator(BaseEvaluator):
         calc_sample_mpc_cpu(
             w_it = self._w_it,
             w_ik = self._w_ik,
-            w_i = self._w_i,
             membership = self._membership,
             mpc = mpc_array
         )
+
+        mpc_array /= (self._sampler.walk_length * self._sampler.n_walks)**2
 
         self._mpc_attrs = np.nansum(mpc_array,axis=0) / mpc_array.shape[0]
         self._log_mpc_attrs = safe_log(self._mpc_attrs)
@@ -1357,14 +1427,13 @@ class SampleEvaluator(BaseEvaluator):
         self.calc_sample_mpc_gpu[blockspergrid,threadsperblock,self.stream](
             self._w_it_d,
             self._w_ik_d,
-            self._w_i_d,
             self._membership_d,
             self._mpc_attrs_d
         )
 
         self.stream.synchronize()
 
-        mpc_estimate = self._mpc_attrs_d.copy_to_host()
+        mpc_estimate = self._mpc_attrs_d.copy_to_host() / (self._sampler.walk_length * self._sampler.n_walks)**2
         self._mpc_attrs = mpc_estimate / mpc_estimate.shape[0]
         self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
@@ -1440,11 +1509,11 @@ class SampleEvaluator(BaseEvaluator):
 
 
 class EvaluatorManager:
-    def __init__(self, num_streams: int, evaluator: BaseEvaluator):
+    def __init__(self, num_streams: int, evaluator: BaseEvaluator) -> None:
         self.evaluators = [evaluator.copy() for i in range(num_streams)]
         self.locks = [threading.Lock() for _ in range(num_streams)]
 
-    def get_evaluator(self):
+    def get_evaluator(self) -> Tuple[BaseEvaluator, int, threading.Lock]:
         # Example strategy: find the first available evaluator
         for i, lock in enumerate(self.locks):
             if lock.acquire(False):  # Non-blocking
@@ -1455,8 +1524,8 @@ class EvaluatorManager:
 
 class BaseOptimizer(ABC):
     
-    def __init__(self, evaluator: ExactEvaluator | SampleEvaluator, seed: int) -> None:
-        self._evaluator: ExactEvaluator | SampleEvaluator = evaluator
+    def __init__(self, evaluator: BaseEvaluator, seed: int) -> None:
+        self._evaluator = evaluator
         self.seed = seed
 
         self._communities_history = []
