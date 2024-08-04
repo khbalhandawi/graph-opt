@@ -1,9 +1,7 @@
 
 
 import math
-import numba
 import numpy as np
-from pandas import isna
 
 from ..utilities_cuda import cuda, DeviceNDArray, float64, float32, int32, int16, \
     xoroshiro128p_uniform_float32, cumsum_d, searchsorted_d, cumsum_global_2d, searchsorted_global_2d

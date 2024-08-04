@@ -1,0 +1,31 @@
+[project]
+name = "graph-opt"
+version = "0.1.0"
+description = "A library for optimization on graph data structures"
+authors = [
+    {name = "Khalil Al Handawi", email = "khalil.alhandawi@mail.mcgill.ca"},
+]
+dependencies = [
+    "numpy==1.26.*",
+    "networkx>=3.3",
+    "numba>=0.60.0",
+    "tqdm>=4.66.5",
+    "gurobipy>11.0.0",
+]
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.dev-dependencies]
+dev = [
+    "pytest-cov>=6.0.0",
+    "pytest>=8.3.2",
+]

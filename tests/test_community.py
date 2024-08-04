@@ -1,18 +1,13 @@
 from cgi import test
 from collections import defaultdict
 from doctest import debug
-from ipaddress import v4_int_to_packed
 from optparse import Option
-from igraph import Graph
-from matplotlib import use
 import pytest
 import os
 
-from sklearn.covariance import log_likelihood
-
-from ..community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, GreedyOptimizer, BruteForce, multiobjective
-from ..community_detection.utilities import same_community
-from ..utilities import cuda_blocks
+from ..pygraphlib.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, GreedyOptimizer, BruteForce, multiobjective
+from ..pygraphlib.community_detection.utilities import same_community
+from ..pygraphlib.utilities import cuda_blocks
 
 import numpy as np
 import networkx as nx
@@ -22,88 +17,6 @@ from typing import Optional, Tuple, Dict, List
 
 seed = 1234
 tolerance = 1e-6
-
-
-def get_attr_bfs_probabilities(
-        test_class: NeighbourSampler,
-        source_u: str,
-        target_attr: str,
-        max_depth:Optional[int] = 3,
-        current_depth:Optional[int]=1,
-        community_weight:Optional[Dict[str,float]]=None,
-        attr_weight:Optional[Dict[str,float]]=None,
-        all_weight:Optional[Dict[str,float]]=None,
-        previous_edge:Optional[Tuple[str,str, int]]=None
-    ):
-
-    if community_weight is None or all_weight is None or attr_weight is None:
-        community_weight = [0,] * max_depth
-        attr_weight = [0,] * max_depth
-        all_weight = [0,] * max_depth
-
-    if current_depth > max_depth:
-        return community_weight, attr_weight, all_weight
-
-    edges = test_class.edge_u2pairkey_list[source_u]
-    total_weight = sum(test_class.edge_pairkey2data[edge]['weight'] for edge in edges)
-    target_community = test_class.communities_dict[target_attr]
-
-    for u, v, key in edges:
-        curr_edge = (u, v, key)
-        edge_prob = test_class.edge_pair2w[(u,v)] / total_weight
-        edge_type_prob = test_class.edge_pairkey2data[curr_edge]['market_share_percent'] / 100.0
-        edge_type_weight = test_class.edge_pairkey2data[curr_edge]['weight']
-        edge_type = test_class.edge_pairkey2data[curr_edge]['edge_type']
-        current_community = test_class.communities_dict[edge_type]
-
-        previous_edge_type = test_class.edge_pairkey2data[previous_edge]['edge_type'] if previous_edge is not None else None
-        previous_community = test_class.communities_dict.get(previous_edge_type,None)
-
-        if current_community == target_community:
-            community_weight[current_depth - 1] += edge_type_weight
-        if edge_type == target_attr:
-            attr_weight[current_depth - 1] += edge_type_weight
-
-        all_weight[current_depth - 1] += edge_type_weight
-
-        get_attr_bfs_probabilities(
-            test_class,
-            v,
-            target_attr,
-            max_depth,
-            current_depth + 1,
-            community_weight,
-            attr_weight,
-            all_weight,
-            curr_edge
-        )
-
-    return community_weight, attr_weight, all_weight
-
-def get_bfs_probabilities(
-        test_class: NeighbourSampler,
-        max_depth:Optional[int] = 3,
-    ):
-
-    attr_bfs_p = np.zeros((test_class.n_nodes_spatial,test_class.n_attr,max_depth))
-
-    for i, source_node in enumerate(test_class.node_spatial_list):
-        for j, target_attr in enumerate(test_class.attr_list):
-
-            w_community,w_attr,w_total = get_attr_bfs_probabilities(
-                test_class,
-                source_node,
-                target_attr,
-                max_depth
-            )
-
-            wk_i = sum(w_community)
-            wt_i = sum(w_attr)
-            w_i = sum(w_total)
-
-            attr_bfs_p[i,j,:] = (wk_i*wt_i) / (w_i*w_i) if wt_i > 0 else 0.0
-
-    return attr_bfs_p
 
 @pytest.fixture(scope="class",
     params=[
@@ -356,7 +269,7 @@ def test_cuda_blocks():
 ], ids=['case 1', 'case 2', 'case 3', 'case 4'])
 def test_sampler_deterministic(test_vector, threshold, expected):
 
-    from ..utilities_cuda import cumsum_h, searchsorted_h
+    from graph_opt.utilities_cuda import cumsum_h, searchsorted_h
 
     cumsum = np.zeros_like(test_vector)
 
@@ -364,6 +277,7 @@ def test_sampler_deterministic(test_vector, threshold, expected):
     chosen = searchsorted_h(cumsum,threshold)
 
     assert chosen == expected
+
 
 class _TestDeterministic():
     num_streams = 4
@@ -384,13 +298,11 @@ class _TestDeterministic():
 
         graph = GraphLoader(
             MG = MG,
-            seed = seed,
             use_gpu = self.use_gpu
         )
 
         return graph
 
-    @pytest.mark.dependency()
     def test_evaluator(self, read_graph: GraphLoader, example_case_param):
 
         graph = read_graph
@@ -407,7 +319,6 @@ class _TestDeterministic():
 
         test_class = ExactEvaluator(
             gloader=graph, 
-            seed=seed, 
             use_gpu=self.use_gpu,
             n_communities=n_communities, 
             walk_length=self.walk_length,
@@ -458,7 +369,6 @@ class _TestDeterministic():
 
         test_class = ExactEvaluator(
             gloader=graph, 
-            seed=seed, 
             use_gpu=self.use_gpu,
             n_communities=n_communities, 
             threads_per_block_1D=self.threads_per_block,
@@ -492,7 +402,6 @@ class _TestDeterministic():
 
         test_class = ExactEvaluator(
             gloader=graph, 
-            seed=seed, 
             use_gpu=self.use_gpu,
             n_communities=n_communities, 
             threads_per_block_1D=self.threads_per_block,
@@ -531,7 +440,7 @@ class TestDeterministicGPU(_TestDeterministic):
 class _TestStochastic():
 
     n_samples_edge=5000
-    walk_length=3
+    walk_length=1
     threads_per_block=8
     n_walks = 10000
     use_gpu = False
@@ -548,7 +457,6 @@ class _TestStochastic():
 
         graph = GraphLoader(
             MG = MG,
-            seed = seed,
             use_gpu = self.use_gpu
         )
 
@@ -565,7 +473,6 @@ class _TestStochastic():
 
         return graph, sampler
 
-    @pytest.mark.dependency()
     def test_evaluator(self, read_graph: GraphLoader, example_case_param):
 
         graph, sampler = read_graph
@@ -583,7 +490,6 @@ class _TestStochastic():
         test_class = SampleEvaluator(
             gloader=graph,
             sampler=sampler,
-            seed=seed,
             use_gpu=self.use_gpu,
             n_communities=n_communities, 
             threads_per_block_1D=self.threads_per_block,
@@ -631,7 +537,6 @@ class _TestStochastic():
         test_class = SampleEvaluator(
             gloader=graph,
             sampler=sampler,
-            seed=seed, 
             use_gpu=self.use_gpu,
             n_communities=n_communities, 
             threads_per_block_1D=self.threads_per_block,
@@ -666,7 +571,6 @@ class _TestStochastic():
         test_class = SampleEvaluator(
             gloader=graph,
             sampler=sampler,
-            seed=seed, 
             use_gpu=self.use_gpu,
             n_communities=n_communities, 
             threads_per_block_1D=self.threads_per_block,
@@ -701,7 +605,6 @@ class _TestStochastic():
         test_class = SampleEvaluator(
             gloader=graph,
             sampler=sampler,
-            seed=seed,
             use_gpu=self.use_gpu,
             n_communities=n_communities, 
             threads_per_block_1D=self.threads_per_block,
@@ -714,7 +617,6 @@ class _TestStochastic():
 
         test_class_exact = ExactEvaluator(
             gloader=graph,
-            seed=seed,
             use_gpu=self.use_gpu,
             n_communities=n_communities, 
             walk_length=self.walk_length,
@@ -731,9 +633,11 @@ class _TestStochastic():
             assert np.allclose(test_class.w_ik / (self.walk_length * self.n_walks), test_class_exact.w_ik, rtol=1e-1)
         assert np.allclose(test_class.hhi_edges, test_class_exact.hhi_edges, rtol=1e-1)
 
+
 class TestStochasticCPU(_TestStochastic):
 
     use_gpu = False
+
 
 class TestStochasticGPU(_TestStochastic):
 
@@ -760,7 +664,6 @@ class _TestOptimize():
 
         graph = GraphLoader(
             MG = MG,
-            seed = seed,
             use_gpu = self.use_gpu
         )
 
@@ -801,7 +704,6 @@ class _TestOptimize():
             return SampleEvaluator(
                 gloader=graph,
                 sampler=sampler,
-                seed=seed,
                 use_gpu=self.use_gpu,
                 n_communities=None, 
                 threads_per_block_1D=self.threads_per_block,
@@ -813,8 +715,8 @@ class _TestOptimize():
         elif param["type"] == 'exact':
             return ExactEvaluator(
                 gloader=graph,
-                seed=seed,
                 use_gpu=self.use_gpu,
+                walk_length=self.walk_length,
                 n_communities=5, 
                 threads_per_block_1D=self.threads_per_block,
                 threads_per_block_2D=self.threads_per_block,
@@ -882,6 +784,7 @@ class _TestOptimize():
         f = multiobjective(f1,f2,weights)
 
         assert optimizer.f == f
+
 
 class TestOptimizeGPU(_TestOptimize):
 

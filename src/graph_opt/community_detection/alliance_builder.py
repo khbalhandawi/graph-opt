@@ -34,7 +34,6 @@ from ..random_settings import random_state
 
 __all__ = [
     'GraphLoader',
-    'BaseSampler',
     'NeighbourSampler',
     'ExactEvaluator',
     'SampleEvaluator',
@@ -90,7 +89,6 @@ class GraphLoader:
     def __init__(
             self,
             MG: MultiDiGraph,
-            seed: int = None,
             use_gpu: Optional[bool] = False,
         ) -> None:
 
@@ -130,9 +128,6 @@ class GraphLoader:
         self._adj_multi_attr_type = np.zeros((nx.number_of_edges(self.G),), dtype=np.int32)
         self._adj_multi_attr_index = np.zeros((nx.number_of_edges(self.G),), dtype=np.int32)
         self._adj_multi_attr_sparse = np.zeros((nx.number_of_edges(self.G), 2), dtype=np.int32)
-
-        self.seed = seed
-        self.random_state: Tuple[random.Random,np.random.RandomState] = random_state(self.seed)
 
         self.use_gpu = use_gpu
         self._init_gpu = False
@@ -616,7 +611,6 @@ class BaseEvaluator(ABC):
     def __init__(
             self,
             gloader: GraphLoader,
-            seed: int = None,
             use_gpu: Optional[bool] = False,
             n_communities: Optional[int] = None,
             threads_per_block_1D: int = 484,
@@ -642,9 +636,6 @@ class BaseEvaluator(ABC):
         self._edges_communities = np.empty((self._gloader.n_unique_edges,0))
         self._distinct_communities = np.empty(0)
         self._communities_dict = {}
-
-        self.seed = seed
-        self.random_state: Tuple[random.Random,np.random.RandomState] = random_state(self.seed)
 
         self.use_gpu = use_gpu
         self._init_gpu = False
@@ -990,7 +981,6 @@ class ExactEvaluator(BaseEvaluator):
     def __init__(
             self,
             gloader: GraphLoader,
-            seed: int = None,
             use_gpu: Optional[bool] = False,
             n_communities: Optional[int] = None,
             walk_length: Optional[int] = 3,
@@ -1000,7 +990,7 @@ class ExactEvaluator(BaseEvaluator):
             stream: Optional[Any] = None
         ) -> None:
         self.walk_length = walk_length
-        super().__init__(gloader, seed, use_gpu, n_communities, threads_per_block_1D, threads_per_block_2D, threads_per_block_3D, stream)
+        super().__init__(gloader, use_gpu, n_communities, threads_per_block_1D, threads_per_block_2D, threads_per_block_3D, stream)
 
 
     def _post_init_cpu(self, *args, **kwargs):
@@ -1214,8 +1204,8 @@ class ExactEvaluator(BaseEvaluator):
         if self.use_gpu:
             return self.__class__(
                 gloader=self._gloader,
-                seed=self.seed,
                 use_gpu=self.use_gpu,
+                walk_length=self.walk_length,
                 n_communities=self._n_communities,
                 threads_per_block_1D=self.TPB_1D,
                 threads_per_block_2D=self.TPB_2D,
@@ -1225,8 +1215,8 @@ class ExactEvaluator(BaseEvaluator):
         else:
             return self.__class__(
                 gloader=self._gloader,
-                seed=self.seed,
                 use_gpu=self.use_gpu,
+                walk_length=self.walk_length,
                 n_communities=self._n_communities
             )
     
@@ -1249,7 +1239,6 @@ class SampleEvaluator(BaseEvaluator):
             self,
             gloader: GraphLoader,
             sampler: NeighbourSampler,
-            seed: int = None,
             use_gpu: bool | None = False,
             n_communities: Optional[int] = None,
             threads_per_block_1D: Optional[int] = 484,
@@ -1261,7 +1250,6 @@ class SampleEvaluator(BaseEvaluator):
         self._sampler = sampler
         super().__init__(
             gloader = gloader,
-            seed = seed,
             use_gpu = use_gpu,
             n_communities = n_communities,
             threads_per_block_1D = threads_per_block_1D,
@@ -1476,7 +1464,6 @@ class SampleEvaluator(BaseEvaluator):
             return self.__class__(
                 gloader=self._gloader,
                 sampler=self._sampler,
-                seed=self.seed,
                 use_gpu=self.use_gpu,
                 n_communities=self._n_communities,
                 threads_per_block_1D=self.TPB_1D,
@@ -1488,7 +1475,6 @@ class SampleEvaluator(BaseEvaluator):
             return self.__class__(
                 gloader=self._gloader,
                 sampler=self._sampler,
-                seed=self.seed,
                 use_gpu=self.use_gpu,
                 n_communities=self._n_communities
             )
@@ -1660,7 +1646,7 @@ class BruteForce(BaseOptimizer):
         with tqdm(total=len(self._memberships), desc="Outer Loop", position=0, leave=False) as pbar_outer:
     
             if multiprocess:
-                vargs_iterator = [membership for i,membership in enumerate(self._memberships)]
+                vargs_iterator = [(membership,) for i,membership in enumerate(self._memberships)]
                 vkwargs_iterator = [{},] * len(vargs_iterator)
                 fargs = [
                     self.weights, 
@@ -1701,8 +1687,8 @@ class BruteForce(BaseOptimizer):
                     for batch_index, (membership) in enumerate(self._memberships):
                         future = executor.submit(
                             self._process_batch_thread,
-                            self.weights, 
                             membership,
+                            self.weights, 
                             self._eval_manager, 
                         )
                         futures.append(future)
@@ -1734,8 +1720,8 @@ class BruteForce(BaseOptimizer):
 
     @staticmethod
     def _process_batch(
-            weights: Tuple[float,float],
             membership: np.ndarray,
+            weights: Tuple[float,float],
             evaluator: ExactEvaluator | SampleEvaluator,
         ):
         # Perform stochastic evaluation using the selected stream
@@ -1750,8 +1736,8 @@ class BruteForce(BaseOptimizer):
 
     @staticmethod
     def _process_batch_thread(
-            weights: Tuple[float,float],
             membership: np.ndarray,
+            weights: Tuple[float,float],
             eval_manager: EvaluatorManager,
         ):
 
