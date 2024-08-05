@@ -5,15 +5,15 @@ from optparse import Option
 import pytest
 import os
 
-from ..pygraphlib.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, GreedyOptimizer, BruteForce, multiobjective
-from ..pygraphlib.community_detection.utilities import same_community
-from ..pygraphlib.utilities import cuda_blocks
+from graph_opt.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, GreedyOptimizer, BruteForce, ExactOptimizer, multiobjective
+from graph_opt.community_detection.utilities import same_community
+from graph_opt.utilities import cuda_blocks
 
 import numpy as np
 import networkx as nx
 import os
 
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Union, Any
 
 seed = 1234
 tolerance = 1e-6
@@ -246,7 +246,8 @@ def optimization_cases(request):
     ({'AT': 0, 'BT': 1, 'CT': 0, 'HT': 1, 'VT': 0}, {'AT': 2, 'BT': 0, 'CT': 2, 'HT': 0, 'VT': 2}, True),
     ({'AT': 0, 'BT': 1, 'CT': 0, 'HT': 1, 'VT': 0}, {'AT': 2, 'BT': 1, 'CT': 2, 'HT': 1, 'VT': 2}, True),
     ({'AT': 0, 'BT': 1, 'CT': 0, 'HT': 1, 'VT': 0}, {'AT': 1, 'BT': 2, 'CT': 1, 'HT': 0, 'VT': 1}, False),
-], ids=['case 1', 'case 2', 'case 3', 'case 4'])
+    ({'AT': 0, 'BT': 0, 'CT': 0, 'HT': 2, 'VT': 2}, {'AT': 0, 'BT': 0, 'CT': 0, 'HT': 0, 'VT': 0}, False),
+], ids=['case 1', 'case 2', 'case 3', 'case 4', 'case 5'])
 def test_same_community(dict1, dict2, expected):
     assert same_community(dict1, dict2) == expected
 
@@ -649,7 +650,7 @@ class _TestOptimize():
     epsilon = 0.5
     rtol = 1e-6
     n_samples_edge=500
-    walk_length=3
+    walk_length=2
     threads_per_block=8
     n_walks = 1000
     num_streams = 2
@@ -694,36 +695,56 @@ class _TestOptimize():
             'neighbourhood_sample',
         ]
     )
-    def get_evaluator(self, read_graph: Tuple[GraphLoader, NeighbourSampler], request) -> ExactEvaluator:
+    def get_evaluator(
+            self, 
+            read_graph: Tuple[GraphLoader, NeighbourSampler], 
+            get_sample_evaluator: SampleEvaluator,
+            get_exact_evaluator: ExactEvaluator,
+            request
+        ) -> ExactEvaluator | SampleEvaluator:
 
         graph, sampler = read_graph
 
         param = request.param
 
         if param["type"] == 'sample':
-            return SampleEvaluator(
-                gloader=graph,
-                sampler=sampler,
-                use_gpu=self.use_gpu,
-                n_communities=None, 
-                threads_per_block_1D=self.threads_per_block,
-                threads_per_block_2D=self.threads_per_block,
-                threads_per_block_3D=self.threads_per_block,
-                stream=None
-            )
+            return get_sample_evaluator
 
         elif param["type"] == 'exact':
-            return ExactEvaluator(
-                gloader=graph,
-                use_gpu=self.use_gpu,
-                walk_length=self.walk_length,
-                n_communities=5, 
-                threads_per_block_1D=self.threads_per_block,
-                threads_per_block_2D=self.threads_per_block,
-                threads_per_block_3D=self.threads_per_block,
-                stream=None
-            )
+            return get_exact_evaluator
 
+    @pytest.fixture(scope="function")
+    def get_sample_evaluator(self, read_graph: Tuple[GraphLoader, NeighbourSampler]) -> SampleEvaluator:
+
+        graph, sampler = read_graph
+
+        return SampleEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            use_gpu=self.use_gpu,
+            n_communities=None, 
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+    @pytest.fixture(scope="function")
+    def get_exact_evaluator(self, read_graph: Tuple[GraphLoader, NeighbourSampler]) -> ExactEvaluator:
+
+        graph, sampler = read_graph
+
+        return SampleEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            use_gpu=self.use_gpu,
+            n_communities=None, 
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+    
     @pytest.mark.parametrize("n_sample_pairs", [None, 8], ids=['no sampling', '8 samples'])
     def test_greedy_optimize(
         self, 
@@ -750,6 +771,19 @@ class _TestOptimize():
             n_sample_pairs = n_sample_pairs,
             multiprocess=self.use_multiprocessing
         )
+
+        # evaluator.update_scores(test_communities_dict)
+        # f1 = -np.mean(list(evaluator.hhi.values()))
+        # f2 = np.mean(list(evaluator.log_mpc.values()))
+        # f = multiobjective(f1,f2,weights)
+
+        # fs = []
+        # for membership in optimizer.membership_pairs.values():
+        #     evaluator.update_scores_membership(membership)
+        #     f1 = -np.mean(list(evaluator.hhi.values()))
+        #     f2 = np.mean(list(evaluator.log_mpc.values()))
+        #     f = multiobjective(f1,f2,weights)
+        #     fs.append(f)
 
         assert same_community(optimizer.communities_dict, test_communities_dict)
 
@@ -785,6 +819,204 @@ class _TestOptimize():
 
         assert optimizer.f == f
 
+    def test_exact_optimize(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_sample_evaluator: SampleEvaluator, 
+        tmp_path
+    ):
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_sample_evaluator
+
+        directory = tmp_path / "test_save"
+        directory.mkdir()
+
+        model_settings = {
+            'MIPGap': 1e-12,  # Stop if the gap is within 0.01%
+            'Heuristics': 0.9,  # Use more aggressive heuristics
+            'MIPFocus': 3,  # Focus on finding feasible solutions
+            'VarBranch': 2,  # More aggressive variable branching
+            'Presolve': 0 # Turn off presolve
+        }
+
+        optimizer = ExactOptimizer(
+            evaluator=evaluator,
+            seed=seed,
+            weights=weights,
+            log_dir=directory,
+            log_interval=1,
+            model_settings=model_settings,
+        )
+
+        optimizer.build_model()
+        optimizer.optimize()
+
+        evaluator.update_scores(optimizer.communities_dict)
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.mpc.values()))
+        f = multiobjective(f1,f2,weights)
+
+        assert abs(optimizer.f - f) < 1e-6
+
+        evaluator.update_scores(test_communities_dict)
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.mpc.values()))
+        f = multiobjective(f1,f2,weights)
+
+        assert abs(optimizer.f - f) < 1e-6
+
+
+    def test_save_load_exact(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_sample_evaluator: SampleEvaluator | ExactEvaluator,
+        tmp_path
+    ):
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_sample_evaluator
+
+        directory = tmp_path / "test_save"
+        directory.mkdir()
+
+        model_settings = {
+            'MIPGap': 1e-12,  # Stop if the gap is within 0.01%
+            'Heuristics': 0.9,  # Use more aggressive heuristics
+            'MIPFocus': 3,  # Focus on finding feasible solutions
+            'VarBranch': 2,  # More aggressive variable branching
+            'Presolve': 0 # Turn off presolve
+        }
+
+        optimizer = ExactOptimizer(
+            evaluator=evaluator,
+            seed=seed,
+            weights=weights,
+            log_dir=directory,
+            log_interval=1,
+            model_settings=model_settings,
+        )
+
+        optimizer.build_model()
+        optimizer.optimize()
+
+        optimizer.save(directory=directory)
+
+        data_to_load = {
+            'communities_history':  {"name" : 'communities_history', "dtype" : List[Dict[str,int]]},
+            'f_history':            {"name" : 'f_history', "dtype" : list},
+            'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
+            'logs':                 {"name" : 'logs', "dtype" : List[Tuple[float,float,float,float,float,float]]},
+        }
+
+        test_data = {}
+        for name, attr in data_to_load.items():
+            test_data[name] = getattr(optimizer,attr["name"])
+
+        del optimizer
+
+        optimizer = ExactOptimizer(
+            evaluator=evaluator,
+            seed=seed,
+            weights=weights,
+            log_dir=directory,
+            log_interval=1,
+            model_settings=model_settings,
+        )
+        
+        optimizer.load(directory=directory)
+
+        for name, attr in data_to_load.items():
+            if attr["dtype"] == np.ndarray:
+                assert np.allclose(getattr(optimizer,attr["name"]), test_data[name], rtol=1e-1)
+            elif attr["dtype"] == list:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    assert abs(value - test_value) < 1e-6
+            elif attr["dtype"] == List[Dict[str,int]]:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    assert value == test_value
+            elif attr["dtype"] == List[Tuple[float,float]]:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    for value_i, test_value_i in zip(value, test_value):
+                        assert abs(value_i - test_value_i) < 1e-6
+            elif attr["dtype"] == List[Dict[int,Any]]:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    for key, test_key in zip(value.keys(), test_value.keys()):
+                        assert key == test_key
+                        for value_i, test_value_i in zip(value[key].values(), test_value[test_key].values()):
+                            assert abs(value_i - test_value_i) < 1e-6
+
+    def test_save_load_brute(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_evaluator: SampleEvaluator | ExactEvaluator,
+        tmp_path
+    ):
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_evaluator
+
+        optimizer = BruteForce(
+            evaluator=evaluator,
+            seed=seed,
+            num_streams=self.num_streams,
+            weights=weights,
+            use_gpu=self.use_gpu
+        )
+
+        optimizer.optimize(
+            max_iterations = 1000,
+            rtol = self.rtol,
+            multiprocess=self.use_multiprocessing,
+        )
+
+        directory = tmp_path / "test_save"
+        directory.mkdir()
+
+        optimizer.save(directory=directory)
+
+        data_to_load = {
+            'communities_history':  {"name" : 'communities_history', "dtype" : List[Dict[str,int]]},
+            'f_history':            {"name" : 'f_history', "dtype" : list},
+            'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
+            'results_library':      {"name" : 'results_library', "dtype" : Dict[int,Any]},
+        }
+
+        test_data = {}
+        for name, attr in data_to_load.items():
+            test_data[name] = getattr(optimizer,attr["name"])
+
+        del optimizer
+
+        optimizer = BruteForce(
+            evaluator=evaluator,
+            seed=seed,
+            num_streams=self.num_streams,
+            weights=weights,
+            use_gpu=self.use_gpu
+        )
+        
+        optimizer.load(directory=directory)
+
+        for name, attr in data_to_load.items():
+            if attr["dtype"] == np.ndarray:
+                assert np.allclose(getattr(optimizer,attr["name"]), test_data[name], rtol=1e-1)
+            elif attr["dtype"] == list:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    assert abs(value - test_value) < 1e-6
+            elif attr["dtype"] == List[Dict[str,int]]:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    assert value == test_value
+            elif attr["dtype"] == List[Tuple[float,float]]:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    for value_i, test_value_i in zip(value, test_value):
+                        assert abs(value_i - test_value_i) < 1e-6
+            elif attr["dtype"] == List[Dict[int,Any]]:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    for key, test_key in zip(value.keys(), test_value.keys()):
+                        assert key == test_key
+                        for value_i, test_value_i in zip(value[key].values(), test_value[test_key].values()):
+                            assert abs(value_i - test_value_i) < 1e-6
 
 class TestOptimizeGPU(_TestOptimize):
 

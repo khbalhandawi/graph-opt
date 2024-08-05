@@ -162,21 +162,24 @@ class myPool(mpp.Pool):
             ))
         return (item for chunk in result for item in chunk)
 
-def starmap_with_kwargs(pool, fn, args_iter, kwargs_iter):
+def starmap_with_kwargs(pool, fn, args_iter, kwargs_iter, show_pbar):
     """
     https://stackoverflow.com/questions/45718523/pass-kwargs-to-starmap-while-using-pool-in-python
     """
     args_for_starmap = zip(repeat(fn), args_iter, kwargs_iter)
     # return pool.starmap(apply_args_and_kwargs, tqdm(args_for_starmap, total=len(args_iter)))
-    return list(tqdm(pool.istarmap(apply_args_and_kwargs, args_for_starmap), total=len(args_iter)))
-
+    if show_pbar:
+        return list(tqdm(pool.istarmap(apply_args_and_kwargs, args_for_starmap), total=len(args_iter)))
+    else:
+        return list(pool.istarmap(apply_args_and_kwargs, args_for_starmap))
+    
 def apply_args_and_kwargs(fn, args, kwargs):
     return fn(*args, **kwargs)
 
 def parallel_sampling(func:Callable,
     vargs_iterator:List[List[Any]]=[]   ,vkwargs_iterator:List[Dict[str, Any]]=None,
     fargs:List[Any]=[]                  ,fkwargs:Dict[str, Any]=None,
-    n_jobs:int=1):
+    n_jobs:int=1,show_pbar:bool=True,verbose:bool=False) -> List[Any]:
     """
     function used to run parallel computations
 
@@ -194,6 +197,10 @@ def parallel_sampling(func:Callable,
         fixed keyword arguments, by default None
     n_jobs : int, optional
         number of parallel threads, by default 1
+    show_pbar : bool, optional
+        show progress bar, by default True
+    verbose : bool, optional
+        show verbose output, by default False
 
     Returns
     -------
@@ -212,10 +219,11 @@ def parallel_sampling(func:Callable,
     if n_jobs > 1:
         n_tasks_child = math.ceil(len(args_iter)/n_jobs)
         reset_every = math.floor(n_tasks_child*(1/100))
-        print('Start method: %s\nMax tasks per child: %i' %(mp.get_start_method(),reset_every))
+        if verbose:
+            print('Start method: %s\nMax tasks per child: %i' %(mp.get_start_method(),reset_every))
         pool = myPool(processes=n_jobs)#,maxtasksperchild=reset_every)
 
-        results = starmap_with_kwargs(pool, func, args_iter, kwargs_iter)
+        results = starmap_with_kwargs(pool, func, args_iter, kwargs_iter, show_pbar)
         pool.terminate()
 
         """
@@ -251,8 +259,7 @@ def serialize(input:Union[list,np.ndarray,dict,type]):
         string formatted
     """
     if isinstance(input, dict):
-        return {serialize(key): serialize(value)
-                for key, value in input.items()}
+        return {serialize(key): serialize(value) for key, value in input.items()}
     elif isinstance(input, (list,tuple,np.ndarray)):
         return [serialize(element) for element in input]
     elif isinstance(input,np.integer):

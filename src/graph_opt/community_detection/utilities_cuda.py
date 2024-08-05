@@ -334,7 +334,35 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
 def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Callable]:
 
     @cuda.jit
-    def edge_sample_postprocess(
+    def edge_sample_p_et(
+            samples:DeviceNDArray,
+            counts:DeviceNDArray,
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_unique_edges, n_attr = counts.shape
+
+        # initialize counts
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_attr, dy):
+                counts[i,j] = 0
+
+        cuda.syncthreads()
+
+        n_unique_edges, n_samples = samples.shape
+
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_samples, dy):
+
+                cuda.atomic.add(counts[i], samples[i, j], 1)  # Pass the array and index separately
+
+    @cuda.jit
+    def edge_sample_p_ek(
             samples:DeviceNDArray,
             membership:DeviceNDArray,
             counts:DeviceNDArray,
@@ -539,7 +567,7 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
 
                 cuda.atomic.add(mpc, j, mpc_ij)
 
-    return edge_sample_postprocess, calc_sample_hhi, init_sample_w_i, calc_sample_w_i, calc_sample_w_it, calc_sample_w_ik, calc_sample_mpc
+    return edge_sample_p_et, edge_sample_p_ek, calc_sample_hhi, init_sample_w_i, calc_sample_w_i, calc_sample_w_it, calc_sample_w_ik, calc_sample_mpc
 
 def define_cuda_kernels_sampling_utils() -> Tuple[Callable, Callable]:
     

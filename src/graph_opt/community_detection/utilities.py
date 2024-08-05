@@ -8,33 +8,39 @@ def distinct_communities(community_dict: Dict[str,int]) -> Tuple[List[int], int]
 
     return distinct_communities_list, n_communities
 
-def same_community(dict1: Dict[str,int], dict2: Dict[str,int]) -> bool:
-    """_summary_
-
-    Parameters
-    ----------
-    dict1 : Dict[str,int]
-        the first dictionary
-    dict2 : Dict[str,int]
-        the second dictionary
-
-    Returns
-    -------
-    bool
-        whether the two dictionaries have the same communities
+def same_community(dict1: dict, dict2: dict) -> bool:
     """
-    # Create a mapping from dict1 values to dict2 values
-    mapping = {}
+    Check if two dictionaries map their keys to the same community ids.
+
+    Parameters:
+    - dict1 (dict): First dictionary of community assignments.
+    - dict2 (dict): Second dictionary of community assignments.
+
+    Returns:
+    - bool: True if both dictionaries represent the same community structure, False otherwise.
+    """
+    if set(dict1.keys()) != set(dict2.keys()):
+        return False  # Ensures both dictionaries have the same keys
+
+    value_map = {}
+    reverse_map = {}
+
     for key in dict1:
-        if key in dict2:
-            if dict1[key] in mapping:
-                if mapping[dict1[key]] != dict2[key]:
-                    return False
-            else:
-                mapping[dict1[key]] = dict2[key]
+        val1 = dict1[key]
+        val2 = dict2[key]
+
+        if val1 in value_map:
+            if value_map[val1] != val2:
+                return False
         else:
-            # Key is not in dict2, so grouping is inconsistent
-            return False
+            value_map[val1] = val2
+
+        if val2 in reverse_map:
+            if reverse_map[val2] != val1:
+                return False
+        else:
+            reverse_map[val2] = val1
+
     return True
 
 def partition_to_set_of_sets(membership: np.ndarray) -> Set[frozenset]:

@@ -1,9 +1,9 @@
 import numpy as np
-from ..pygraphlib.utilities import dict2array
+from graph_opt.utilities import dict2array
 import pytest
 
 from typing import Dict, Union, Any
-from ..pygraphlib.community_detection.utilities import generate_membership_combinations, generate_possible_memberships
+from graph_opt.community_detection.utilities import generate_membership_combinations, generate_possible_memberships
 
 DictType = Dict[Any,Union[Any,'DictType']]
 
