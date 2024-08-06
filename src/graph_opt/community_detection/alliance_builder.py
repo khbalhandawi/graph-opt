@@ -708,6 +708,7 @@ class BaseEvaluator(ABC):
 
         self.calc_w_k_edges_gpu : Callable = kernels[0]
         self.calc_w_k_nodes_gpu : Callable = kernels[1]
+        self.calc_w_k_log_gpu   : Callable = kernels[2]
 
     @property
     def membership(self)->np.ndarray:
@@ -845,7 +846,7 @@ class BaseEvaluator(ABC):
         pass
 
     def _update_community_weights_cpu(self):
-        self._w_k = np.sum(self._w_ik,axis=0) / self._gloader.n_nodes_spatial \
+        self._w_k = safe_log(np.sum(self._w_ik,axis=0) / self._gloader.n_nodes_spatial) \
             + np.sum(self._edges_communities,axis=0) / self._gloader.n_unique_edges
 
     def _update_community_weights_gpu(self):
@@ -860,6 +861,13 @@ class BaseEvaluator(ABC):
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
         self.calc_w_k_nodes_gpu[blockspergrid,threadsperblock,self.stream](
             self._w_ik_d,
+            self._w_k_d
+        )
+
+        self.stream.synchronize()
+
+        n_states, threadsperblock, blockspergrid = cuda_blocks(dims=(self._n_communities,), TPB = self.TPB_1D)
+        self.calc_w_k_log_gpu[blockspergrid,threadsperblock,self.stream](
             self._w_k_d
         )
 
@@ -921,20 +929,20 @@ class BaseEvaluator(ABC):
 
     def copy_attributes(self, target: 'BaseEvaluator'):
         # Copy common attributes
-        target._edges_communities = self.edges_communities.copy()
-        target._hhi = deepcopy(self.hhi)
-        target._log_mpc = deepcopy(self.log_mpc.copy())
-        target._mpc = deepcopy(self.mpc.copy())
-        target.membership = self.membership.copy()
-        target._communities_dict = deepcopy(self.communities_dict)
+        target._edges_communities = self.edges_communities
+        target._hhi = self.hhi
+        target._log_mpc = self.log_mpc
+        target._mpc = self.mpc
+        target.membership = self.membership
+        target._communities_dict = self.communities_dict
 
-        target._mpc_attrs = self.mpc_attrs.copy()
-        target._log_mpc_attrs = self.log_mpc_attrs.copy()
-        target._hhi_edges = self.hhi_edges.copy()
-        target._w_it = self.w_it.copy()
-        target._w_i = self.w_i.copy()
-        target._w_ik = self.w_ik.copy()
-        target._w_k = self.w_k.copy()
+        target._mpc_attrs = self.mpc_attrs
+        target._log_mpc_attrs = self.log_mpc_attrs
+        target._hhi_edges = self.hhi_edges
+        target._w_it = self.w_it
+        target._w_i = self.w_i
+        target._w_ik = self.w_ik
+        target._w_k = self.w_k
 
     def copy_gpu_attributes(self, target: 'BaseEvaluator', stream: Any):
         # Copy GPU-specific attributes
@@ -947,6 +955,8 @@ class BaseEvaluator(ABC):
         target._edges_communities_d = self.cuda.to_device(self.edges_communities, stream=stream)
         target._hhi_edges_d = self.cuda.to_device(self.hhi_edges, stream=stream)
         target._membership_d = self.cuda.to_device(self.membership, stream=stream)
+
+        stream.synchronize()
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -966,6 +976,7 @@ class BaseEvaluator(ABC):
 
             del state['calc_w_k_edges_gpu']
             del state['calc_w_k_nodes_gpu']
+            del state['calc_w_k_log_gpu']
         
         return state
     
@@ -1219,7 +1230,7 @@ class ExactEvaluator(BaseEvaluator):
 
         self.stream.synchronize()
 
-        self._mpc_attrs = self._mpc_attrs_d.copy_to_host()
+        self._mpc_attrs = self._mpc_attrs_d.copy_to_host() / self._gloader.n_nodes_spatial
         self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         for attr in self._gloader.attr_list:
@@ -1468,7 +1479,7 @@ class SampleEvaluator(BaseEvaluator):
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
 
         self.calc_sample_w_ik_gpu[blockspergrid,threadsperblock,self.stream](
-             self._sampler._T_d,
+            self._sampler._T_d,
             self._membership_d,
             self._w_ik_d
         )
@@ -1485,9 +1496,9 @@ class SampleEvaluator(BaseEvaluator):
         )
 
         self.stream.synchronize()
-
-        mpc_estimate = self._mpc_attrs_d.copy_to_host() / (self._sampler.walk_length * self._sampler.n_walks)**2
-        self._mpc_attrs = mpc_estimate / mpc_estimate.shape[0]
+        mpc_estimate = self._mpc_attrs_d.copy_to_host() / self._gloader.n_nodes_spatial
+        mpc_estimate /= (self._sampler.walk_length * self._sampler.n_walks)**2
+        self._mpc_attrs = mpc_estimate
         self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         # Update the mpc
@@ -1547,7 +1558,7 @@ class SampleEvaluator(BaseEvaluator):
     def copy_attributes(self, target: 'SampleEvaluator'):
         super().copy_attributes(target)
 
-        target._edges_attrs = self.edges_attrs.copy()
+        target._edges_attrs = self.edges_attrs
 
     def copy_gpu_attributes(self, target: 'SampleEvaluator', stream: Any):
         super().copy_gpu_attributes(target, stream)
@@ -1578,7 +1589,7 @@ class EvaluatorManager:
     def get_evaluator(self) -> Tuple[BaseEvaluator, int, threading.Lock]:
         # Example strategy: find the first available evaluator
         for i, lock in enumerate(self.locks):
-            if lock.acquire(False):  # Non-blocking
+            if lock.acquire(True):  # blocking
                 return self.evaluators[i], i, lock
 
         raise RuntimeError("No available evaluators")
@@ -1790,9 +1801,7 @@ class BruteForce(BaseOptimizer):
                 'membership': x,
                 'f': f,
                 'f1': f1,
-                'f2': f2,
-                'hhi': hhi,
-                'mpc': mpc,
+                'f2': f2
             }
 
         self.postprocess_results(rtol)
@@ -1866,7 +1875,7 @@ class BruteForce(BaseOptimizer):
 
 
         data_to_save = {
-            'results_library': self.results_library,
+            'results_library': self._results_library,
         }
 
         for name, data in data_to_save.items():
@@ -1960,7 +1969,7 @@ class GreedyOptimizer(BaseOptimizer):
 
     def optimize(
             self,
-            max_iterations: Optional[int] = 1000,
+            max_iterations: Optional[int] = None,
             epsilon: Optional[float] = 0.1,
             rtol: Optional[float] = 1e-12,
             n_sample_pairs: Optional[int] = None,
@@ -1973,6 +1982,8 @@ class GreedyOptimizer(BaseOptimizer):
         # Loop while improvement is possible
         n_iterations = 0
         n_evals = 0
+        max_iterations = max_iterations if max_iterations is not None else self._evaluator.n_distinct_communities
+        
         with tqdm(total=max_iterations, desc="Outer Loop", position=0, leave=False) as pbar_outer:
             while improvement and n_iterations < max_iterations:
 
@@ -1991,8 +2002,6 @@ class GreedyOptimizer(BaseOptimizer):
                 n_feasible_pairs = len(self._membership_pairs) - len(self._sampled_communities_pairs)
                 n_sample_pairs = _default_if_none(n_sample_pairs,n_feasible_pairs,'n_sample_pairs')
 
-                hhi_base = np.array(list(self._evaluator.hhi.values()))
-
                 with tqdm(total=n_feasible_pairs, desc="Inner Loop", position=1, leave=False) as pbar_inner:
                     while True:
                         sample_pairs = self._sample_community_pairs(n_sample_pairs, epsilon)
@@ -2007,7 +2016,6 @@ class GreedyOptimizer(BaseOptimizer):
                                 self.weights, 
                                 self._membership_pairs,
                                 self._evaluator,
-                                hhi_base,
                                 self._f
                             ]
                             fkwargs = {}
@@ -2037,7 +2045,6 @@ class GreedyOptimizer(BaseOptimizer):
                                         self.weights, 
                                         self._membership_pairs[(community_i, community_j)].copy(),
                                         self._eval_manager, 
-                                        hhi_base, 
                                         self._f
                                     )
                                     futures.append(future)
@@ -2100,8 +2107,18 @@ class GreedyOptimizer(BaseOptimizer):
             return False
 
         probabilities = self._evaluator.w_k[sample_list] / np.sum(self._evaluator.w_k)
+        probabilities = np.nan_to_num(probabilities, nan=0.0)
+        probabilities[probabilities < 0] = 0.0
+
         probabilities_pairs = probabilities[:,0] * probabilities[:,1]
-        probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
+
+        probabilities_pairs = np.nan_to_num(probabilities_pairs, nan=0.0)
+        probabilities_pairs[probabilities_pairs < 0] = 0.0
+
+        if np.sum(probabilities_pairs) > 0:
+            probabilities_pairs = probabilities_pairs / np.sum(probabilities_pairs)
+        else:
+            probabilities_pairs = np.ones_like(probabilities_pairs) / len(probabilities_pairs)
 
         if not replace:
             n_samples = min(len(sample_list),n_samples)
@@ -2109,8 +2126,11 @@ class GreedyOptimizer(BaseOptimizer):
         if len(sample_list) == 0:
             return False
 
-        n_samples_is = math.ceil(n_samples * (1-epsilon))
+        max_samples = np.count_nonzero(probabilities_pairs) # to protect against non-zero probabilities
+
+        n_samples_is = min(max_samples,math.ceil(n_samples * (1-epsilon)))
         n_samples_uni = n_samples - n_samples_is
+
         is_indices = rng_np.choice(len(sample_list), n_samples_is, p=probabilities_pairs, replace=replace)
         sample_is_pairs = [sample_list[i] for i in is_indices]
         if not replace:
@@ -2166,7 +2186,6 @@ class GreedyOptimizer(BaseOptimizer):
             weights: Tuple[float,float],
             membership_pairs: Dict[Tuple[int,int],np.ndarray],
             evaluator: ExactEvaluator | SampleEvaluator,
-            hhi_base: np.ndarray,
             f: float
         ) -> Tuple[float,int,int]:
         # Perform stochastic evaluation using the selected stream
@@ -2177,12 +2196,6 @@ class GreedyOptimizer(BaseOptimizer):
         f2 = np.mean(list(evaluator.mpc.values()))
         f_new = multiobjective(f1, f2, weights=weights)
 
-        # Assuming your matrices are named matrix1 and matrix2
-        hhi_new = np.sort(list(evaluator.hhi.values()))
-        hhi_base_sorted = np.sort(hhi_base)
-        distributions_changed = np.any(hhi_new != hhi_base_sorted)
-
-        # increase = f_new - f if np.any(distributions_changed) else 0.0
         increase = f_new - f
 
         return increase, community_i, community_j
@@ -2194,7 +2207,6 @@ class GreedyOptimizer(BaseOptimizer):
             weights: Tuple[float,float],
             membership: np.ndarray,
             eval_manager: EvaluatorManager,
-            hhi_base: np.ndarray,
             f: float
         ) -> Tuple[float,int,int]:
 
@@ -2208,12 +2220,6 @@ class GreedyOptimizer(BaseOptimizer):
         f2 = np.mean(list(evaluator.mpc.values()))
         f_new = multiobjective(f1, f2, weights=weights)
 
-        # Assuming your matrices are named matrix1 and matrix2
-        hhi_new = np.sort(list(evaluator.hhi.values()))
-        hhi_base_sorted = np.sort(hhi_base)
-        distributions_changed = np.any(hhi_new != hhi_base_sorted)
-
-        # increase = f_new - f if np.any(distributions_changed) else 0.0
         increase = f_new - f
 
         return increase, community_i, community_j

@@ -2,6 +2,8 @@ from typing import Dict, Any, List, Set, Tuple
 import numpy as np
 from itertools import product
 
+from tqdm import tqdm
+
 def distinct_communities(community_dict: Dict[str,int]) -> Tuple[List[int], int]:
     distinct_communities_list = list(set(community_dict.values()))
     n_communities = len(distinct_communities_list)
@@ -65,7 +67,7 @@ def partition_to_set_of_sets(membership: np.ndarray) -> Set[frozenset]:
         partition_dict[community].add(index)
     return frozenset(frozenset(indices) for indices in partition_dict.values())
 
-def generate_membership_combinations(membership: np.ndarray, max_community: int) -> Dict[Tuple[int,int],np.ndarray]:
+def generate_membership_combinations(membership: np.ndarray, max_community: int):
     """
     Generate all possible membership combinations by merging communities in the membership array.
 
@@ -82,29 +84,35 @@ def generate_membership_combinations(membership: np.ndarray, max_community: int)
         a dictionary of tuples, where the key is a tuple of the communities merged and the value is the new membership array
     """
 
-    unique_communities = np.unique(membership)
-    n = max(max_community + 1, len(unique_communities))  # Adjust the range to consider up to max_community
-    seen_partitions = set()
+    if membership.size == 0:
+        return {}
+
+    unique, inverse = np.unique(membership, return_inverse=True)
+    max_index = unique.max()
+    n = min(max_index, max_community) + 1
+
+    seen_partitions = {}
     results = {}
 
-    for i in range(n):
-        if i not in unique_communities:
-            continue  # Skip the loop if community `i` has no members
-        for j in range(i + 1, n):
-            if j not in unique_communities:
-                continue  # Skip the loop if community `j` has no members
+    # Use numpy array to check membership existence
+    exists = np.zeros(n + 1, dtype=bool)
+    exists[unique] = True
 
-            new_membership = membership.copy()
-            new_membership[membership == j] = i  # Merge community j into i
-            partition_set = partition_to_set_of_sets(new_membership)
+    # Only iterate over existing communities
+    for i in np.nonzero(exists)[0]:
+        for j in np.nonzero(exists)[0]:
+            if j <= i:
+                continue
 
-            if partition_set not in seen_partitions:
-                seen_partitions.add(partition_set)
+            # Create new partition key to check for uniqueness
+            partition_key = tuple(np.where(inverse == j, i, inverse))
+            if partition_key not in seen_partitions:
+                # Create a new membership array only when necessary
+                new_membership = np.where(membership == j, i, membership)
+                seen_partitions[partition_key] = True
                 results[(i, j)] = new_membership
-    
+
     return results
-
-
 
 def canonical_form(membership):
     """ Convert membership to its canonical form to treat equivalent patterns identically. """
@@ -141,8 +149,10 @@ def generate_possible_memberships(n: int, max_community: int) -> set:
 
     # Use a set to store unique canonical forms
     unique_memberships = set()
-    for combo in combinations:
-        # Convert each combination to its canonical form and add to set
-        unique_memberships.add(canonical_form(combo))
+    with tqdm(total=(max_community+1)**n) as pbar:
+        for combo in combinations:
+            # Convert each combination to its canonical form and add to set
+            unique_memberships.add(canonical_form(combo))
+            pbar.update(1)
 
     return unique_memberships

@@ -616,7 +616,26 @@ def define_cuda_kernels_sampling_utils() -> Tuple[Callable, Callable]:
             for j in range(y, n_communities, dy):
                 cuda.atomic.add(w_k, j, w_ik[i, j] / n_nodes)
 
-    return calc_w_k_edges, calc_w_k_nodes
+    @cuda.jit
+    def calc_w_k_log(
+            w_k: DeviceNDArray,
+        ):
+
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        n_communities = w_k.shape[0]
+
+        for j in range(x, n_communities, dx):
+            if w_k[j] > 0:
+                w_k[j] = math.log(w_k[j])
+            else:
+                w_k[j] = 0.0
+
+    return calc_w_k_edges, calc_w_k_nodes, calc_w_k_log
 
 def define_cuda_kernels_utils(n_samples_edge:int) -> Callable:
 
