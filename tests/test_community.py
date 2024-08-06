@@ -774,14 +774,14 @@ class _TestOptimize():
 
         # evaluator.update_scores(test_communities_dict)
         # f1 = -np.mean(list(evaluator.hhi.values()))
-        # f2 = np.mean(list(evaluator.log_mpc.values()))
+        # f2 = np.mean(list(evaluator.mpc.values()))
         # f = multiobjective(f1,f2,weights)
 
         # fs = []
         # for membership in optimizer.membership_pairs.values():
         #     evaluator.update_scores_membership(membership)
         #     f1 = -np.mean(list(evaluator.hhi.values()))
-        #     f2 = np.mean(list(evaluator.log_mpc.values()))
+        #     f2 = np.mean(list(evaluator.mpc.values()))
         #     f = multiobjective(f1,f2,weights)
         #     fs.append(f)
 
@@ -814,7 +814,7 @@ class _TestOptimize():
 
         evaluator.update_scores(test_communities_dict)
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f2 = np.mean(list(evaluator.mpc.values()))
         f = multiobjective(f1,f2,weights)
 
         assert optimizer.f == f
@@ -822,12 +822,12 @@ class _TestOptimize():
     def test_exact_optimize(
         self, 
         optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
-        get_sample_evaluator: SampleEvaluator, 
+        get_evaluator: SampleEvaluator | ExactEvaluator, 
         tmp_path
     ):
         
         weights, test_communities_dict = optimization_cases
-        evaluator = get_sample_evaluator
+        evaluator = get_evaluator
 
         directory = tmp_path / "test_save"
         directory.mkdir()

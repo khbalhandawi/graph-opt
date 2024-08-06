@@ -996,6 +996,20 @@ class ExactEvaluator(BaseEvaluator):
         self.walk_length = walk_length
         super().__init__(gloader, use_gpu, n_communities, threads_per_block_1D, threads_per_block_2D, threads_per_block_3D, stream)
 
+    @property
+    def p_it(self):
+        if self.use_gpu:
+            return self._w_it_d.copy_to_host()
+        else:
+            return self._w_it.copy()
+
+    @property
+    def p_et(self):
+        if self.use_gpu:
+            return self._gloader._cp_d.copy_to_host()
+        else:
+            return self._gloader._cp.copy()
+
     def _post_init_cpu(self, *args, **kwargs):
         super()._post_init_cpu(args, kwargs)
 
@@ -1277,6 +1291,20 @@ class SampleEvaluator(BaseEvaluator):
             return self._edges_attrs_d.copy_to_host()
         else:
             return self._edges_attrs.copy()
+
+    @property
+    def p_it(self):
+        if self.use_gpu:
+            return self._w_it_d.copy_to_host() / (self._sampler.n_walks * self._sampler.walk_length)
+        else:
+            return self._w_it.copy() / (self._sampler.n_walks * self._sampler.walk_length)
+
+    @property
+    def p_et(self):
+        if self.use_gpu:
+            return self._edges_attrs_d.copy_to_host() / self._sampler.n_samples_edge
+        else:
+            return self._edges_attrs.copy() / self._sampler.n_samples_edge
 
     def _post_init_cpu(self, **kwargs):
         super()._post_init_cpu(**kwargs)
@@ -1787,7 +1815,7 @@ class BruteForce(BaseOptimizer):
 
                     # Calculate the initial mean hhi over all routes
                     self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-                    self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
+                    self._f2 = np.mean(list(self._evaluator.mpc.values()))
                     self._f = multiobjective(self._f1,self._f2,self.weights)
 
                     self._communities_dict = self._evaluator.communities_dict
@@ -1808,10 +1836,10 @@ class BruteForce(BaseOptimizer):
         evaluator.update_scores_membership(membership)
 
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f2 = np.mean(list(evaluator.mpc.values()))
         f = multiobjective(f1, f2, weights=weights)
 
-        return membership, f, list(evaluator.hhi.values()), list(evaluator.log_mpc.values())
+        return membership, f, list(evaluator.hhi.values()), list(evaluator.mpc.values())
 
     @staticmethod
     def _process_batch_thread(
@@ -1827,10 +1855,10 @@ class BruteForce(BaseOptimizer):
             lock.release()
 
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f2 = np.mean(list(evaluator.mpc.values()))
         f = multiobjective(f1, f2, weights=weights)
 
-        return membership, f, list(evaluator.hhi.values()), list(evaluator.log_mpc.values())
+        return membership, f, list(evaluator.hhi.values()), list(evaluator.mpc.values())
 
     @_jsonmode
     def save(self, directory=None, **kwargs):
@@ -1891,7 +1919,7 @@ class GreedyOptimizer(BaseOptimizer):
 
         # Calculate the initial mean hhi over all routes
         self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-        self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
+        self._f2 = np.mean(list(self._evaluator.mpc.values()))
         self._f = multiobjective(self._f1,self._f2,self.weights)
 
         # log history
@@ -2044,7 +2072,7 @@ class GreedyOptimizer(BaseOptimizer):
 
                     # Calculate the initial mean hhi over all routes
                     self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-                    self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
+                    self._f2 = np.mean(list(self._evaluator.mpc.values()))
                     self._f = multiobjective(self._f1,self._f2,self.weights)
                     # self._f += max_increase
                     improvement = True
@@ -2146,7 +2174,7 @@ class GreedyOptimizer(BaseOptimizer):
         evaluator.update_scores_membership(membership_pairs[(community_i, community_j)])
 
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f2 = np.mean(list(evaluator.mpc.values()))
         f_new = multiobjective(f1, f2, weights=weights)
 
         # Assuming your matrices are named matrix1 and matrix2
@@ -2177,7 +2205,7 @@ class GreedyOptimizer(BaseOptimizer):
             lock.release()
 
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f2 = np.mean(list(evaluator.mpc.values()))
         f_new = multiobjective(f1, f2, weights=weights)
 
         # Assuming your matrices are named matrix1 and matrix2
@@ -2195,7 +2223,7 @@ class ExactOptimizer(BaseOptimizer):
 
     def __init__(
             self,
-            evaluator: SampleEvaluator,
+            evaluator: SampleEvaluator | ExactEvaluator,
             seed: int,
             weights: Optional[Tuple[float,float]] = (0.5,0.5),
             log_dir: Optional[str] = 'models',
@@ -2206,11 +2234,8 @@ class ExactOptimizer(BaseOptimizer):
 
         super().__init__(evaluator, seed)
         
-        assert isinstance(evaluator, SampleEvaluator), "error: evaluator must be an instance of SampleEvaluator"
-
         self._evaluator = evaluator
-        self._beta = weights[0]
-        self._gamma = weights[1]
+        self.weights = weights
         self._model_settings = model_settings
         self._model_settings['seed'] = seed
         self._log_dir = log_dir
@@ -2230,21 +2255,36 @@ class ExactOptimizer(BaseOptimizer):
         self.model_built = False
         self.optimal = False
 
-    def process_communities_dict(self) -> None:
+    def process_communities_dict(self, x: Dict[Tuple[int, int], Var]) -> Dict[str, int]:
         
         assert self.model_built, "Model not built yet. Run build_model() first."
-        assert len(self._x) > 0, "No decision variables found. Run build_model() first."
+        assert len(x) > 0, "No decision variables found. Run build_model() first."
 
         communities_dict = {self._evaluator._gloader.attr_i2key[t]: None for t in self._T}
 
         for t in self._T:
             for k in self._K:
-                if hasattr(self._x[t, k], 'X'):
-                    if self._x[t, k].getAttr('X') > 0.5:
+                if hasattr(x[t, k], 'X'):
+                    if x[t, k].getAttr('X') > 0.5:
                         assert communities_dict[self._evaluator._gloader.attr_i2key[t]] is None, "error: multiple communities assigned to the same attribute"
                         communities_dict[self._evaluator._gloader.attr_i2key[t]] = k
 
-        self._communities_dict = communities_dict
+        return communities_dict
+
+    def process_communities_values(self, x: Dict[Tuple[int, int], int]) -> Dict[str, int]:
+        
+        assert self.model_built, "Model not built yet. Run build_model() first."
+        assert len(x) > 0, "No decision variables found. Run build_model() first."
+
+        communities_dict = {self._evaluator._gloader.attr_i2key[t]: None for t in self._T}
+
+        for t in self._T:
+            for k in self._K:
+                if x[t, k] > 0.5:
+                    assert communities_dict[self._evaluator._gloader.attr_i2key[t]] is None, "error: multiple communities assigned to the same attribute"
+                    communities_dict[self._evaluator._gloader.attr_i2key[t]] = k
+
+        return communities_dict
 
     @property
     def logs(self) -> List[Tuple[float,float,float,float,float,float]]:
@@ -2275,17 +2315,14 @@ class ExactOptimizer(BaseOptimizer):
 
     def build_model(self):
 
-        w_it = self._evaluator.w_it
+        p_it = self._evaluator.p_it
 
-        uv_dict = self._evaluator._sampler._gloader.edge_pair2ui
-        edge_attr = self._evaluator.edges_attrs
+        uv_dict = self._evaluator._gloader.edge_pair2ui
+        p_et = self._evaluator.p_et
 
-        n_edges = self._evaluator._sampler._gloader.n_unique_edges
-        n_samples_edge = self._evaluator._sampler.n_samples_edge
-        n_nodes = self._evaluator._sampler._gloader.n_nodes_spatial
-        n_attr = self._evaluator._sampler._gloader.n_attr
-        n_walks = self._evaluator._sampler.n_walks
-        L = self._evaluator._sampler.walk_length  
+        n_edges = self._evaluator._gloader.n_unique_edges
+        n_nodes = self._evaluator._gloader.n_nodes_spatial
+        n_attr = self._evaluator._gloader.n_attr
 
         self._model = Model("Graph Optimization: {}".format(self._model_name)) # Initialize the model
 
@@ -2295,18 +2332,18 @@ class ExactOptimizer(BaseOptimizer):
                 self._x[t, k] = self._model.addVar(vtype=GRB.BINARY, name=f"x_{t}_{k}")
 
         # Objective function: Quadratic part
-        quad_expr = quicksum((quicksum(self._x[t, k]*edge_attr[uv_dict[(u, v)], t] for t in self._T) / n_samples_edge)**2 for k in self._K for u, v in self._E) / n_edges
+        quad_expr = quicksum((quicksum(self._x[t, k]*p_et[uv_dict[(u, v)], t] for t in self._T))**2 for k in self._K for u, v in self._E) / n_edges
 
         # Objective function: Linear weighted interaction part
         linear_expr = 0
         for i in tqdm(self._V, desc="Building linear expression"):
             for t in self._T:
-                w_ik_exp = quicksum(self._x[t, k] * w_it[i, tau] for tau in self._T for k in self._K) / (n_walks*L)
-                w_it_exp = w_it[i, t] / (n_walks*L)
-                linear_expr += w_ik_exp * w_it_exp / (n_nodes * n_attr)
+                p_ik_exp = quicksum(quicksum(self._x[t, k] * p_it[i, tau] for tau in self._T) for k in self._K)
+                p_it_exp = p_it[i, t]
+                linear_expr += ((p_ik_exp * p_it_exp) / (n_nodes * n_attr))
 
         # Set the objective
-        self._model.setObjective(-self._beta*quad_expr + self._gamma*linear_expr, GRB.MAXIMIZE)
+        self._model.setObjective(-self.weights[0]*quad_expr + self.weights[1]*linear_expr, GRB.MAXIMIZE)
 
         # Constraints: Ensure each attribute is in exactly one subset
         for t in self._T:
@@ -2337,8 +2374,35 @@ class ExactOptimizer(BaseOptimizer):
         self.model_built = True
 
     def optimize(self):
+        
+        # prepare logs
+        f = open(os.path.join(self._log_dir, 'exact_solution.csv'),'w'); f.write("runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations\n")
+        f.close()
 
         def _mycallback(model: Model, where: int):
+
+            if where == GRB.Callback.MIPSOL:
+                # Get the current values of all variables when a new solution is found
+                values = model.cbGetSolution(model.getVars())
+                vars = model.getVars()
+
+                x = {}
+                x_id = 0
+                for t in self._T:
+                    for k in self._K:
+                        x[(t, k)] = values[x_id]
+                        x_id += 1
+
+                communities_dict = self.process_communities_values(x)
+                self._evaluator.update_scores(communities_dict)
+                self._f1 = -np.mean(list(self._evaluator.hhi.values()))
+                self._f2 = np.mean(list(self._evaluator.mpc.values()))
+                self._f = multiobjective(self._f1,self._f2,self.weights)
+
+                self._f_history.append(self._f)
+                self._communities_history.append(communities_dict)
+                self._multi_history.append((self._f1,self._f2))
+
             if where == GRB.Callback.MIP:
 
                 self._log_counter += 1
@@ -2376,7 +2440,6 @@ class ExactOptimizer(BaseOptimizer):
                         f.write(log_entry)
             
                     self._logs.append((runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations))
-                    self._f_history.append(objbst)
 
             elif where == GRB.Callback.PRESOLVE:
                 # Presolve phase callbacks
@@ -2391,6 +2454,10 @@ class ExactOptimizer(BaseOptimizer):
         if self._model.status == GRB.Status.OPTIMAL or self._model.status == GRB.TIME_LIMIT:
             self.optimal = True
             self._f = self._model.objVal
-            self.process_communities_dict()
+            self._communities_dict = self.process_communities_dict(self._x)
 
             self._evaluator.update_scores(self._communities_dict)
+            self._f1 = -np.mean(list(self._evaluator.hhi.values()))
+            self._f2 = np.mean(list(self._evaluator.mpc.values()))
+
+        return
