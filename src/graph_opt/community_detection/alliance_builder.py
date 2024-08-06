@@ -2244,9 +2244,9 @@ class ExactOptimizer(BaseOptimizer):
 
         # model parameters
         self._K = list(range(self._evaluator.n_communities))
-        self._E = self._evaluator._sampler._gloader.edge_unique_list
-        self._V = list(range(self._evaluator._sampler._gloader.n_nodes_spatial))
-        self._T = list(range(self._evaluator._sampler._gloader.n_attr))
+        self._E = self._evaluator._gloader.edge_unique_list
+        self._V = list(range(self._evaluator._gloader.n_nodes_spatial))
+        self._T = list(range(self._evaluator._gloader.n_attr))
 
         self._logs = []
         self._log_counter = 0
@@ -2335,12 +2335,18 @@ class ExactOptimizer(BaseOptimizer):
         quad_expr = quicksum((quicksum(self._x[t, k]*p_et[uv_dict[(u, v)], t] for t in self._T))**2 for k in self._K for u, v in self._E) / n_edges
 
         # Objective function: Linear weighted interaction part
+        p_ik_exp = {}
+        for i in tqdm(self._V, desc="computing p_ik_exp"):
+            for k in self._K:
+                p_ik_exp[i,k] = quicksum(self._x[t, k] * p_it[i, t] for t in self._T)
+
         linear_expr = 0
-        for i in tqdm(self._V, desc="Building linear expression"):
+        for i in tqdm(self._V, desc="Building f2 expression"):
             for t in self._T:
-                p_ik_exp = quicksum(quicksum(self._x[t, k] * p_it[i, tau] for tau in self._T) for k in self._K)
                 p_it_exp = p_it[i, t]
-                linear_expr += ((p_ik_exp * p_it_exp) / (n_nodes * n_attr))
+                
+                for k in self._K:
+                    linear_expr += ((self._x[t, k] * p_ik_exp[i,k] * p_it_exp) / (n_nodes * n_attr))
 
         # Set the objective
         self._model.setObjective(-self.weights[0]*quad_expr + self.weights[1]*linear_expr, GRB.MAXIMIZE)
