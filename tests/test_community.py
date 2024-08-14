@@ -1018,6 +1018,80 @@ class _TestOptimize():
                         for value_i, test_value_i in zip(value[key].values(), test_value[test_key].values()):
                             assert abs(value_i - test_value_i) < 1e-6
 
+    def test_save_load_greedy(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_evaluator: SampleEvaluator | ExactEvaluator,
+        tmp_path
+    ):
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_evaluator
+
+        optimizer = GreedyOptimizer(
+            evaluator=evaluator,
+            seed=seed,
+            num_streams=self.num_streams,
+            weights=weights,
+            use_gpu=self.use_gpu
+        )
+
+        optimizer.optimize(
+            max_iterations = 1000,
+            rtol = self.rtol,
+            multiprocess=self.use_multiprocessing,
+        )
+
+        directory = tmp_path / "test_save"
+        directory.mkdir()
+
+        optimizer.save(directory=directory)
+
+        data_to_load = {
+            'communities_history':  {"name" : 'communities_history', "dtype" : List[Dict[str,int]]},
+            'f_history':            {"name" : 'f_history', "dtype" : list},
+            'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
+        }
+
+        test_data = {}
+        for name, attr in data_to_load.items():
+            test_data[name] = getattr(optimizer,attr["name"])
+
+        del optimizer
+        del evaluator
+
+        evaluator_load = get_evaluator
+
+        optimizer_load = GreedyOptimizer(
+            evaluator=evaluator_load,
+            seed=seed,
+            num_streams=self.num_streams,
+            weights=weights,
+            use_gpu=self.use_gpu
+        )
+        
+        optimizer_load.load(directory=directory)
+
+        for name, attr in data_to_load.items():
+            if attr["dtype"] == np.ndarray:
+                assert np.allclose(getattr(optimizer_load,attr["name"]), test_data[name], rtol=1e-1)
+            elif attr["dtype"] == list:
+                for value, test_value in zip(getattr(optimizer_load,attr["name"]), test_data[name]):
+                    assert abs(value - test_value) < 1e-6
+            elif attr["dtype"] == List[Dict[str,int]]:
+                for value, test_value in zip(getattr(optimizer_load,attr["name"]), test_data[name]):
+                    assert value == test_value
+            elif attr["dtype"] == List[Tuple[float,float]]:
+                for value, test_value in zip(getattr(optimizer_load,attr["name"]), test_data[name]):
+                    for value_i, test_value_i in zip(value, test_value):
+                        assert abs(value_i - test_value_i) < 1e-6
+            elif attr["dtype"] == List[Dict[int,Any]]:
+                for value, test_value in zip(getattr(optimizer_load,attr["name"]), test_data[name]):
+                    for key, test_key in zip(value.keys(), test_value.keys()):
+                        assert key == test_key
+                        for value_i, test_value_i in zip(value[key].values(), test_value[test_key].values()):
+                            assert abs(value_i - test_value_i) < 1e-6
+
 class TestOptimizeGPU(_TestOptimize):
 
     use_gpu = True

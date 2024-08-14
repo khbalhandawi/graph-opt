@@ -136,7 +136,109 @@ def define_cuda_kernels_sampling(
 
     return edge_sampler, spatial_random_walk, attr_sampler
 
-def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
+def define_cuda_kernels_deterministic() -> List[Callable]:
+
+    @cuda.jit
+    def init_edges_communities(
+            edges_communities:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_unique_edges, n_communities = edges_communities.shape
+
+        #initialize the array
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_communities, dy):
+                edges_communities[i,j] = 0
+
+    @cuda.jit
+    def init_hhi(
+            hhi:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        n_unique_edges = hhi.shape[0]
+
+        #initialize the array
+        for i in range(x, n_unique_edges, dx):
+            hhi[i] = 0
+
+    @cuda.jit
+    def init_w_it(
+            w_it:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_nodes, n_attr = w_it.shape
+
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_attr, dy):
+                w_it[i, j] = 0
+
+    @cuda.jit
+    def init_w_ik(
+            w_ik:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_nodes, n_communities = w_ik.shape
+
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_communities, dy):
+                w_ik[i, j] = 0
+
+    @cuda.jit
+    def init_w_i(
+            w_i:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        n_nodes = w_i.shape[0]
+
+        for i in range(x, n_nodes, dx):
+            w_i[i] = 0
+
+    @cuda.jit
+    def init_mpc(
+            mpc:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        n_attr = mpc.shape[0]
+
+        for i in range(x, n_attr, dx):
+            mpc[i] = 0
 
     @cuda.jit
     def edge_postprocess(
@@ -150,15 +252,6 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
 
         # Compute the grid stride
         dx, dy = cuda.gridsize(2)
-
-        n_unique_edges, n_communities = edges_communities.shape
-    
-        #initialize the array
-        for i in range(x, n_unique_edges, dx):
-            for j in range(y, n_communities, dy):
-                edges_communities[i,j] = 0
-
-        cuda.syncthreads()
 
         n_unique_edges, n_attr = edges_cp.shape
 
@@ -183,12 +276,6 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
 
         n_unique_edges, n_communities = edges_communities.shape
 
-        #initialize the array
-        for i in range(x, n_unique_edges, dx):
-            edges_hhi[i] = 0
-
-        cuda.syncthreads()
-
         # Grid stride loop
         for i in range(x, n_unique_edges, dx):
             for j in range(y, n_communities, dy):
@@ -210,13 +297,6 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
         dx, dy = cuda.gridsize(2)
 
         n_unique_edges, n_attr = adj3.shape
-        n_nodes, n_attr = w_it.shape
-
-        for i in range(x, n_nodes, dx):
-            for j in range(y, n_attr, dy):
-                w_it[i, j] = 0
-
-        cuda.syncthreads()
 
         # Grid stride loop
         for i in range(x, n_unique_edges, dx):
@@ -239,13 +319,6 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
 
         n_nodes, n_attr = w_it.shape
 
-        for i in range(x, n_nodes, dx):
-            w_i[i] = 0
-
-        cuda.syncthreads()
-
-        n_nodes, n_attr = w_it.shape
-
         # Grid stride loop
         for i in range(x, n_nodes, dx):
             for j in range(n_attr):
@@ -263,13 +336,6 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
 
         # Compute the grid stride
         dx, dy = cuda.gridsize(2)
-
-        n_nodes, n_communities = w_ik.shape
-        for i in range(x, n_nodes, dx):
-            for j in range(y, n_communities, dy):
-                w_ik[i, j] = 0
-
-        cuda.syncthreads()
 
         n_nodes, n_attr = w_it.shape
 
@@ -329,14 +395,14 @@ def define_cuda_kernels_deterministic() -> Tuple[Callable, Callable, Callable]:
                     k = membership[t]
                     cuda.atomic.add(mpc, t, w_it[i, t] * w_ik[i, k] / (w_i[i] ** 2))
 
-    return edge_postprocess, calc_hhi, calc_w_it, calc_w_i, calc_w_ik, normalize_w_ix, calc_mpc
+    return init_edges_communities, init_hhi, init_w_it, init_w_ik, init_w_i, init_mpc, \
+        edge_postprocess, calc_hhi, calc_w_it, calc_w_i, calc_w_ik, normalize_w_ix, calc_mpc
 
-def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Callable]:
+def define_cuda_kernels_stochastic() -> List[Callable]:
 
     @cuda.jit
-    def edge_sample_p_et(
-            samples:DeviceNDArray,
-            counts:DeviceNDArray,
+    def init_sample_p_et(
+            counts:DeviceNDArray
         ):
 
         # Compute flattened index inside the array
@@ -352,7 +418,118 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
             for j in range(y, n_attr, dy):
                 counts[i,j] = 0
 
-        cuda.syncthreads()
+    @cuda.jit
+    def init_sample_p_ek(
+            counts:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_unique_edges, n_communities = counts.shape
+
+        # initialize counts
+        for i in range(x, n_unique_edges, dx):
+            for j in range(y, n_communities, dy):
+                counts[i,j] = 0
+
+    @cuda.jit
+    def init_sample_hhi(
+            hhi:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        n_unique_edges = hhi.shape[0]
+
+        #initialize the array
+        for i in range(x, n_unique_edges, dx):
+            hhi[i] = 0
+
+    @cuda.jit
+    def init_sample_w_i(
+            w_i:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        n_nodes = w_i.shape[0]
+
+        for i in range(x, n_nodes, dx):
+            w_i[i] = 0.0
+
+    @cuda.jit
+    def init_sample_w_it(
+            w_it:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_nodes, n_attr = w_it.shape
+
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_attr, dy):
+                w_it[i, j] = 0.0
+
+    @cuda.jit
+    def init_sample_w_ik(
+            w_ik:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_nodes, n_communities = w_ik.shape
+
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_communities, dy):
+                w_ik[i, j] = 0.0
+
+    @cuda.jit
+    def init_sample_mpc(
+            mpc:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        n_attr = mpc.shape[0]
+
+        for i in range(x, n_attr, dx):
+            mpc[i] = 0.0
+
+    @cuda.jit
+    def edge_sample_p_et(
+            samples:DeviceNDArray,
+            counts:DeviceNDArray,
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
 
         n_unique_edges, n_samples = samples.shape
 
@@ -373,15 +550,6 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
 
         # Compute the grid stride
         dx, dy = cuda.gridsize(2)
-
-        n_unique_edges, n_communities = counts.shape
-
-        # initialize counts
-        for i in range(x, n_unique_edges, dx):
-            for j in range(y, n_communities, dy):
-                counts[i,j] = 0
-
-        cuda.syncthreads()
 
         n_unique_edges, n_samples = samples.shape
 
@@ -406,34 +574,12 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
 
         n_unique_edges, n_communities = counts.shape
 
-        #initialize the array
-        for i in range(x, n_unique_edges, dx):
-            hhi[i] = 0
-
-        cuda.syncthreads()
-
         # Grid stride loop
         for i in range(x, n_unique_edges, dx):
             for j in range(y, n_communities, dy):
                 
                 cp = counts[i, j] / n_samples
                 cuda.atomic.add(hhi, i, cp**2)
-
-    @cuda.jit
-    def init_sample_w_i(
-            w_i:DeviceNDArray
-        ):
-
-        # Compute flattened index inside the array
-        x = cuda.grid(1)
-
-        # Compute the grid stride
-        dx = cuda.gridsize(1)
-
-        n_nodes = w_i.shape[0]
-
-        for i in range(x, n_nodes, dx):
-            w_i[i] = 0.0
 
     @cuda.jit
     def calc_sample_w_i(
@@ -516,10 +662,6 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
 
         n_nodes, n_communities = w_ik.shape
 
-        for i in range(x, n_nodes, dx):
-            for j in range(y, n_communities, dy):
-                w_ik[i, j] = 0.0
-
         n_nodes, n_samples, walk_length = T_ijk.shape
 
         # Iterate over each sample and walk step
@@ -554,11 +696,6 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
 
         n_nodes, n_attr = w_it.shape
 
-        for j in range(y, n_attr, dy):
-            mpc[j] = 0.0
-
-        cuda.syncthreads()
-
         for i in range(x, n_nodes, dx):
             for j in range(y, n_attr, dy):
 
@@ -567,10 +704,28 @@ def define_cuda_kernels_stochastic() -> Tuple[Callable, Callable, Callable, Call
 
                 cuda.atomic.add(mpc, j, mpc_ij)
 
-    return edge_sample_p_et, edge_sample_p_ek, calc_sample_hhi, init_sample_w_i, calc_sample_w_i, calc_sample_w_it, calc_sample_w_ik, calc_sample_mpc
+    return init_sample_p_et, init_sample_p_ek, init_sample_hhi, \
+        init_sample_w_i, init_sample_w_it, init_sample_w_ik, init_sample_mpc, \
+        edge_sample_p_et, edge_sample_p_ek, calc_sample_hhi, calc_sample_w_i, calc_sample_w_it, calc_sample_w_ik, calc_sample_mpc
 
-def define_cuda_kernels_sampling_utils() -> Tuple[Callable, Callable]:
+def define_cuda_kernels_sampling_utils() -> Tuple[Callable, Callable, Callable, Callable]:
     
+    @cuda.jit
+    def init_w_k(
+            w_k: DeviceNDArray,
+        ):
+
+        # Compute flattened index inside the array
+        x = cuda.grid(1)
+
+        # Compute the grid stride
+        dx = cuda.gridsize(1)
+
+        n_communities = w_k.shape[0]
+
+        for j in range(x, n_communities, dx):
+            w_k[j] = 0.0
+
     @cuda.jit
     def calc_w_k_edges(
             edges_communities: DeviceNDArray,
@@ -582,13 +737,6 @@ def define_cuda_kernels_sampling_utils() -> Tuple[Callable, Callable]:
 
         # Compute the grid stride
         dx, dy = cuda.gridsize(2)
-
-        n_unique_edges, n_communities = edges_communities.shape
-
-        for j in range(y, n_communities, dy):
-            w_k[j] = 0.0
-
-        cuda.syncthreads()
         
         n_unique_edges, n_communities = edges_communities.shape
         
@@ -635,7 +783,7 @@ def define_cuda_kernels_sampling_utils() -> Tuple[Callable, Callable]:
             else:
                 w_k[j] = 0.0
 
-    return calc_w_k_edges, calc_w_k_nodes, calc_w_k_log
+    return init_w_k, calc_w_k_edges, calc_w_k_nodes, calc_w_k_log
 
 def define_cuda_kernels_utils(n_samples_edge:int) -> Callable:
 

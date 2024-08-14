@@ -706,9 +706,10 @@ class BaseEvaluator(ABC):
 
         kernels = define_cuda_kernels_sampling_utils()
 
-        self.calc_w_k_edges_gpu : Callable = kernels[0]
-        self.calc_w_k_nodes_gpu : Callable = kernels[1]
-        self.calc_w_k_log_gpu   : Callable = kernels[2]
+        self.init_w_k_gpu       : Callable = kernels[0]
+        self.calc_w_k_edges_gpu : Callable = kernels[1]
+        self.calc_w_k_nodes_gpu : Callable = kernels[2]
+        self.calc_w_k_log_gpu   : Callable = kernels[3]
 
     @property
     def membership(self)->np.ndarray:
@@ -850,6 +851,14 @@ class BaseEvaluator(ABC):
             + np.sum(self._edges_communities,axis=0) / self._gloader.n_unique_edges
 
     def _update_community_weights_gpu(self):
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._n_communities,), TPB = self.TPB_1D)
+
+        self.init_w_k_gpu[blockspergrid,threadsperblock,self.stream](
+            self._w_k_d
+        )
+
+        self.stream.synchronize()
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._n_communities), TPB = self.TPB_2D)
         self.calc_w_k_edges_gpu[blockspergrid,threadsperblock,self.stream](
             self._edges_communities_d,
@@ -974,6 +983,7 @@ class BaseEvaluator(ABC):
             safe_delete(state, '_mpc_attrs_d')
             safe_delete(state, '_membership_d')
 
+            del state['init_w_k_gpu']
             del state['calc_w_k_edges_gpu']
             del state['calc_w_k_nodes_gpu']
             del state['calc_w_k_log_gpu']
@@ -990,6 +1000,16 @@ class BaseEvaluator(ABC):
                 threads_per_block_3D=self.TPB_3D,
             )
 
+    def __del__(self):
+        if self.use_gpu and self._init_gpu:
+            del self._edges_communities_d
+            del self._hhi_edges_d
+            del self._w_it_d
+            del self._w_i_d
+            del self._w_ik_d
+            del self._w_k_d
+            del self._mpc_attrs_d
+            del self._membership_d
 
 class ExactEvaluator(BaseEvaluator):
 
@@ -1073,13 +1093,33 @@ class ExactEvaluator(BaseEvaluator):
 
         # load kernels
         kernels = define_cuda_kernels_deterministic()
-        self.edge_postprocess_gpu           : Callable = kernels[0]
-        self.calc_hhi_gpu                   : Callable = kernels[1]
-        self.calc_w_it_gpu                  : Callable = kernels[2]
-        self.calc_w_i_gpu                   : Callable = kernels[3]
-        self.calc_w_ik_gpu                  : Callable = kernels[4]
-        self.normalize_w_ix_gpu             : Callable = kernels[5]
-        self.calc_mpc_gpu                   : Callable = kernels[6]
+        self.init_edges_communities         : Callable = kernels[0]
+        self.init_hhi                       : Callable = kernels[1]
+        self.init_w_it                      : Callable = kernels[2]
+        self.init_w_ik                      : Callable = kernels[3]
+        self.init_w_i                       : Callable = kernels[4]
+        self.init_mpc                       : Callable = kernels[5]
+        self.edge_postprocess_gpu           : Callable = kernels[6]
+        self.calc_hhi_gpu                   : Callable = kernels[7]
+        self.calc_w_it_gpu                  : Callable = kernels[8]
+        self.calc_w_i_gpu                   : Callable = kernels[9]
+        self.calc_w_ik_gpu                  : Callable = kernels[10]
+        self.normalize_w_ix_gpu             : Callable = kernels[11]
+        self.calc_mpc_gpu                   : Callable = kernels[12]
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial,), TPB = self.TPB_1D)
+
+        self.init_w_i[blockspergrid,threadsperblock,self.stream](
+            self._w_i_d
+        )
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB = self.TPB_2D)
+
+        self.init_w_it[blockspergrid,threadsperblock,self.stream](
+            self._w_it_d
+        )
+
+        self.stream.synchronize()
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._gloader.n_attr), TPB = self.TPB_2D)
 
@@ -1138,12 +1178,28 @@ class ExactEvaluator(BaseEvaluator):
 
     def _update_hhi_scores_gpu(self):
 
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._n_communities), TPB = self.TPB_2D)
+
+        self.init_edges_communities[blockspergrid,threadsperblock,self.stream](
+            self._edges_communities_d,
+        )
+
+        self.stream.synchronize()
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._gloader.n_attr), TPB = self.TPB_2D)
 
         self.edge_postprocess_gpu[blockspergrid,threadsperblock,self.stream](
             self._gloader._cp_d,
             self._membership_d,
             self._edges_communities_d
+        )
+
+        self.stream.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges,), TPB = self.TPB_1D)
+
+        self.init_hhi[blockspergrid,threadsperblock,self.stream](
+            self._hhi_edges_d
         )
 
         self.stream.synchronize()
@@ -1196,11 +1252,27 @@ class ExactEvaluator(BaseEvaluator):
 
     def _update_mpc_scores_gpu(self):
         
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
+
+        self.init_w_ik[blockspergrid,threadsperblock,self.stream](
+            self._w_ik_d
+        )
+
+        self.stream.synchronize()
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB = self.TPB_2D)
         self.calc_w_ik_gpu[blockspergrid,threadsperblock,self.stream](
             self._membership_d,
             self._w_it_d,
             self._w_ik_d
+        )
+
+        self.stream.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial,), TPB = self.TPB_1D)
+
+        self.init_mpc[blockspergrid,threadsperblock,self.stream](
+            self._mpc_attrs_d
         )
 
         self.stream.synchronize()
@@ -1261,6 +1333,13 @@ class ExactEvaluator(BaseEvaluator):
         state = super().__getstate__()
 
         if self.use_gpu:
+
+            del state['init_edges_communities']
+            del state['init_hhi']
+            del state['init_w_it']
+            del state['init_w_ik']
+            del state['init_w_i']
+            del state['init_mpc']
             del state['edge_postprocess_gpu']
             del state['calc_hhi_gpu']
             del state['calc_w_it_gpu']
@@ -1350,16 +1429,31 @@ class SampleEvaluator(BaseEvaluator):
 
         kernels = define_cuda_kernels_stochastic()
         
-        self.edge_sample_p_et_gpu           : Callable = kernels[0]
-        self.edge_sample_p_ek_gpu           : Callable = kernels[1]
-        self.calc_sample_hhi_gpu            : Callable = kernels[2]
+
+        self.init_sample_p_et_gpu           : Callable = kernels[0]
+        self.init_sample_p_ek_gpu           : Callable = kernels[1]
+        self.init_sample_hhi_gpu            : Callable = kernels[2]
         self.init_sample_w_i_gpu            : Callable = kernels[3]
-        self.calc_sample_w_i_gpu            : Callable = kernels[4]
-        self.calc_sample_w_it_gpu           : Callable = kernels[5]
-        self.calc_sample_w_ik_gpu           : Callable = kernels[6]
-        self.calc_sample_mpc_gpu            : Callable = kernels[7]
+        self.init_sample_w_it_gpu           : Callable = kernels[4]
+        self.init_sample_w_ik_gpu           : Callable = kernels[5]
+        self.init_sample_mpc_gpu            : Callable = kernels[6]
+        self.edge_sample_p_et_gpu           : Callable = kernels[7]
+        self.edge_sample_p_ek_gpu           : Callable = kernels[8]
+        self.calc_sample_hhi_gpu            : Callable = kernels[9]
+        self.calc_sample_w_i_gpu            : Callable = kernels[10]
+        self.calc_sample_w_it_gpu           : Callable = kernels[11]
+        self.calc_sample_w_ik_gpu           : Callable = kernels[12]
+        self.calc_sample_mpc_gpu            : Callable = kernels[13]
 
         self._edges_attrs_d = self.cuda.device_array((self._gloader.n_unique_edges,self._gloader.n_attr),dtype=np.float32, stream=self.stream)
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._gloader.n_attr), TPB = self.TPB_2D)
+
+        self.init_sample_p_et_gpu[blockspergrid,threadsperblock,self.stream](
+            self._edges_attrs_d
+        )
+
+        self.stream.synchronize()
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._gloader.n_attr), TPB = self.TPB_2D)
 
@@ -1382,6 +1476,14 @@ class SampleEvaluator(BaseEvaluator):
             self._sampler._T_d,
             self._w_i_d
         )
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial,self._gloader.n_attr), TPB = self.TPB_2D)
+
+        self.init_sample_w_it_gpu[blockspergrid,threadsperblock,self.stream](
+            self._w_it_d
+        )
+
+        self.stream.synchronize()
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._sampler.n_walks), TPB = self.TPB_2D)
 
@@ -1417,6 +1519,14 @@ class SampleEvaluator(BaseEvaluator):
 
     def _update_hhi_scores_gpu(self):
         
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._gloader.n_attr), TPB = self.TPB_2D)
+
+        self.init_sample_p_ek_gpu[blockspergrid,threadsperblock,self.stream](
+            self._edges_communities_d
+        )
+
+        self.stream.synchronize()
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._n_communities), TPB = self.TPB_2D)
 
         self.edge_sample_p_ek_gpu[blockspergrid,threadsperblock,self.stream](
@@ -1425,6 +1535,14 @@ class SampleEvaluator(BaseEvaluator):
             self._edges_communities_d
         )
         
+        self.stream.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges,), TPB = self.TPB_1D)
+
+        self.init_sample_hhi_gpu[blockspergrid,threadsperblock,self.stream](
+            self._hhi_edges_d
+        )
+
         self.stream.synchronize()
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._n_communities), TPB = self.TPB_2D)
@@ -1478,10 +1596,26 @@ class SampleEvaluator(BaseEvaluator):
         
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
 
+        self.init_sample_w_ik_gpu[blockspergrid,threadsperblock,self.stream](
+            self._w_ik_d
+        )
+
+        self.stream.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
+
         self.calc_sample_w_ik_gpu[blockspergrid,threadsperblock,self.stream](
             self._sampler._T_d,
             self._membership_d,
             self._w_ik_d
+        )
+
+        self.stream.synchronize()
+
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_attr,), TPB = self.TPB_1D)
+
+        self.init_sample_mpc_gpu[blockspergrid,threadsperblock,self.stream](
+            self._mpc_attrs_d
         )
 
         self.stream.synchronize()
@@ -1569,10 +1703,17 @@ class SampleEvaluator(BaseEvaluator):
         state = super().__getstate__()
 
         if self.use_gpu:
+
+            del state['init_sample_p_et_gpu']
+            del state['init_sample_p_ek_gpu']
+            del state['init_sample_hhi_gpu']
+            del state['init_sample_w_i_gpu']
+            del state['init_sample_w_it_gpu']
+            del state['init_sample_w_ik_gpu']
+            del state['init_sample_mpc_gpu']
             del state['edge_sample_p_et_gpu']
             del state['edge_sample_p_ek_gpu']
             del state['calc_sample_hhi_gpu']
-            del state['init_sample_w_i_gpu']
             del state['calc_sample_w_i_gpu']
             del state['calc_sample_w_it_gpu']
             del state['calc_sample_w_ik_gpu']
