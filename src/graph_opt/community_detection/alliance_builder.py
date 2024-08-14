@@ -176,7 +176,7 @@ class GraphLoader:
             edge_type = data.get('edge_type', None)
             if edge_type:
                 edge_types.add(edge_type)
-        
+
         # attribute lists
         attr_list = sorted(edge_types)
         for i,attr in enumerate(attr_list):
@@ -239,11 +239,11 @@ class GraphLoader:
         self._cp = cp
         self._adj3 = adj3
         self._adj = adj
-        self._adj_dense_index = adj_dense_index    
+        self._adj_dense_index = adj_dense_index
         self._node_spatial_degree = np.array(self.node_spatial_degree)
         self._adj_multi_attr = adj_multi_attr
         self._adj_multi_attr_type = adj_multi_attr_type
-        self._adj_multi_attr_index = adj_multi_attr_index 
+        self._adj_multi_attr_index = adj_multi_attr_index
         self._adj_multi_attr_sparse = adj_multi_attr_sparse
 
     def __del__(self):
@@ -252,6 +252,7 @@ class GraphLoader:
             del self._cp_d
             del self._adj_d
             del self._adj3_d
+            del self._adj_sparse_d
             del self._adj_dense_d
             del self._adj_dense_index_d
 
@@ -274,7 +275,7 @@ class GraphLoader:
             del state['_adj_dense_index_d']
 
         return state
-    
+
     def __setstate__(self, state):
         self.__dict__.update(state)
 
@@ -283,18 +284,18 @@ class GraphLoader:
 
 
 class BaseSampler(ABC):
-    
+
     def __init__(
-            self, 
-            gloader: GraphLoader, 
-            seed: int = None, 
+            self,
+            gloader: GraphLoader,
+            seed: int = None,
             use_gpu: bool | None = False,
             threads_per_block_1D: Optional[int] = 484,
             threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 22,
             threads_per_block_3D: Optional[Union[int,Tuple[int,int,int]]] = 8,
             stream: Optional[Any] = None
         ) -> None:
-        
+
         self._gloader = gloader
         self.seed = seed
         self.use_gpu = use_gpu
@@ -310,10 +311,10 @@ class BaseSampler(ABC):
     @cpu_gpu_dispatcher('_post_init_cpu', '_post_init_gpu')
     def _post_init(self, **kwargs):
         pass
-    
+
     def _post_init_cpu(self, **kwargs):
         pass
-    
+
     def _post_init_gpu(
             self,
             threads_per_block_1D: int,
@@ -379,7 +380,7 @@ class NeighbourSampler(BaseSampler):
             return self._V_d.copy_to_host()
         else:
             return self._V.copy()
-        
+
     @property
     def walks_edges(self):
         if self.use_gpu:
@@ -393,14 +394,14 @@ class NeighbourSampler(BaseSampler):
             return self._T_d.copy_to_host()
         else:
             return self._T.copy()
-        
+
     @property
     def W(self):
         if self.use_gpu:
             return self._W_d.copy_to_host()
         else:
             return self._W.copy()
-    
+
     @cpu_gpu_dispatcher('_init_sampling_cpu', '_init_sampling_gpu')
     def _init_sampling(self):
         pass
@@ -420,7 +421,7 @@ class NeighbourSampler(BaseSampler):
         from ..utilities_cuda import create_xoroshiro128p_states
 
         kernels = define_cuda_kernels_sampling(self._gloader.n_attr, self._gloader.n_nodes_spatial)
-        
+
         self.edge_sampler_gpu       : Callable = kernels[0]
         self.spatial_random_walk    : Callable = kernels[1]
         self.attr_sampler_gpu       : Callable = kernels[2]
@@ -440,7 +441,7 @@ class NeighbourSampler(BaseSampler):
 
     def _randomwalk_cpu(self):
         """
-        Perform `n` random walks of length `length` starting from root nodes `nodes`. 
+        Perform `n` random walks of length `length` starting from root nodes `nodes`.
 
         Parameters
         ----------
@@ -458,7 +459,7 @@ class NeighbourSampler(BaseSampler):
         spatial_random_walk(
             adj = self._gloader._adj_dense,
             adj_i = self._gloader._adj_dense_index,
-            V = self._V, 
+            V = self._V,
             walks_edges = self._walks_edges,
             rs = rng,
         )
@@ -504,7 +505,7 @@ class NeighbourSampler(BaseSampler):
             weights_d
         )
 
-        self.cuda.synchronize()
+        self.stream.synchronize()
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self.n_walks, self.walk_length), TPB = self.TPB_3D)
         cuda_random_state = self.create_xoroshiro128p_states(nstates,self.seed)
@@ -518,7 +519,7 @@ class NeighbourSampler(BaseSampler):
             cuda_random_state
         )
 
-        self.cuda.synchronize()
+        self.stream.synchronize()
 
     def save(self, directory=None, **kwargs):
         data_to_save = {
@@ -558,13 +559,18 @@ class NeighbourSampler(BaseSampler):
 
     def __del__(self):
         super().__del__()
-        
+
         if self.use_gpu and self._init_gpu:
             del self._N_uv_d
             del self._V_d
             del self._walks_edges_d
             del self._T_d
             del self._W_d
+
+            # del self.edge_sampler_gpu
+            # del self.spatial_random_walk
+            # del self.attr_sampler_gpu
+            # del self.create_xoroshiro128p_states
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -670,7 +676,7 @@ class BaseEvaluator(ABC):
         self._w_k = np.zeros(self._n_communities)
 
         pass
-        
+
     def _post_init_gpu(
             self,
             threads_per_block_1D: int,
@@ -697,7 +703,7 @@ class BaseEvaluator(ABC):
 
         self._edges_communities_d = self.cuda.device_array((self._gloader.n_unique_edges,self._n_communities), dtype=np.float32, stream=self.stream)
         self._hhi_edges_d = self.cuda.device_array((self._gloader.n_unique_edges), dtype=np.float32, stream=self.stream)
-        
+
         self._w_ik_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self._n_communities), dtype=np.float32, stream=self.stream)
         self._w_k_d = self.cuda.device_array((self._n_communities), dtype=np.float32, stream=self.stream)
         self._mpc_attrs_d = self.cuda.device_array((self._gloader.n_attr), dtype=np.float32, stream=self.stream)
@@ -717,10 +723,10 @@ class BaseEvaluator(ABC):
             return self._membership_d.copy_to_host()
         else:
             return self._membership.copy()
-    
+
     @membership.setter
     def membership(self,value:np.ndarray):
-        
+
         assert value.shape == (self._gloader.n_attr,), f"error: membership array shape {value.shape} does not match number of attributes {self._gloader.n_attr}"
 
         self._w_ik = np.zeros((self._gloader.n_nodes_spatial,self._n_communities),dtype=np.float32)
@@ -747,7 +753,7 @@ class BaseEvaluator(ABC):
     @property
     def n_communities(self):
         return self._n_communities
-    
+
     @n_communities.setter
     def n_communities(self,value:int):
         self._n_communities = value
@@ -786,7 +792,7 @@ class BaseEvaluator(ABC):
     @property
     def mpc_attrs(self) -> np.ndarray:
         return self._mpc_attrs.copy()
-    
+
     @property
     def log_mpc_attrs(self) -> np.ndarray:
         return self._log_mpc_attrs.copy()
@@ -811,14 +817,14 @@ class BaseEvaluator(ABC):
             return self._w_it_d.copy_to_host()
         else:
             return self._w_it.copy()
-    
+
     @property
     def w_ik(self):
         if self.use_gpu:
             return self._w_ik_d.copy_to_host()
         else:
             return self._w_ik.copy()
-    
+
     @property
     def w_i(self):
         if self.use_gpu:
@@ -956,7 +962,7 @@ class BaseEvaluator(ABC):
     def copy_gpu_attributes(self, target: 'BaseEvaluator', stream: Any):
         # Copy GPU-specific attributes
         target._w_it_d = self.cuda.to_device(self.w_it, stream=stream)
-        target._w_i_d = self.cuda.to_device(self.w_i, stream=stream) 
+        target._w_i_d = self.cuda.to_device(self.w_i, stream=stream)
         target._w_ik_d = self.cuda.to_device(self.w_ik, stream=stream)
         target._w_k_d = self.cuda.to_device(self.w_k, stream=stream)
 
@@ -987,12 +993,12 @@ class BaseEvaluator(ABC):
             del state['calc_w_k_edges_gpu']
             del state['calc_w_k_nodes_gpu']
             del state['calc_w_k_log_gpu']
-        
+
         return state
-    
+
     def __setstate__(self, state):
         self.__dict__.update(state)
-        
+
         if self.use_gpu:
             self._post_init_gpu(
                 threads_per_block_1D=self.TPB_1D,
@@ -1010,6 +1016,11 @@ class BaseEvaluator(ABC):
             del self._w_k_d
             del self._mpc_attrs_d
             del self._membership_d
+
+            # del self.init_w_k_gpu
+            # del self.calc_w_k_edges_gpu
+            # del self.calc_w_k_nodes_gpu
+            # del self.calc_w_k_log_gpu
 
 class ExactEvaluator(BaseEvaluator):
 
@@ -1158,7 +1169,7 @@ class ExactEvaluator(BaseEvaluator):
     @cpu_gpu_dispatcher('_update_hhi_scores_cpu', '_update_hhi_scores_gpu')
     def _update_hhi_scores(self, **kwargs):
         pass
-    
+
     def _update_hhi_scores_cpu(self):
 
         edge_postprocess_cpu(
@@ -1251,7 +1262,7 @@ class ExactEvaluator(BaseEvaluator):
             self._log_mpc[attr] = self._log_mpc_attrs[self._gloader.attr_key2i[attr]]
 
     def _update_mpc_scores_gpu(self):
-        
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
 
         self.init_w_ik[blockspergrid,threadsperblock,self.stream](
@@ -1328,7 +1339,7 @@ class ExactEvaluator(BaseEvaluator):
                 walk_length=self.walk_length,
                 n_communities=self._n_communities
             )
-    
+
     def __getstate__(self):
         state = super().__getstate__()
 
@@ -1349,9 +1360,27 @@ class ExactEvaluator(BaseEvaluator):
 
         return state
 
+    def __del__(self):
+        super().__del__()
+
+        # if self.use_gpu and self._init_gpu:
+        #     del self.init_edges_communities
+        #     del self.init_hhi
+        #     del self.init_w_it
+        #     del self.init_w_ik
+        #     del self.init_w_i
+        #     del self.init_mpc
+        #     del self.edge_postprocess_gpu
+        #     del self.calc_hhi_gpu
+        #     del self.calc_w_it_gpu
+        #     del self.calc_w_i_gpu
+        #     del self.calc_w_ik_gpu
+        #     del self.normalize_w_ix_gpu
+        #     del self.calc_mpc_gpu
+
 
 class SampleEvaluator(BaseEvaluator):
-    
+
     def __init__(
             self,
             gloader: GraphLoader,
@@ -1428,7 +1457,7 @@ class SampleEvaluator(BaseEvaluator):
         from .utilities_cuda import define_cuda_kernels_stochastic
 
         kernels = define_cuda_kernels_stochastic()
-        
+
 
         self.init_sample_p_et_gpu           : Callable = kernels[0]
         self.init_sample_p_ek_gpu           : Callable = kernels[1]
@@ -1512,13 +1541,13 @@ class SampleEvaluator(BaseEvaluator):
 
         hhi_estimate = edge_counts**2
         self._hhi_edges = np.nansum(hhi_estimate,axis=1)
-        
+
         # Update the hhi
         for i, edge in enumerate(self._gloader.edge_unique_list):
             self._hhi[edge] = self._hhi_edges[i]
 
     def _update_hhi_scores_gpu(self):
-        
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._gloader.n_attr), TPB = self.TPB_2D)
 
         self.init_sample_p_ek_gpu[blockspergrid,threadsperblock,self.stream](
@@ -1534,7 +1563,7 @@ class SampleEvaluator(BaseEvaluator):
             self._membership_d,
             self._edges_communities_d
         )
-        
+
         self.stream.synchronize()
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges,), TPB = self.TPB_1D)
@@ -1593,7 +1622,7 @@ class SampleEvaluator(BaseEvaluator):
             self._log_mpc[attr] = self._log_mpc_attrs[self._gloader.attr_key2i[attr]]
 
     def _update_mpc_scores_gpu(self):
-        
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
 
         self.init_sample_w_ik_gpu[blockspergrid,threadsperblock,self.stream](
@@ -1721,6 +1750,26 @@ class SampleEvaluator(BaseEvaluator):
 
         return state
 
+    def __del__(self):
+        super().__del__()
+
+        if self.use_gpu and self._init_gpu:
+            del self._edges_attrs_d
+
+            # del self.init_sample_p_et_gpu
+            # del self.init_sample_p_ek_gpu
+            # del self.init_sample_hhi_gpu
+            # del self.init_sample_w_i_gpu
+            # del self.init_sample_w_it_gpu
+            # del self.init_sample_w_ik_gpu
+            # del self.init_sample_mpc_gpu
+            # del self.edge_sample_p_et_gpu
+            # del self.edge_sample_p_ek_gpu
+            # del self.calc_sample_hhi_gpu
+            # del self.calc_sample_w_i_gpu
+            # del self.calc_sample_w_it_gpu
+            # del self.calc_sample_w_ik_gpu
+            # del self.calc_sample_mpc_gpu
 
 class EvaluatorManager:
     def __init__(self, num_streams: int, evaluator: BaseEvaluator) -> None:
@@ -1737,7 +1786,7 @@ class EvaluatorManager:
 
 
 class BaseOptimizer(ABC):
-    
+
     def __init__(self, evaluator: BaseEvaluator, seed: int) -> None:
         self._evaluator = evaluator
         self.seed = seed
@@ -1776,11 +1825,11 @@ class BaseOptimizer(ABC):
     @property
     def f(self) -> float:
         return self._f
-    
+
     @property
     def f1(self) -> float:
         return self._f1
-    
+
     @property
     def f2(self) -> float:
         return self._f2
@@ -1792,11 +1841,11 @@ class BaseOptimizer(ABC):
     @property
     def communities_history(self) -> List[Dict[str,int]]:
         return self._communities_history.copy()
-    
+
     @property
     def f_history(self) -> List[float]:
         return self._f_history.copy()
-    
+
     @property
     def multi_history(self) -> List[Tuple[float,float]]:
         return self._multi_history.copy()
@@ -1844,9 +1893,9 @@ class BaseOptimizer(ABC):
 class BruteForce(BaseOptimizer):
 
     def __init__(
-            self, 
-            evaluator: ExactEvaluator | SampleEvaluator, 
-            seed: int, 
+            self,
+            evaluator: ExactEvaluator | SampleEvaluator,
+            seed: int,
             weights: Optional[Tuple[float,float]] = (0.5,0.5),
             num_streams: Optional[int] = 1,
             use_gpu: Optional[bool] = False
@@ -1897,7 +1946,7 @@ class BruteForce(BaseOptimizer):
             vargs_iterator = [(membership,) for i,membership in enumerate(self._memberships)]
             vkwargs_iterator = [{},] * len(vargs_iterator)
             fargs = [
-                self.weights, 
+                self.weights,
                 self._evaluator,
             ]
             fkwargs = {}
@@ -1922,8 +1971,8 @@ class BruteForce(BaseOptimizer):
                         future = executor.submit(
                             self._process_batch_thread,
                             membership,
-                            self.weights, 
-                            self._eval_manager, 
+                            self.weights,
+                            self._eval_manager,
                         )
                         futures.append(future)
 
@@ -1932,8 +1981,8 @@ class BruteForce(BaseOptimizer):
                         results.append(future.result())
                         pbar_outer.update(1)
 
-        for i, (x, f, hhi, mpc) in enumerate(results): 
-            
+        for i, (x, f, hhi, mpc) in enumerate(results):
+
             # Calculate the initial mean hhi over all routes
             f1 = -np.mean(hhi)
             f2 = np.mean(mpc)
@@ -1957,7 +2006,7 @@ class BruteForce(BaseOptimizer):
             for i, values in self._results_library.items():
                 x = values['membership']
                 f = values['f']
-                
+
                 # log history
                 if f - self._f > rtol:
 
@@ -2042,9 +2091,9 @@ class BruteForce(BaseOptimizer):
 class GreedyOptimizer(BaseOptimizer):
 
     def __init__(
-            self, 
-            evaluator: ExactEvaluator | SampleEvaluator, 
-            seed: int, 
+            self,
+            evaluator: ExactEvaluator | SampleEvaluator,
+            seed: int,
             communities_dict: Optional[Dict[str,int]] = None,
             weights: Optional[Tuple[float,float]] = (0.5,0.5),
             num_streams: Optional[int] = 1,
@@ -2103,7 +2152,7 @@ class GreedyOptimizer(BaseOptimizer):
     @property
     def n_evals(self) -> List[int]:
         return self._n_evals.copy()
-    
+
     @property
     def n_iterations(self) -> List[int]:
         return self._n_iterations.copy()
@@ -2124,7 +2173,7 @@ class GreedyOptimizer(BaseOptimizer):
         n_iterations = 0
         n_evals = 0
         max_iterations = max_iterations if max_iterations is not None else self._evaluator.n_distinct_communities
-        
+
         with tqdm(total=max_iterations, desc="Outer Loop", position=0, leave=False) as pbar_outer:
             while improvement and n_iterations < max_iterations:
 
@@ -2149,12 +2198,12 @@ class GreedyOptimizer(BaseOptimizer):
 
                         if not sample_pairs:
                             break
-                        
+
                         if multiprocess:
                             vargs_iterator = [[pairs[0],pairs[1]] for i,pairs in enumerate(sample_pairs)]
                             vkwargs_iterator = [{},] * len(vargs_iterator)
                             fargs = [
-                                self.weights, 
+                                self.weights,
                                 self._membership_pairs,
                                 self._evaluator,
                                 self._f
@@ -2183,9 +2232,9 @@ class GreedyOptimizer(BaseOptimizer):
                                         self._process_batch_thread,
                                         community_i,
                                         community_j,
-                                        self.weights, 
+                                        self.weights,
                                         self._membership_pairs[(community_i, community_j)].copy(),
-                                        self._eval_manager, 
+                                        self._eval_manager,
                                         self._f
                                     )
                                     futures.append(future)
@@ -2214,7 +2263,7 @@ class GreedyOptimizer(BaseOptimizer):
 
                 # If the maximum increase is greater than 0, merge these two communities and update the mean hhi
                 if max_increase > 0:
-                    
+
                     self._evaluator.update_scores_membership(self.membership_pairs[best_x])
                     self._communities_dict = self._evaluator.communities_dict
 
@@ -2380,7 +2429,7 @@ class ExactOptimizer(BaseOptimizer):
         ) -> None:
 
         super().__init__(evaluator, seed)
-        
+
         self._evaluator = evaluator
         self.weights = weights
         self._model_settings = model_settings
@@ -2403,7 +2452,7 @@ class ExactOptimizer(BaseOptimizer):
         self.optimal = False
 
     def process_communities_dict(self, x: Dict[Tuple[int, int], Var]) -> Dict[str, int]:
-        
+
         assert self.model_built, "Model not built yet. Run build_model() first."
         assert len(x) > 0, "No decision variables found. Run build_model() first."
 
@@ -2419,7 +2468,7 @@ class ExactOptimizer(BaseOptimizer):
         return communities_dict
 
     def process_communities_values(self, x: Dict[Tuple[int, int], int]) -> Dict[str, int]:
-        
+
         assert self.model_built, "Model not built yet. Run build_model() first."
         assert len(x) > 0, "No decision variables found. Run build_model() first."
 
@@ -2491,7 +2540,7 @@ class ExactOptimizer(BaseOptimizer):
         for i in tqdm(self._V, desc="Building f2 expression"):
             for t in self._T:
                 p_it_exp = p_it[i, t]
-                
+
                 for k in self._K:
                     linear_expr += ((self._x[t, k] * p_ik_exp[i,k] * p_it_exp) / (n_nodes * n_attr))
 
@@ -2516,7 +2565,7 @@ class ExactOptimizer(BaseOptimizer):
     def load(self, directory=None, **kwargs):
         super().load(directory, **kwargs)
         self._model = read(os.path.join(directory,"{}.lp".format(self._model_name)))
-        
+
         self._load_vars()
 
         with open(os.path.join(self._log_dir, 'exact_solution.csv'), 'r') as f:
@@ -2527,7 +2576,7 @@ class ExactOptimizer(BaseOptimizer):
         self.model_built = True
 
     def optimize(self):
-        
+
         # prepare logs
         f = open(os.path.join(self._log_dir, 'exact_solution.csv'),'w'); f.write("runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations\n")
         f.close()
@@ -2559,7 +2608,7 @@ class ExactOptimizer(BaseOptimizer):
             if where == GRB.Callback.MIP:
 
                 self._log_counter += 1
-                
+
                 # Basic MIP info
                 objbst = model.cbGet(GRB.Callback.MIP_OBJBST)  # Best objective
                 objbnd = model.cbGet(GRB.Callback.MIP_OBJBND)  # Best bound
@@ -2579,7 +2628,7 @@ class ExactOptimizer(BaseOptimizer):
                     mip_gap = abs(objbst - objbnd) / (1.0 + abs(objbst))
                 else:
                     mip_gap = None
-                
+
                 # log every 100 iterations
                 if self._log_counter % self._log_interval == 0:
                     # Format each variable appropriately before writing
@@ -2591,7 +2640,7 @@ class ExactOptimizer(BaseOptimizer):
                     )
                     with open(os.path.join(self._log_dir, 'exact_solution.csv'), 'a') as f:
                         f.write(log_entry)
-            
+
                     self._logs.append((runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations))
 
             elif where == GRB.Callback.PRESOLVE:
@@ -2614,3 +2663,7 @@ class ExactOptimizer(BaseOptimizer):
             self._f2 = np.mean(list(self._evaluator.mpc.values()))
 
         return
+    
+    def __del__(self):
+        super().__del__()
+        self._model.dispose()

@@ -399,8 +399,6 @@ class _TestDeterministic():
         for name, attr in data_to_load.items():
             test_data[name] = getattr(test_class,attr["name"])
 
-        del test_class
-
         test_class = ExactEvaluator(
             gloader=graph, 
             use_gpu=self.use_gpu,
@@ -567,7 +565,14 @@ class _TestStochastic():
         for name, attr in data_to_load.items():
             test_data[name] = getattr(test_class,attr["name"])
 
-        del test_class
+        sampler = NeighbourSampler(
+            gloader=graph,
+            seed=seed,
+            use_gpu=self.use_gpu,
+            n_samples_edge=self.n_samples_edge,
+            n_walks=self.n_walks,
+            walk_length=self.walk_length,
+        )
 
         test_class = SampleEvaluator(
             gloader=graph,
@@ -597,6 +602,8 @@ class _TestStochastic():
                         assert abs(value_i - test_value_i) < 1e-6
             else:
                 assert getattr(test_class,attr["name"]) == test_data[name]
+
+        pass
 
     def test_with_exact(self, read_graph: GraphLoader, example_case_param):
 
@@ -913,8 +920,6 @@ class _TestOptimize():
         for name, attr in data_to_load.items():
             test_data[name] = getattr(optimizer,attr["name"])
 
-        del optimizer
-
         optimizer = ExactOptimizer(
             evaluator=evaluator,
             seed=seed,
@@ -986,8 +991,6 @@ class _TestOptimize():
         for name, attr in data_to_load.items():
             test_data[name] = getattr(optimizer,attr["name"])
 
-        del optimizer
-
         optimizer = BruteForce(
             evaluator=evaluator,
             seed=seed,
@@ -1057,13 +1060,8 @@ class _TestOptimize():
         for name, attr in data_to_load.items():
             test_data[name] = getattr(optimizer,attr["name"])
 
-        del optimizer
-        del evaluator
-
-        evaluator_load = get_evaluator
-
         optimizer_load = GreedyOptimizer(
-            evaluator=evaluator_load,
+            evaluator=evaluator,
             seed=seed,
             num_streams=self.num_streams,
             weights=weights,
