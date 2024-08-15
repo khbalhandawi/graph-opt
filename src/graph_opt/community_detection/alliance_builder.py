@@ -2528,24 +2528,39 @@ class ExactOptimizer(BaseOptimizer):
                 self._x[t, k] = self._model.addVar(vtype=GRB.BINARY, name=f"x_{t}_{k}")
 
         # Objective function: Quadratic part
-        quad_expr = quicksum((quicksum(self._x[t, k]*p_et[uv_dict[(u, v)], t] for t in self._T))**2 for k in self._K for u, v in self._E) / n_edges
+        f1_expr = 0
+        for u, v in tqdm(self._E, desc="computing f1_expr"):
+            for k in self._K:
+
+                p_ek = 0
+                for t in self._T:
+                    if p_et[uv_dict[(u, v)], t] > 0:
+                        p_ek += self._x[t, k]*p_et[uv_dict[(u, v)], t]
+
+                f1_expr += p_ek**2 / n_edges
 
         # Objective function: Linear weighted interaction part
         p_ik_exp = {}
         for i in tqdm(self._V, desc="computing p_ik_exp"):
             for k in self._K:
-                p_ik_exp[i,k] = quicksum(self._x[t, k] * p_it[i, t] for t in self._T)
+                p_ik = 0
+                for t in self._T:
+                    if p_it[i, t] > 0:
+                        p_ik += self._x[t, k]*p_it[i, t]
 
-        linear_expr = 0
+                p_ik_exp[i,k] = p_ik
+
+        f2_exp = 0
         for i in tqdm(self._V, desc="Building f2 expression"):
             for t in self._T:
                 p_it_exp = p_it[i, t]
 
                 for k in self._K:
-                    linear_expr += ((self._x[t, k] * p_ik_exp[i,k] * p_it_exp) / (n_nodes * n_attr))
+                    if p_it_exp > 0:
+                        f2_exp += ((self._x[t, k] * p_ik_exp[i,k] * p_it_exp) / (n_nodes * n_attr))
 
         # Set the objective
-        self._model.setObjective(-self.weights[0]*quad_expr + self.weights[1]*linear_expr, GRB.MAXIMIZE)
+        self._model.setObjective(-self.weights[0]*f1_expr + self.weights[1]*f2_exp, GRB.MAXIMIZE)
 
         # Constraints: Ensure each attribute is in exactly one subset
         for t in self._T:
@@ -2665,5 +2680,4 @@ class ExactOptimizer(BaseOptimizer):
         return
     
     def __del__(self):
-        super().__del__()
         self._model.dispose()
