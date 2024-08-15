@@ -2438,6 +2438,9 @@ class ExactOptimizer(BaseOptimizer):
         self._log_interval = log_interval
         self._model_name = model_name
 
+        if not os.path.exists(self._log_dir):
+            os.makedirs(self._log_dir)
+
         # model parameters
         self._K = list(range(self._evaluator.n_communities))
         self._E = self._evaluator._gloader.edge_unique_list
@@ -2527,17 +2530,13 @@ class ExactOptimizer(BaseOptimizer):
             for k in self._K:
                 self._x[t, k] = self._model.addVar(vtype=GRB.BINARY, name=f"x_{t}_{k}")
 
-        # Objective function: Quadratic part
-        f1_expr = 0
-        for u, v in tqdm(self._E, desc="computing f1_expr"):
+        # Pre-compute the products if they are reused often
+        p_ek_precomputed = {}
+        for u,v in tqdm(self._E, desc="computing p_ek_precomputed"):
             for k in self._K:
+                p_ek_precomputed[u, v, k] = quicksum(self._x[t, k] * p_et[uv_dict[(u, v)], t] for t in self._T if p_et[uv_dict[(u, v)], t] > 0)
 
-                p_ek = 0
-                for t in self._T:
-                    if p_et[uv_dict[(u, v)], t] > 0:
-                        p_ek += self._x[t, k]*p_et[uv_dict[(u, v)], t]
-
-                f1_expr += p_ek**2 / n_edges
+        f1_expr = quicksum(p_ek_precomputed[u, v, k] ** 2 / n_edges for u, v in self._E for k in self._K)
 
         # Objective function: Linear weighted interaction part
         p_ik_exp = {}
