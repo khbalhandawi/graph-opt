@@ -9,7 +9,7 @@ import sys
 import random
 import math
 from typing import Callable, Dict, Any, Union
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from gurobipy import Model, GRB, quicksum, read, Var
 import csv
 import threading
@@ -2512,6 +2512,14 @@ class ExactOptimizer(BaseOptimizer):
                 k = int(k)
                 self._x[(t, k)] = var
 
+    @staticmethod
+    def compute_ek(u: int, v: int, k: int, x: Dict[Tuple[int,int],Var], p_et: np.ndarray, uv_dict: Dict[Tuple[int,int],Tuple[int,int]], T: List[int]) -> float:
+        return u,v,k,quicksum(x[t, k] * p_et[uv_dict[(u, v)], t] for t in T if p_et[uv_dict[(u, v)], t] > 0)
+
+    @staticmethod
+    def compute_ik(i: int, k: int, x: Dict[Tuple[int,int],Var], p_it: np.ndarray, T: List[int]) -> float:
+        return i,k,quicksum(x[t, k] * p_it[i, t] for t in T if p_it[i, t] > 0)
+
     def build_model(self):
 
         p_it = self._evaluator.p_it
@@ -2532,28 +2540,34 @@ class ExactOptimizer(BaseOptimizer):
 
         # Pre-compute the products if they are reused often
         p_ek_precomputed = {}
-        for u,v in tqdm(self._E, desc="computing p_ek_precomputed"):
-            for k in self._K:
-                p_ek_precomputed[u, v, k] = quicksum(self._x[t, k] * p_et[uv_dict[(u, v)], t] for t in self._T if p_et[uv_dict[(u, v)], t] > 0)
+        with ThreadPoolExecutor(max_workers=self._model_settings.get('Threads',1)) as executor:            
+            futures = []
+            for u,v in tqdm(self._E, desc="Building p_ek_precomputed"):
+                for k in self._K:
+                    future = executor.submit(self.compute_ek, u, v, k, self._x, p_et, uv_dict, self._T)
+                    futures.append(future)
+            
+            for future in tqdm(futures, total=len(futures), desc="computing p_ek_precomputed"):
+                results = future.result()
+                u, v, k, p_ek = results
+                p_ek_precomputed[u, v, k] = p_ek
 
         f1_expr = quicksum(p_ek_precomputed[u, v, k] ** 2 / n_edges for u, v in self._E for k in self._K)
 
         # Objective function: Linear weighted interaction part
         p_ik_exp = {}
-        for i in tqdm(self._V, desc="computing p_ik_exp"):
-            for k in self._K:
-                p_ik = 0
-                for t in self._T:
-                    if p_it[i, t] > 0:
-                        p_ik += self._x[t, k]*p_it[i, t]
-
+        with ThreadPoolExecutor(max_workers=self._model_settings.get('Threads',1)) as executor:
+            futures = [executor.submit(self.compute_ik, i, k, self._x, p_it, self._T) for i in self._V for k in self._K]
+            for future in tqdm(futures, total=len(futures), desc="computing p_ik_exp"):
+                results = future.result()
+                i, k, p_ik = results
                 p_ik_exp[i,k] = p_ik
 
         f2_exp = 0
         for i in tqdm(self._V, desc="Building f2 expression"):
             for t in self._T:
                 p_it_exp = p_it[i, t]
-
+        
                 for k in self._K:
                     if p_it_exp > 0:
                         f2_exp += ((self._x[t, k] * p_ik_exp[i,k] * p_it_exp) / (n_nodes * n_attr))
