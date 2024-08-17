@@ -913,7 +913,8 @@ class _TestOptimize():
             'communities_history':  {"name" : 'communities_history', "dtype" : List[Dict[str,int]]},
             'f_history':            {"name" : 'f_history', "dtype" : list},
             'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
-            'logs':                 {"name" : 'logs', "dtype" : List[Tuple[float,float,float,float,float,float]]},
+            'mip_logs':             {"name" : 'mip_logs', "dtype" : List[Tuple[float,float,float,float,float,float]]},
+            'simplex_logs':         {"name" : 'simplex_logs', "dtype" : List[Tuple[float,float,float,float]]},
         }
 
         test_data = {}

@@ -9,7 +9,7 @@ import sys
 import random
 import math
 from typing import Callable, Dict, Any, Union
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from gurobipy import Model, GRB, quicksum, read, Var
 import csv
 import threading
@@ -2447,8 +2447,9 @@ class ExactOptimizer(BaseOptimizer):
         self._V = list(range(self._evaluator._gloader.n_nodes_spatial))
         self._T = list(range(self._evaluator._gloader.n_attr))
 
-        self._logs = []
-        self._log_counter = 0
+        self._mip_logs = []
+        self._simplex_logs = []
+        self._mip_log_counter = 0
 
         self._x: Dict[Tuple[int,int], Var] = {} # Decision variables
         self.model_built = False
@@ -2486,8 +2487,12 @@ class ExactOptimizer(BaseOptimizer):
         return communities_dict
 
     @property
-    def logs(self) -> List[Tuple[float,float,float,float,float,float]]:
-        return self._logs.copy()
+    def simplex_logs(self) -> List[Tuple[float,float,float,float,float,float]]:
+        return self._simplex_logs.copy()
+
+    @property
+    def mip_logs(self) -> List[Tuple[float,float,float,float,float,float]]:
+        return self._mip_logs.copy()
 
     @property
     def x(self) -> Dict[Tuple[int,int],bool]:
@@ -2512,14 +2517,6 @@ class ExactOptimizer(BaseOptimizer):
                 k = int(k)
                 self._x[(t, k)] = var
 
-    @staticmethod
-    def compute_ek(u: int, v: int, k: int, x: Dict[Tuple[int,int],Var], p_et: np.ndarray, uv_dict: Dict[Tuple[int,int],Tuple[int,int]], T: List[int]) -> float:
-        return u,v,k,quicksum(x[t, k] * p_et[uv_dict[(u, v)], t] for t in T if p_et[uv_dict[(u, v)], t] > 0)
-
-    @staticmethod
-    def compute_ik(i: int, k: int, x: Dict[Tuple[int,int],Var], p_it: np.ndarray, T: List[int]) -> float:
-        return i,k,quicksum(x[t, k] * p_it[i, t] for t in T if p_it[i, t] > 0)
-
     def build_model(self):
 
         p_it = self._evaluator.p_it
@@ -2540,34 +2537,23 @@ class ExactOptimizer(BaseOptimizer):
 
         # Pre-compute the products if they are reused often
         p_ek_precomputed = {}
-        with ThreadPoolExecutor(max_workers=self._model_settings.get('Threads',1)) as executor:            
-            futures = []
-            for u,v in tqdm(self._E, desc="Building p_ek_precomputed"):
-                for k in self._K:
-                    future = executor.submit(self.compute_ek, u, v, k, self._x, p_et, uv_dict, self._T)
-                    futures.append(future)
-            
-            for future in tqdm(futures, total=len(futures), desc="computing p_ek_precomputed"):
-                results = future.result()
-                u, v, k, p_ek = results
-                p_ek_precomputed[u, v, k] = p_ek
+        for u,v in tqdm(self._E, desc="computing p_ek_precomputed"):
+            for k in self._K:
+                p_ek_precomputed[u, v, k] = quicksum(self._x[t, k] * p_et[uv_dict[(u, v)], t] for t in self._T if p_et[uv_dict[(u, v)], t] > 0)
 
         f1_expr = quicksum(p_ek_precomputed[u, v, k] ** 2 / n_edges for u, v in self._E for k in self._K)
 
         # Objective function: Linear weighted interaction part
         p_ik_exp = {}
-        with ThreadPoolExecutor(max_workers=self._model_settings.get('Threads',1)) as executor:
-            futures = [executor.submit(self.compute_ik, i, k, self._x, p_it, self._T) for i in self._V for k in self._K]
-            for future in tqdm(futures, total=len(futures), desc="computing p_ik_exp"):
-                results = future.result()
-                i, k, p_ik = results
-                p_ik_exp[i,k] = p_ik
+        for i in tqdm(self._V, desc="computing p_ik_exp"):
+            for k in self._K:
+                p_ik_exp[i,k] = quicksum(self._x[t, k] * p_it[i, t] for t in self._T if p_it[i, t] > 0)
 
         f2_exp = 0
         for i in tqdm(self._V, desc="Building f2 expression"):
             for t in self._T:
                 p_it_exp = p_it[i, t]
-        
+
                 for k in self._K:
                     if p_it_exp > 0:
                         f2_exp += ((self._x[t, k] * p_ik_exp[i,k] * p_it_exp) / (n_nodes * n_attr))
@@ -2596,17 +2582,25 @@ class ExactOptimizer(BaseOptimizer):
 
         self._load_vars()
 
-        with open(os.path.join(self._log_dir, 'exact_solution.csv'), 'r') as f:
+        with open(os.path.join(self._log_dir, 'mip_solution.csv'), 'r') as f:
             reader = csv.reader(f)
             for row in reader:
-                self._logs.append(tuple(row))
+                self._mip_logs.append(tuple(row))
+
+        with open(os.path.join(self._log_dir, 'simplex_solution.csv'), 'r') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                self._simplex_logs.append(tuple(row))
 
         self.model_built = True
 
     def optimize(self):
 
         # prepare logs
-        f = open(os.path.join(self._log_dir, 'exact_solution.csv'),'w'); f.write("runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations\n")
+        f = open(os.path.join(self._log_dir, 'mip_solution.csv'),'w'); f.write("runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations\n")
+        f.close()
+
+        f = open(os.path.join(self._log_dir, 'simplex_solution.csv'),'w'); f.write("runtime, obj_val, primal_inf, dual_inf, simplex_iterations\n")
         f.close()
 
         def _mycallback(model: Model, where: int):
@@ -2635,12 +2629,12 @@ class ExactOptimizer(BaseOptimizer):
 
             if where == GRB.Callback.MIP:
 
-                self._log_counter += 1
+                runtime = model.cbGet(GRB.Callback.RUNTIME)    # Runtime
+                self._mip_log_counter += 1
 
                 # Basic MIP info
                 objbst = model.cbGet(GRB.Callback.MIP_OBJBST)  # Best objective
                 objbnd = model.cbGet(GRB.Callback.MIP_OBJBND)  # Best bound
-                runtime = model.cbGet(GRB.Callback.RUNTIME)    # Runtime
 
                 # Compute the MIP gap manually
                 if objbst < GRB.INFINITY and objbnd > -GRB.INFINITY:
@@ -2658,7 +2652,7 @@ class ExactOptimizer(BaseOptimizer):
                     mip_gap = None
 
                 # log every 100 iterations
-                if self._log_counter % self._log_interval == 0:
+                if self._mip_log_counter % self._log_interval == 0:
                     # Format each variable appropriately before writing
                     mip_gap_str = 'None' if mip_gap is None else "{:.8f}".format(mip_gap)
                     node_count_str = 'None' if node_count is None else str(node_count)
@@ -2666,10 +2660,24 @@ class ExactOptimizer(BaseOptimizer):
                     log_entry = "{:.8e},{:.8e},{:.8e},{},{},{}\n".format(
                         runtime, objbst, objbnd, mip_gap_str, node_count_str, simplex_iterations_str
                     )
-                    with open(os.path.join(self._log_dir, 'exact_solution.csv'), 'a') as f:
+                    with open(os.path.join(self._log_dir, 'mip_solution.csv'), 'a') as f:
                         f.write(log_entry)
 
-                    self._logs.append((runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations))
+                    self._mip_logs.append((runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations))
+
+            elif where == GRB.Callback.SIMPLEX:
+                # Logging during simplex iterations
+                simplex_iter = model.cbGet(GRB.Callback.SPX_ITRCNT)
+                obj_val = model.cbGet(GRB.Callback.SPX_OBJVAL)
+                primal_inf = model.cbGet(GRB.Callback.SPX_PRIMINF)
+                dual_inf = model.cbGet(GRB.Callback.SPX_DUALINF)
+                
+                log_entry = "{:.8e},{:.8e},{:.8e},{:.8e},{}\n".format(
+                    runtime, obj_val, primal_inf, dual_inf, simplex_iter
+                )
+
+                with open(os.path.join(self._log_dir, 'simplex_solution.csv'), 'a') as f:
+                    f.write(log_entry)
 
             elif where == GRB.Callback.PRESOLVE:
                 # Presolve phase callbacks
