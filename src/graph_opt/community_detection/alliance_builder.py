@@ -2014,7 +2014,7 @@ class BruteForce(BaseOptimizer):
 
                     # Calculate the initial mean hhi over all routes
                     self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-                    self._f2 = np.mean(list(self._evaluator.mpc.values()))
+                    self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
                     self._f = multiobjective(self._f1,self._f2,self.weights)
 
                     self._communities_dict = self._evaluator.communities_dict
@@ -2035,10 +2035,10 @@ class BruteForce(BaseOptimizer):
         evaluator.update_scores_membership(membership)
 
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.mpc.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
         f = multiobjective(f1, f2, weights=weights)
 
-        return membership, f, list(evaluator.hhi.values()), list(evaluator.mpc.values())
+        return membership, f, list(evaluator.hhi.values()), list(evaluator.log_mpc.values())
 
     @staticmethod
     def _process_batch_thread(
@@ -2054,10 +2054,10 @@ class BruteForce(BaseOptimizer):
             lock.release()
 
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.mpc.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
         f = multiobjective(f1, f2, weights=weights)
 
-        return membership, f, list(evaluator.hhi.values()), list(evaluator.mpc.values())
+        return membership, f, list(evaluator.hhi.values()), list(evaluator.log_mpc.values())
 
     @_jsonmode
     def save(self, directory=None, **kwargs):
@@ -2118,7 +2118,7 @@ class GreedyOptimizer(BaseOptimizer):
 
         # Calculate the initial mean hhi over all routes
         self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-        self._f2 = np.mean(list(self._evaluator.mpc.values()))
+        self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
         self._f = multiobjective(self._f1,self._f2,self.weights)
 
         # log history
@@ -2269,7 +2269,7 @@ class GreedyOptimizer(BaseOptimizer):
 
                     # Calculate the initial mean hhi over all routes
                     self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-                    self._f2 = np.mean(list(self._evaluator.mpc.values()))
+                    self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
                     self._f = multiobjective(self._f1,self._f2,self.weights)
                     # self._f += max_increase
                     improvement = True
@@ -2383,7 +2383,7 @@ class GreedyOptimizer(BaseOptimizer):
         evaluator.update_scores_membership(membership_pairs[(community_i, community_j)])
 
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.mpc.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
         f_new = multiobjective(f1, f2, weights=weights)
 
         increase = f_new - f
@@ -2407,7 +2407,7 @@ class GreedyOptimizer(BaseOptimizer):
             lock.release()
 
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.mpc.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
         f_new = multiobjective(f1, f2, weights=weights)
 
         increase = f_new - f
@@ -2517,7 +2517,16 @@ class ExactOptimizer(BaseOptimizer):
                 k = int(k)
                 self._x[(t, k)] = var
 
-    def build_model(self):
+    def build_model(self, log_approx: Optional[str] = 'EXPR'):
+        """
+        Build the optimization model.
+
+        Parameters
+        ----------
+        log_approx : Optional[str], optional
+            Logarithmic approximation method. 
+            Options are 'PWL' (Piecewise Linear) or 'log' (logarithmic), by default 'PWL'
+        """
 
         p_it = self._evaluator.p_it
 
@@ -2558,8 +2567,29 @@ class ExactOptimizer(BaseOptimizer):
                     if p_it_exp > 0:
                         f2_exp += ((self._x[t, k] * p_ik_exp[i,k] * p_it_exp) / (n_nodes * n_attr))
 
+        # Create a PWL approximation of log(f2)
+        min_val = 1e-5  # Smallest value greater than zero
+        max_val = 1     # Maximum expected value of f2_exp
+        num_points = 100  # Number of points in the PWL approximation
+
+        # Auxiliary variable for storing f2_exp
+        f2_var = self._model.addVar(name="f2_var", lb=min_val, ub=max_val)
+        log_f2 = self._model.addVar(name="log_f2", lb=-100, ub=0)
+
+        if log_approx == 'PWL':
+            self._model.addConstr(f2_var == f2_exp, "Link_f2_var")
+
+            breakpoints_x = np.logspace(np.log10(min_val), np.log10(max_val), num=num_points)
+            breakpoints_y = np.log(breakpoints_x)
+
+            # Add the PWL constraint that approximates log(f2)
+            self._model.addGenConstrPWL(f2_var, log_f2, breakpoints_x, breakpoints_y, name="pwl_log_f2")
+        elif log_approx == 'EXPR':
+            # Adding the logarithmic constraint
+            self._model.addGenConstrLog(f2_var, log_f2, name="log_constraint")
+
         # Set the objective
-        self._model.setObjective(-self.weights[0]*f1_expr + self.weights[1]*f2_exp, GRB.MAXIMIZE)
+        self._model.setObjective(-self.weights[0]*f1_expr + self.weights[1]*log_f2, GRB.MAXIMIZE)
 
         # Constraints: Ensure each attribute is in exactly one subset
         for t in self._T:
@@ -2606,21 +2636,20 @@ class ExactOptimizer(BaseOptimizer):
         def _mycallback(model: Model, where: int):
 
             if where == GRB.Callback.MIPSOL:
-                # Get the current values of all variables when a new solution is found
-                values = model.cbGetSolution(model.getVars())
-                vars = model.getVars()
-
-                x = {}
-                x_id = 0
+                x = {}  # Dictionary to store variable values
                 for t in self._T:
                     for k in self._K:
-                        x[(t, k)] = values[x_id]
-                        x_id += 1
+                        var_name = f"x_{t}_{k}"
+                        var = model.getVarByName(var_name)
+                        if var is not None:  # Ensure the variable exists
+                            x[(t, k)] = model.cbGetSolution(var)
+                        else:
+                            print(f"Variable {var_name} not found.")
 
                 communities_dict = self.process_communities_values(x)
                 self._evaluator.update_scores(communities_dict)
                 self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-                self._f2 = np.mean(list(self._evaluator.mpc.values()))
+                self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
                 self._f = multiobjective(self._f1,self._f2,self.weights)
 
                 self._f_history.append(self._f)
@@ -2696,7 +2725,7 @@ class ExactOptimizer(BaseOptimizer):
 
             self._evaluator.update_scores(self._communities_dict)
             self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-            self._f2 = np.mean(list(self._evaluator.mpc.values()))
+            self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
 
         return
     

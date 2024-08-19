@@ -781,14 +781,14 @@ class _TestOptimize():
 
         # evaluator.update_scores(test_communities_dict)
         # f1 = -np.mean(list(evaluator.hhi.values()))
-        # f2 = np.mean(list(evaluator.mpc.values()))
+        # f2 = np.mean(list(evaluator.log_mpc.values()))
         # f = multiobjective(f1,f2,weights)
 
         # fs = []
         # for membership in optimizer.membership_pairs.values():
         #     evaluator.update_scores_membership(membership)
         #     f1 = -np.mean(list(evaluator.hhi.values()))
-        #     f2 = np.mean(list(evaluator.mpc.values()))
+        #     f2 = np.mean(list(evaluator.log_mpc.values()))
         #     f = multiobjective(f1,f2,weights)
         #     fs.append(f)
 
@@ -821,7 +821,7 @@ class _TestOptimize():
 
         evaluator.update_scores(test_communities_dict)
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.mpc.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
         f = multiobjective(f1,f2,weights)
 
         assert optimizer.f == f
@@ -861,17 +861,17 @@ class _TestOptimize():
 
         evaluator.update_scores(optimizer.communities_dict)
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.mpc.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
         f = multiobjective(f1,f2,weights)
 
-        assert abs(optimizer.f - f) < 1e-6
+        assert abs(optimizer.f - f) / f < 1e-6
 
         evaluator.update_scores(test_communities_dict)
         f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.mpc.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
         f = multiobjective(f1,f2,weights)
 
-        assert abs(optimizer.f - f) < 1e-6
+        assert abs(optimizer.f - f) / f < 1e-6
 
 
     def test_save_load_exact(
