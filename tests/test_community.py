@@ -915,6 +915,7 @@ class _TestOptimize():
             'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
             'mip_logs':             {"name" : 'mip_logs', "dtype" : List[Tuple[float,float,float,float,float,float]]},
             'simplex_logs':         {"name" : 'simplex_logs', "dtype" : List[Tuple[float,float,float,float]]},
+            'barrier_logs':         {"name" : 'barrier_logs', "dtype" : List[Tuple[float,float,float,float]]},
         }
 
         test_data = {}

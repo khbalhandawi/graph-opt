@@ -2449,6 +2449,7 @@ class ExactOptimizer(BaseOptimizer):
 
         self._mip_logs = []
         self._simplex_logs = []
+        self._barrier_logs = []
         self._mip_log_counter = 0
 
         self._x: Dict[Tuple[int,int], Var] = {} # Decision variables
@@ -2493,6 +2494,10 @@ class ExactOptimizer(BaseOptimizer):
     @property
     def mip_logs(self) -> List[Tuple[float,float,float,float,float,float]]:
         return self._mip_logs.copy()
+
+    @property
+    def barrier_logs(self) -> List[Tuple[float,float,float,float,float,float]]:
+        return self._barrier_logs.copy()
 
     @property
     def x(self) -> Dict[Tuple[int,int],bool]:
@@ -2558,38 +2563,43 @@ class ExactOptimizer(BaseOptimizer):
             for k in self._K:
                 p_ik_exp[i,k] = quicksum(self._x[t, k] * p_it[i, t] for t in self._T if p_it[i, t] > 0)
 
-        f2_exp = 0
-        for i in tqdm(self._V, desc="Building f2 expression"):
-            for t in self._T:
-                p_it_exp = p_it[i, t]
-
-                for k in self._K:
-                    if p_it_exp > 0:
-                        f2_exp += ((self._x[t, k] * p_ik_exp[i,k] * p_it_exp) / (n_nodes * n_attr))
-
         # Create a PWL approximation of log(f2)
         min_val = 1e-5  # Smallest value greater than zero
         max_val = 1     # Maximum expected value of f2_exp
         num_points = 100  # Number of points in the PWL approximation
 
-        # Auxiliary variable for storing f2_exp
-        f2_var = self._model.addVar(name="f2_var", lb=min_val, ub=max_val)
-        log_f2 = self._model.addVar(name="log_f2", lb=-100, ub=0)
+        f2_exp = 0
+        for t in tqdm(self._T, desc="Building f2 expression"):
+            f2_t_exp = 0
+            all_zeros = True
+            for i in self._V:
+                p_it_exp = p_it[i, t]
+                for k in self._K:
+                    if p_it_exp > 0:
+                        f2_t_exp += ((self._x[t, k] * p_ik_exp[i,k] * p_it_exp) / (n_nodes))
+                        all_zeros = False
 
-        if log_approx == 'PWL':
-            self._model.addConstr(f2_var == f2_exp, "Link_f2_var")
+            # take the log of f2_t_exp
+            if not all_zeros:
+                f2_t_var = self._model.addVar(name=f"f2_t_{t}", lb=min_val, ub=max_val)
+                log_f2_t = self._model.addVar(name=f"log_f2_t_{t}", lb=-100, ub=0)
+                self._model.addConstr(f2_t_var == f2_t_exp, f"Link_f2_t_{t}")
 
-            breakpoints_x = np.logspace(np.log10(min_val), np.log10(max_val), num=num_points)
-            breakpoints_y = np.log(breakpoints_x)
+                if log_approx == 'PWL':
 
-            # Add the PWL constraint that approximates log(f2)
-            self._model.addGenConstrPWL(f2_var, log_f2, breakpoints_x, breakpoints_y, name="pwl_log_f2")
-        elif log_approx == 'EXPR':
-            # Adding the logarithmic constraint
-            self._model.addGenConstrLog(f2_var, log_f2, name="log_constraint")
+                    breakpoints_x = np.logspace(np.log10(min_val), np.log10(max_val), num=num_points)
+                    breakpoints_y = np.log(breakpoints_x)
+
+                    # Add the PWL constraint that approximates log(f2)
+                    self._model.addGenConstrPWL(f2_t_var, log_f2_t, breakpoints_x, breakpoints_y, name=f"pwl_log_f2_t_{t}")
+                elif log_approx == 'EXPR':
+                    # Adding the logarithmic constraint
+                    self._model.addGenConstrLog(f2_t_var, log_f2_t, name=f"log_constraint_t_{t}")
+
+                f2_exp += log_f2_t / n_attr
 
         # Set the objective
-        self._model.setObjective(-self.weights[0]*f1_expr + self.weights[1]*log_f2, GRB.MAXIMIZE)
+        self._model.setObjective(-self.weights[0]*f1_expr + self.weights[1]*f2_exp, GRB.MAXIMIZE)
 
         # Constraints: Ensure each attribute is in exactly one subset
         for t in self._T:
@@ -2622,6 +2632,11 @@ class ExactOptimizer(BaseOptimizer):
             for row in reader:
                 self._simplex_logs.append(tuple(row))
 
+        with open(os.path.join(self._log_dir, 'barrier_solution.csv'), 'r') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                self._barrier_logs.append(tuple(row))
+
         self.model_built = True
 
     def optimize(self):
@@ -2631,6 +2646,9 @@ class ExactOptimizer(BaseOptimizer):
         f.close()
 
         f = open(os.path.join(self._log_dir, 'simplex_solution.csv'),'w'); f.write("runtime, obj_val, primal_inf, dual_inf, simplex_iterations\n")
+        f.close()
+
+        f = open(os.path.join(self._log_dir, 'barrier_solution.csv'),'w'); f.write("itcnt, primobj, dualobj, priminf, dualinf, cmpl\n")
         f.close()
 
         def _mycallback(model: Model, where: int):
@@ -2708,13 +2726,29 @@ class ExactOptimizer(BaseOptimizer):
                 with open(os.path.join(self._log_dir, 'simplex_solution.csv'), 'a') as f:
                     f.write(log_entry)
 
+            elif where == GRB.Callback.BARRIER:
+                # Barrier callback
+                itcnt = model.cbGet(GRB.Callback.BARRIER_ITRCNT)
+                primobj = model.cbGet(GRB.Callback.BARRIER_PRIMOBJ)
+                dualobj = model.cbGet(GRB.Callback.BARRIER_DUALOBJ)
+                priminf = model.cbGet(GRB.Callback.BARRIER_PRIMINF)
+                dualinf = model.cbGet(GRB.Callback.BARRIER_DUALINF)
+                cmpl = model.cbGet(GRB.Callback.BARRIER_COMPL)
+
+                log_entry = "{},{},{},{},{},{}\n".format(
+                    itcnt, primobj, dualobj, priminf, dualinf, cmpl
+                )
+                
+                with open(os.path.join(self._log_dir, 'barrier_solution.csv'), 'a') as f:
+                    f.write(log_entry)
+
             elif where == GRB.Callback.PRESOLVE:
                 # Presolve phase callbacks
                 removed_constrs = model.cbGet(GRB.Callback.PRE_ROWDEL)
                 removed_vars = model.cbGet(GRB.Callback.PRE_COLDEL)
 
                 # Log or handle the removed constraints and variables
-                # print(f"Presolve removed {removed_constrs} constraints and {removed_vars} variables.")
+                print(f"Presolve removed {removed_constrs} constraints and {removed_vars} variables.")
 
         self._model.optimize(_mycallback)
 
