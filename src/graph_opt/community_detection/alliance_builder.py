@@ -2763,5 +2763,31 @@ class ExactOptimizer(BaseOptimizer):
 
         return
     
+    def tune(self, time_limit: Optional[int] = 3600) -> Dict[str,float|int]:
+        
+        self._model.setParam('TuneTimeLimit', time_limit)
+        
+        self._model.tune()
+
+        if self._model.tuneResultCount > 0:
+            # Apply the first (best) tuned parameter set
+            self._model.getTuneResult(0)
+    
+        # Check how many tuning results are available
+        tune_results = self._model.tuneResultCount
+        print(f"Number of tuning results: {tune_results}")
+
+        tuned_params = {
+            'Heuristics': self._model.getParamInfo('Heuristics')[2],
+            'MIPFocus': self._model.getParamInfo('MIPFocus')[2],
+            'VarBranch': self._model.getParamInfo('VarBranch')[2],
+            'Cuts': self._model.getParamInfo('Cuts')[2],
+            'Presolve': self._model.getParamInfo('Presolve')[2],
+            'Method': self._model.getParamInfo('Method')[2],
+        }
+        print(json.dumps(tuned_params, indent=4))
+
+        return tuned_params
+
     def __del__(self):
         self._model.dispose()

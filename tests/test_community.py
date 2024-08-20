@@ -857,6 +857,7 @@ class _TestOptimize():
         )
 
         optimizer.build_model()
+        # optimizer.tune(time_limit=5)
         optimizer.optimize()
 
         evaluator.update_scores(optimizer.communities_dict)
