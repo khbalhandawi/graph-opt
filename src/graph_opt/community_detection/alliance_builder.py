@@ -567,10 +567,6 @@ class NeighbourSampler(BaseSampler):
             del self._T_d
             del self._W_d
 
-            # del self.edge_sampler_gpu
-            # del self.spatial_random_walk
-            # del self.attr_sampler_gpu
-            # del self.create_xoroshiro128p_states
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -1017,10 +1013,6 @@ class BaseEvaluator(ABC):
             del self._mpc_attrs_d
             del self._membership_d
 
-            # del self.init_w_k_gpu
-            # del self.calc_w_k_edges_gpu
-            # del self.calc_w_k_nodes_gpu
-            # del self.calc_w_k_log_gpu
 
 class ExactEvaluator(BaseEvaluator):
 
@@ -1362,21 +1354,6 @@ class ExactEvaluator(BaseEvaluator):
 
     def __del__(self):
         super().__del__()
-
-        # if self.use_gpu and self._init_gpu:
-        #     del self.init_edges_communities
-        #     del self.init_hhi
-        #     del self.init_w_it
-        #     del self.init_w_ik
-        #     del self.init_w_i
-        #     del self.init_mpc
-        #     del self.edge_postprocess_gpu
-        #     del self.calc_hhi_gpu
-        #     del self.calc_w_it_gpu
-        #     del self.calc_w_i_gpu
-        #     del self.calc_w_ik_gpu
-        #     del self.normalize_w_ix_gpu
-        #     del self.calc_mpc_gpu
 
 
 class SampleEvaluator(BaseEvaluator):
@@ -1756,20 +1733,6 @@ class SampleEvaluator(BaseEvaluator):
         if self.use_gpu and self._init_gpu:
             del self._edges_attrs_d
 
-            # del self.init_sample_p_et_gpu
-            # del self.init_sample_p_ek_gpu
-            # del self.init_sample_hhi_gpu
-            # del self.init_sample_w_i_gpu
-            # del self.init_sample_w_it_gpu
-            # del self.init_sample_w_ik_gpu
-            # del self.init_sample_mpc_gpu
-            # del self.edge_sample_p_et_gpu
-            # del self.edge_sample_p_ek_gpu
-            # del self.calc_sample_hhi_gpu
-            # del self.calc_sample_w_i_gpu
-            # del self.calc_sample_w_it_gpu
-            # del self.calc_sample_w_ik_gpu
-            # del self.calc_sample_mpc_gpu
 
 class EvaluatorManager:
     def __init__(self, num_streams: int, evaluator: BaseEvaluator) -> None:
@@ -2522,15 +2485,29 @@ class ExactOptimizer(BaseOptimizer):
                 k = int(k)
                 self._x[(t, k)] = var
 
-    def build_model(self, log_approx: Optional[str] = 'EXPR'):
+    def build_model(
+            self, 
+            log_approx: Optional[str] = 'EXPR', 
+            slack: Optional[float] = None, 
+            num_points: Optional[int] = -1, 
+            PWL_TOL: Optional[float] = 1e-6,
+            epsilon: Optional[float] = 1e-10
+        ):
         """
         Build the optimization model.
 
         Parameters
         ----------
-        log_approx : Optional[str], optional
-            Logarithmic approximation method. 
-            Options are 'PWL' (Piecewise Linear) or 'log' (logarithmic), by default 'PWL'
+        log_approx : str, optional
+            The method to approximate the log function, by default 'EXPR'
+        slack : float, optional
+            The slack value for the log constraint, by default None
+        num_points : int, optional
+            The number of points to use for the PWL approximation, by default -1
+        PWL_TOL : float, optional
+            The tolerance for the PWL approximation, by default 1e-6
+        epsilon : float, optional
+            The epsilon value to use for numerical stability, by default 1e-10
         """
 
         p_it = self._evaluator.p_it
@@ -2564,9 +2541,8 @@ class ExactOptimizer(BaseOptimizer):
                 p_ik_exp[i,k] = quicksum(self._x[t, k] * p_it[i, t] for t in self._T if p_it[i, t] > 0)
 
         # Create a PWL approximation of log(f2)
-        min_val = 1e-5  # Smallest value greater than zero
-        max_val = 1     # Maximum expected value of f2_exp
-        num_points = 100  # Number of points in the PWL approximation
+        min_val = epsilon
+        max_val = 1 # Maximum expected value of f2_exp
 
         f2_exp = 0
         for t in tqdm(self._T, desc="Building f2 expression"):
@@ -2582,11 +2558,16 @@ class ExactOptimizer(BaseOptimizer):
             # take the log of f2_t_exp
             if not all_zeros:
                 f2_t_var = self._model.addVar(name=f"f2_t_{t}", lb=min_val, ub=max_val)
-                log_f2_t = self._model.addVar(name=f"log_f2_t_{t}", lb=-100, ub=0)
-                self._model.addConstr(f2_t_var == f2_t_exp, f"Link_f2_t_{t}")
+                log_f2_t = self._model.addVar(name=f"log_f2_t_{t}", lb=np.log(min_val), ub=0)
+
+                if slack is None:
+                    self._model.addConstr(f2_t_var == f2_t_exp, f"Link_f2_t_{t}")
+                else:
+                    slack_var = self._model.addVar(lb=-slack, ub=slack, name=f"slack_{t}")
+                    self._model.addConstr(f2_t_var == f2_t_exp + slack_var, f"Link_f2_t_{t}")
 
                 if log_approx == 'PWL':
-
+                    num_points = num_points if num_points > 0 else 100
                     breakpoints_x = np.logspace(np.log10(min_val), np.log10(max_val), num=num_points)
                     breakpoints_y = np.log(breakpoints_x)
 
@@ -2594,7 +2575,7 @@ class ExactOptimizer(BaseOptimizer):
                     self._model.addGenConstrPWL(f2_t_var, log_f2_t, breakpoints_x, breakpoints_y, name=f"pwl_log_f2_t_{t}")
                 elif log_approx == 'EXPR':
                     # Adding the logarithmic constraint
-                    self._model.addGenConstrLog(f2_t_var, log_f2_t, name=f"log_constraint_t_{t}")
+                    self._model.addGenConstrLog(f2_t_var, log_f2_t, name=f"log_constraint_t_{t}", options="FuncPieces=%i FuncPieceError=%f"%(num_points, PWL_TOL))
 
                 f2_exp += log_f2_t / n_attr
 
@@ -2788,6 +2769,30 @@ class ExactOptimizer(BaseOptimizer):
         print(json.dumps(tuned_params, indent=4))
 
         return tuned_params
+
+    def __str__(self):
+        print(f"Model: {self._model_name}")
+        print(f"Objective: {self._f}")
+        print(f"Communities: {self._communities_dict}")
+        if self.model_built:
+            print("Total number of variables:", self._model.NumVars)
+            print("Total number of integer variables:", self._model.NumIntVars)
+            print("Total number of binary variables:", self._model.NumBinVars)
+            print("Total number of continuous variables:", self._model.NumPWLObjVars)
+            print("Total number of constraints:", self._model.NumConstrs)
+            print("Total number of general constraints:", self._model.NumGenConstrs)
+            print("Total number of quadratic non-zero coefficients:", self._model.NumQCNZs)
+            print("Total number of non-zero coefficients:", self._model.NumNZs)
+
+            # If the model has an objective function, print the number of terms
+            if self._model.getObjective() is not None:
+                objective = self._model.getObjective()
+                # Check if the objective function is linear or quadratic
+                if objective.size() > 0:
+                    print("Number of terms in the objective function:", objective.size())
+                else:
+                    # This might be a linear objective with a simple sum of variables
+                    print("Objective function appears to be a simple linear function.")
 
     def __del__(self):
         self._model.dispose()
