@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from gurobipy import Model, GRB, quicksum, read, Var
 import csv
 import threading
+import time
 
 from ..utilities import parallel_sampling
 
@@ -2632,6 +2633,16 @@ class ExactOptimizer(BaseOptimizer):
         f = open(os.path.join(self._log_dir, 'barrier_solution.csv'),'w'); f.write("itcnt, primobj, dualobj, priminf, dualinf, cmpl\n")
         f.close()
 
+        t0 = time.time()
+
+        WALL_LIMIT = self._model_settings.get('TimeLimit', 7200)  # Default to 1 hour if not set
+
+        def killer(m: Model): # no args allowed in Timer, so wrap
+            m.terminate()
+
+        timer = threading.Timer(WALL_LIMIT, killer, args=(self._model,))
+        timer.start()
+
         def _mycallback(model: Model, where: int):
 
             if where == GRB.Callback.MIPSOL:
@@ -2732,6 +2743,7 @@ class ExactOptimizer(BaseOptimizer):
                 print(f"Presolve removed {removed_constrs} constraints and {removed_vars} variables.")
 
         self._model.optimize(_mycallback)
+        timer.cancel()
 
         if self._model.status == GRB.Status.OPTIMAL or self._model.status == GRB.TIME_LIMIT:
             self.optimal = True
