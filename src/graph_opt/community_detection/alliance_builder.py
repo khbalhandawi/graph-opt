@@ -10,10 +10,12 @@ import random
 import math
 from typing import Callable, Dict, Any, Union
 from concurrent.futures import ThreadPoolExecutor
-from gurobipy import Model, GRB, quicksum, read, Var
+from gurobipy import Model, GRB, quicksum, read, Var, GurobiError
 import csv
 import threading
 import time
+
+import logging
 
 from ..utilities import parallel_sampling
 
@@ -44,6 +46,8 @@ __all__ = [
     'BruteForce',
     'ExactOptimizer'
 ]
+
+logger = logging.getLogger(__name__)
 
 type_cp = NewType('type_cp', Dict[int,float])
 type_cps = NewType('type_cps', Dict[Tuple[int, int], type_cp])
@@ -2472,7 +2476,7 @@ class ExactOptimizer(BaseOptimizer):
         if self.optimal:
             return self.x
         else:
-            print("Model not solved to optimality. Returning None.")
+            logger.warning("Model not solved to optimality. Returning None.")
             return None
 
     def _load_vars(self):
@@ -2596,32 +2600,55 @@ class ExactOptimizer(BaseOptimizer):
     def save(self, directory=None, **kwargs):
         super().save(directory, **kwargs)
         # Save self._model in LP format
-        self._model.write(os.path.join(directory,"{}.lp".format(self._model_name)))
+        try:
+            self._model.write(os.path.join(directory,"{}.lp".format(self._model_name)))
+        except Exception as e:
+            logger.error(f"[ExactOptimizer] Error saving model: {e}")
 
     def load(self, directory=None, **kwargs):
         super().load(directory, **kwargs)
-        self._model = read(os.path.join(directory,"{}.lp".format(self._model_name)))
 
-        self._load_vars()
+        if os.path.exists(os.path.join(directory,"{}.lp".format(self._model_name))) is False:
+            logger.error(f"[ExactOptimizer] Model file {self._model_name}.lp not found in {directory}. \
+                         Please build the model first.")
+        else:
+            logger.info(f"[ExactOptimizer] Loading model from {directory}/{self._model_name}.lp")
 
-        with open(os.path.join(self._log_dir, 'mip_solution.csv'), 'r') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                self._mip_logs.append(tuple(row))
+            self._model = read(os.path.join(directory,"{}.lp".format(self._model_name)))
+            self._load_vars()
+            self.model_built = True
 
-        with open(os.path.join(self._log_dir, 'simplex_solution.csv'), 'r') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                self._simplex_logs.append(tuple(row))
+        if os.path.exists(os.path.join(self._log_dir, 'mip_solution.csv')) is False:
+            logger.error(f"[ExactOptimizer] Log file mip_solution.csv not found in {self._log_dir}. \
+                         Please run optimize() first.")
+        else:
+            logger.info(f"[ExactOptimizer] Loading MIP logs from {self._log_dir}/mip_solution.csv")
+            with open(os.path.join(self._log_dir, 'mip_solution.csv'), 'r') as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    self._mip_logs.append(tuple(row))
 
-        with open(os.path.join(self._log_dir, 'barrier_solution.csv'), 'r') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                self._barrier_logs.append(tuple(row))
+        if os.path.exists(os.path.join(self._log_dir, 'simplex_solution.csv')) is False:
+            logger.error(f"[ExactOptimizer] Log file simplex_solution.csv not found in {self._log_dir}. \
+                         Please run optimize() first.")
+        else:
+            logger.info(f"[ExactOptimizer] Loading Simplex logs from {self._log_dir}/simplex_solution.csv")
+            with open(os.path.join(self._log_dir, 'simplex_solution.csv'), 'r') as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    self._simplex_logs.append(tuple(row))
 
-        self.model_built = True
+        if os.path.exists(os.path.join(self._log_dir, 'barrier_solution.csv')) is False:
+            logger.error(f"[ExactOptimizer] Log file barrier_solution.csv not found in {self._log_dir}. \
+                         Please run optimize() first.")
+        else:
+            logger.info(f"[ExactOptimizer] Loading Barrier logs from {self._log_dir}/barrier_solution.csv")
+            with open(os.path.join(self._log_dir, 'barrier_solution.csv'), 'r') as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    self._barrier_logs.append(tuple(row))
 
-    def optimize(self):
+    def optimize(self, wall_limit: Optional[float] = 0.0):
 
         # prepare logs
         f = open(os.path.join(self._log_dir, 'mip_solution.csv'),'w'); f.write("runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations\n")
@@ -2635,17 +2662,14 @@ class ExactOptimizer(BaseOptimizer):
 
         t0 = time.time()
 
-        WALL_LIMIT = self._model_settings.get('TimeLimit', 7200)  # Default to 1 hour if not set
-
-        def killer(m: Model): # no args allowed in Timer, so wrap
-            m.terminate()
-
-        timer = threading.Timer(WALL_LIMIT, killer, args=(self._model,))
-        timer.start()
-
         def _mycallback(model: Model, where: int):
 
             if where == GRB.Callback.MIPSOL:
+                # Check if termination was requested
+                if hasattr(self, '_terminate_requested') and self._terminate_requested:
+                    logger.info("[ExactOptimizer] Termination requested, capturing final solution in callback.")
+                    model.terminate()
+                
                 x = {}  # Dictionary to store variable values
                 for t in self._T:
                     for k in self._K:
@@ -2654,7 +2678,7 @@ class ExactOptimizer(BaseOptimizer):
                         if var is not None:  # Ensure the variable exists
                             x[(t, k)] = model.cbGetSolution(var)
                         else:
-                            print(f"Variable {var_name} not found.")
+                            logger.warning(f"[ExactOptimizer] Variable {var_name} not found.")
 
                 communities_dict = self.process_communities_values(x)
                 self._evaluator.update_scores(communities_dict)
@@ -2667,7 +2691,11 @@ class ExactOptimizer(BaseOptimizer):
                 self._multi_history.append((self._f1,self._f2))
 
             if where == GRB.Callback.MIP:
-
+                # Check if termination was requested
+                if hasattr(self, '_terminate_requested') and self._terminate_requested:
+                    logger.info("[ExactOptimizer] Termination requested in MIP callback.")
+                    model.terminate()
+                
                 runtime = model.cbGet(GRB.Callback.RUNTIME)    # Runtime
                 self._mip_log_counter += 1
 
@@ -2740,19 +2768,92 @@ class ExactOptimizer(BaseOptimizer):
                 removed_vars = model.cbGet(GRB.Callback.PRE_COLDEL)
 
                 # Log or handle the removed constraints and variables
-                print(f"Presolve removed {removed_constrs} constraints and {removed_vars} variables.")
+                logger.info(f"[ExactOptimizer] Presolve removed {removed_constrs} constraints and {removed_vars} variables.")
 
-        self._model.optimize(_mycallback)
-        timer.cancel()
+        self._terminate_requested = False
+        self._worker_done = threading.Event()
+        
+        def optimization_runner():
+            try:
+                self._model.optimize(_mycallback)
+            except GurobiError as e:
+                logger.error(f"[ExactOptimizer] Gurobi Error: {e}")
+            except AttributeError as e:
+                logger.error(f"[ExactOptimizer] Attribute Error: {e}")
+            finally:
+                self._worker_done.set()
+                
+        worker = threading.Thread(target=optimization_runner, daemon=True)
+        worker.start()
+        
+        # If wall_limit is set, wait for that amount of time
+        if wall_limit > 0:
+            worker_finished = self._worker_done.wait(timeout=wall_limit)
+            if not worker_finished:
+                logger.warning(f"[ExactOptimizer] Wall time limit of {wall_limit}s reached. Attempting to terminate optimization.")
+                self._terminate_requested = True
+                try:
+                    self._model.terminate()
+                    # Give a short grace period for the callback to process termination
+                    worker_finished = self._worker_done.wait(timeout=500.0)
+                    # kill the worker thread if it hasn't finished
+                    if worker.is_alive():
+                        logger.warning("[ExactOptimizer] Worker thread did not finish after termination request. Forcefully terminating.")
+                        worker.join(timeout=500.0)
+                    if not worker_finished:
+                        logger.warning("[ExactOptimizer] Optimization did not terminate gracefully after timeout.")
+                except Exception as e:
+                    logger.error(f"[ExactOptimizer] Error during termination: {e}")
 
-        if self._model.status == GRB.Status.OPTIMAL or self._model.status == GRB.TIME_LIMIT:
-            self.optimal = True
-            self._f = self._model.objVal
-            self._communities_dict = self.process_communities_dict(self._x)
+        time.sleep(500.0)  # Give some time for the callback to finish processing
+        # Check model status regardless of how it terminated
+        try:
+            if getattr(self._model, 'status', None) is None or self._model.status == GRB.INFEASIBLE:
+                status = "INFEASIBLE"
+                logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. \
+                               The model may be infeasible or not solved to optimality.")
+                self.optimal = False
+            else:
+                status = self._model.status
+                if status == GRB.OPTIMAL:
+                    logger.info(f"[ExactOptimizer] Optimization completed successfully with status {status}.")
+                    self.optimal = True
+                else:
+                    logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. \
+                                   The model may not be solved to optimality.")
+                    self.optimal = False
+                    
+            # Even if we were terminated early, try to get the best solution found so far
+            try:
+                self._f = self._model.objVal
+                self._communities_dict = self.process_communities_dict(self._x)
 
-            self._evaluator.update_scores(self._communities_dict)
-            self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-            self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
+                # Use this solution to update scores
+                self._evaluator.update_scores(self._communities_dict)
+                self._f1 = -np.mean(list(self._evaluator.hhi.values()))
+                self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
+            except Exception as e:
+                logger.error(f"[ExactOptimizer] Error retrieving solution after optimization: {e}")
+                
+                # If we have a solution history from callbacks, use the best one
+                if len(self._communities_history) > 0:
+                    logger.info(f"[ExactOptimizer] Using best solution from callback history ({len(self._communities_history)} solutions).")
+                    best_idx = np.argmax(self._f_history) if len(self._f_history) > 0 else -1
+                    if best_idx >= 0:
+                        self._communities_dict = self._communities_history[best_idx]
+                        self._f = self._f_history[best_idx]
+                        self._f1, self._f2 = self._multi_history[best_idx]
+        except Exception as e:
+            logger.error(f"[ExactOptimizer] Error processing optimization results: {e}")
+            
+            # Try to recover the best solution from callback history
+            if len(self._communities_history) > 0:
+                logger.info(f"[ExactOptimizer] Using best solution from callback history due to error.")
+                best_idx = np.argmax(self._f_history) if len(self._f_history) > 0 else -1
+                if best_idx >= 0:
+                    self._communities_dict = self._communities_history[best_idx]
+                    self._f = self._f_history[best_idx]
+                    self._f1, self._f2 = self._multi_history[best_idx]
 
         return
     
@@ -2768,7 +2869,7 @@ class ExactOptimizer(BaseOptimizer):
     
         # Check how many tuning results are available
         tune_results = self._model.tuneResultCount
-        print(f"Number of tuning results: {tune_results}")
+        logger.info(f"[ExactOptimizer] Number of tuning results: {tune_results}")
 
         tuned_params = {
             'Heuristics': self._model.getParamInfo('Heuristics')[2],
@@ -2778,7 +2879,7 @@ class ExactOptimizer(BaseOptimizer):
             'Presolve': self._model.getParamInfo('Presolve')[2],
             'Method': self._model.getParamInfo('Method')[2],
         }
-        print(json.dumps(tuned_params, indent=4))
+        logger.info(json.dumps(tuned_params, indent=4))
 
         return tuned_params
 
