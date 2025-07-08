@@ -841,10 +841,31 @@ class _TestOptimize():
 
         model_settings = {
             'MIPGap': 1e-12,  # Stop if the gap is within 0.01%
-            'Heuristics': 0.9,  # Use more aggressive heuristics
-            'MIPFocus': 3,  # Focus on finding feasible solutions
-            'VarBranch': 2,  # More aggressive variable branching
-            'Presolve': 0 # Turn off presolve
+            'Heuristics': 0.1,  # Use more aggressive heuristics
+            'MIPFocus': 1,  # Focus on finding feasible solutions
+            'VarBranch': 0,  # More aggressive variable branching
+            'Presolve': 2 # Turn off presolve
+        }
+        model_settings = {
+            'TimeLimit': 7_200,  # Time limit in seconds, e.g., 3600 seconds for 1 hour
+            'NodefileStart': 0.5,  # Start writing nodes to disk after 50% of the time limit
+            'SoftMemLimit': 54*1e9,  # Memory limit in MB, e.g., 55296 MB for 54 GB
+            'MIPGap': 1e-3,  # Stop if the gap is within 0.01%
+            'Heuristics': 0.2,  # default heuristics 0.05
+            'MIPFocus': 1,  # balanced Focus on finding feasible solutions and proving optimality (1 for feasible, 2 for optimal)
+            # 'VarBranch': 2,  # More aggressive variable branching
+            'Cuts': -1, # automatic (the default)
+            'Presolve': 2,  # aggressive presolve
+            'Threads': 12,  # Adjust based on your CPU core count
+            'ScaleFlag': 2,  # Enable scaling (more aggressive)
+            'Method': 2,  # Set to 1 for dual simplex (2 for barrier, -1 for automatic)
+            'FeasibilityTol': 1e-6, # Feasibility tolerance
+            'IntFeasTol': 1e-5, # Integer feasibility tolerance
+            'PreQLinearize': 2,  # Enable pre-queue linearization
+            'Crossover': 0,  # keep the interior solution
+            'NodeMethod': 2,  # use Barrier inside the tree as well
+            'NumericFocus': 2,  # High numeric focus for better numerical stability
+            'BarConvTol': 1e-8,  # (optional) a bit tighter because we skip crossover
         }
 
         optimizer = ExactOptimizer(
@@ -957,7 +978,7 @@ class _TestOptimize():
     def test_save_load_brute(
         self, 
         optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
-        get_evaluator: SampleEvaluator | ExactEvaluator,
+        get_evaluator: SampleEvaluator | ExactOptimizer,
         tmp_path
     ):
         
@@ -1027,7 +1048,7 @@ class _TestOptimize():
     def test_save_load_greedy(
         self, 
         optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
-        get_evaluator: SampleEvaluator | ExactEvaluator,
+        get_evaluator: SampleEvaluator | ExactOptimizer,
         tmp_path
     ):
         
@@ -1103,3 +1124,232 @@ class TestOptimizeCPU(_TestOptimize):
 
     use_gpu = False
     use_multiprocessing = False
+
+import pytest
+import logging
+from unittest.mock import Mock, MagicMock
+from graph_opt.community_detection.alliance_builder import ExactOptimizer
+
+class TestProcessCommunitiesDict:
+    """Test cases for the process_communities_dict method of ExactOptimizer"""
+    
+    def setup_mock_optimizer(self, n_attr=4, n_communities=3, attr_names=None):
+        """Set up a mock ExactOptimizer with necessary attributes"""
+        if attr_names is None:
+            attr_names = [f"attr_{i}" for i in range(n_attr)]
+        
+        # Create mock evaluator with graph loader
+        mock_gloader = Mock()
+        mock_gloader.attr_i2key = {i: attr_names[i] for i in range(n_attr)}
+        
+        mock_evaluator = Mock()
+        mock_evaluator._gloader = mock_gloader
+        
+        # Create mock optimizer
+        optimizer = Mock(spec=ExactOptimizer)
+        optimizer._evaluator = mock_evaluator
+        optimizer._T = list(range(n_attr))
+        optimizer._K = list(range(n_communities))
+        optimizer.model_built = True
+        
+        # Bind the real method to the mock
+        optimizer.process_communities_dict = ExactOptimizer.process_communities_dict.__get__(optimizer)
+        
+        return optimizer
+    
+    def create_mock_var(self, value):
+        """Create a mock Gurobi variable with specified X attribute"""
+        mock_var = Mock()
+        mock_var.X = value
+        mock_var.getAttr.return_value = value
+        return mock_var
+    
+    def test_process_communities_dict_complete_assignment(self):
+        """Test when all attributes are assigned to communities"""
+        optimizer = self.setup_mock_optimizer(n_attr=3, n_communities=3, 
+                                            attr_names=['AT', 'BT', 'CT'])
+        
+        # Create decision variables where each attribute is assigned to a unique community
+        x = {
+            (0, 0): self.create_mock_var(1.0),  # attr 0 -> community 0
+            (0, 1): self.create_mock_var(0.0),
+            (0, 2): self.create_mock_var(0.0),
+            (1, 0): self.create_mock_var(0.0),
+            (1, 1): self.create_mock_var(1.0),  # attr 1 -> community 1
+            (1, 2): self.create_mock_var(0.0),
+            (2, 0): self.create_mock_var(0.0),
+            (2, 1): self.create_mock_var(0.0),
+            (2, 2): self.create_mock_var(1.0),  # attr 2 -> community 2
+        }
+        
+        result = optimizer.process_communities_dict(x)
+        
+        expected = {'AT': 0, 'BT': 1, 'CT': 2}
+        assert result == expected
+    
+    def test_process_communities_dict_partial_assignment_with_unused_communities(self, caplog):
+        """Test when some attributes are unassigned but unused communities are available"""
+        optimizer = self.setup_mock_optimizer(n_attr=3, n_communities=5, 
+                                            attr_names=['AT', 'BT', 'CT'])
+        
+        # Only assign first two attributes, leave third unassigned
+        x = {
+            (0, 0): self.create_mock_var(1.0),  # attr 0 -> community 0
+            (0, 1): self.create_mock_var(0.0),
+            (0, 2): self.create_mock_var(0.0),
+            (0, 3): self.create_mock_var(0.0),
+            (0, 4): self.create_mock_var(0.0),
+            (1, 0): self.create_mock_var(0.0),
+            (1, 1): self.create_mock_var(1.0),  # attr 1 -> community 1
+            (1, 2): self.create_mock_var(0.0),
+            (1, 3): self.create_mock_var(0.0),
+            (1, 4): self.create_mock_var(0.0),
+            (2, 0): self.create_mock_var(0.0),  # attr 2 -> unassigned
+            (2, 1): self.create_mock_var(0.0),
+            (2, 2): self.create_mock_var(0.0),
+            (2, 3): self.create_mock_var(0.0),
+            (2, 4): self.create_mock_var(0.0),
+        }
+        
+        with caplog.at_level(logging.WARNING):
+            result = optimizer.process_communities_dict(x)
+        
+        # Should log warnings about unassigned attributes
+        assert "Some attributes do not have a community assigned" in caplog.text
+        assert "does not have a community assigned" in caplog.text
+        
+        # Should assign unassigned attribute to an unused community (2, 3, or 4)
+        assert result['AT'] == 0
+        assert result['BT'] == 1
+        assert result['CT'] in [2, 3, 4]  # One of the unused communities
+    
+    def test_process_communities_dict_partial_assignment_no_unused_communities(self, caplog):
+        """Test when some attributes are unassigned and no unused communities are available"""
+        optimizer = self.setup_mock_optimizer(n_attr=4, n_communities=2, 
+                                            attr_names=['AT', 'BT', 'CT', 'DT'])
+        
+        # Assign first two attributes to both communities, leave last two unassigned
+        x = {
+            (0, 0): self.create_mock_var(1.0),  # attr 0 -> community 0
+            (0, 1): self.create_mock_var(0.0),
+            (1, 0): self.create_mock_var(0.0),
+            (1, 1): self.create_mock_var(1.0),  # attr 1 -> community 1
+            (2, 0): self.create_mock_var(0.0),  # attr 2 -> unassigned
+            (2, 1): self.create_mock_var(0.0),
+            (3, 0): self.create_mock_var(0.0),  # attr 3 -> unassigned
+            (3, 1): self.create_mock_var(0.0),
+        }
+        
+        with caplog.at_level(logging.WARNING):
+            result = optimizer.process_communities_dict(x)
+        
+        # Should log warnings about unassigned attributes
+        assert "Some attributes do not have a community assigned" in caplog.text
+        
+        # Should create new communities for unassigned attributes
+        assert result['AT'] == 0
+        assert result['BT'] == 1
+        assert result['CT'] == 2  # New community
+        assert result['DT'] == 3  # Another new community
+    
+    def test_process_communities_dict_fractional_values(self):
+        """Test with fractional values (should only consider values > 0.5)"""
+        optimizer = self.setup_mock_optimizer(n_attr=2, n_communities=2, 
+                                            attr_names=['AT', 'BT'])
+        
+        x = {
+            (0, 0): self.create_mock_var(0.7),  # attr 0 -> community 0 (>0.5)
+            (0, 1): self.create_mock_var(0.3),  # not assigned
+            (1, 0): self.create_mock_var(0.4),  # not assigned
+            (1, 1): self.create_mock_var(0.8),  # attr 1 -> community 1 (>0.5)
+        }
+        
+        result = optimizer.process_communities_dict(x)
+        
+        expected = {'AT': 0, 'BT': 1}
+        assert result == expected
+    
+    def test_process_communities_dict_multiple_assignments_error(self):
+        """Test that multiple community assignments to same attribute raise an error"""
+        optimizer = self.setup_mock_optimizer(n_attr=2, n_communities=2, 
+                                            attr_names=['AT', 'BT'])
+        
+        x = {
+            (0, 0): self.create_mock_var(0.8),  # attr 0 -> community 0
+            (0, 1): self.create_mock_var(0.9),  # attr 0 -> community 1 (conflict!)
+            (1, 0): self.create_mock_var(0.0),
+            (1, 1): self.create_mock_var(0.7),  # attr 1 -> community 1
+        }
+        
+        with pytest.raises(AssertionError, match="error: multiple communities assigned to the same attribute"):
+            optimizer.process_communities_dict(x)
+    
+    def test_process_communities_dict_empty_variables(self):
+        """Test with empty decision variables dictionary"""
+        optimizer = self.setup_mock_optimizer(n_attr=2, n_communities=2)
+        
+        with pytest.raises(AssertionError, match="No decision variables found"):
+            optimizer.process_communities_dict({})
+    
+    def test_process_communities_dict_vars_without_x_attribute(self, caplog):
+        """Test with variables that don't have X attribute (should be skipped)"""
+        optimizer = self.setup_mock_optimizer(n_attr=2, n_communities=2, 
+                                            attr_names=['AT', 'BT'])
+        
+        # Create variables without X attribute
+        mock_var_no_x = Mock()
+        del mock_var_no_x.X  # Remove X attribute
+        
+        x = {
+            (0, 0): mock_var_no_x,  # No X attribute - should be skipped
+            (0, 1): self.create_mock_var(0.0),
+            (1, 0): self.create_mock_var(0.0),
+            (1, 1): self.create_mock_var(0.8),  # attr 1 -> community 1
+        }
+        
+        # Should handle missing X attribute gracefully and assign unassigned attributes
+        with caplog.at_level(logging.WARNING):
+            result = optimizer.process_communities_dict(x)
+        
+        # Should log warnings about unassigned attributes
+        assert "Some attributes do not have a community assigned" in caplog.text
+        
+        assert result['AT'] == 0  # Should get assigned to unused community
+        assert result['BT'] == 1
+    
+    def test_process_communities_dict_real_attribute_names(self, caplog):
+        """Test with realistic attribute names"""
+        attr_names = ['airport_type', 'building_type', 'city_type', 'hub_type', 'vessel_type']
+        optimizer = self.setup_mock_optimizer(n_attr=5, n_communities=3, 
+                                            attr_names=attr_names)
+        
+        x = {
+            (0, 0): self.create_mock_var(1.0),  # airport_type -> community 0
+            (0, 1): self.create_mock_var(0.0),
+            (0, 2): self.create_mock_var(0.0),
+            (1, 0): self.create_mock_var(0.0),
+            (1, 1): self.create_mock_var(1.0),  # building_type -> community 1
+            (1, 2): self.create_mock_var(0.0),
+            (2, 0): self.create_mock_var(0.0),
+            (2, 1): self.create_mock_var(0.0),
+            (2, 2): self.create_mock_var(1.0),  # city_type -> community 2
+            (3, 0): self.create_mock_var(0.0),  # hub_type -> unassigned
+            (3, 1): self.create_mock_var(0.0),
+            (3, 2): self.create_mock_var(0.0),
+            (4, 0): self.create_mock_var(0.0),  # vessel_type -> unassigned
+            (4, 1): self.create_mock_var(0.0),
+            (4, 2): self.create_mock_var(0.0),
+        }
+        
+        with caplog.at_level(logging.WARNING):
+            result = optimizer.process_communities_dict(x)
+        
+        # Should log warnings about unassigned attributes
+        assert "Some attributes do not have a community assigned" in caplog.text
+        
+        assert result['airport_type'] == 0
+        assert result['building_type'] == 1
+        assert result['city_type'] == 2
+        # Unassigned attributes should get new community IDs
+        assert result['hub_type'] == 3
+        assert result['vessel_type'] == 4

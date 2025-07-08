@@ -2662,7 +2662,7 @@ class ExactOptimizer(BaseOptimizer):
                 for row in reader:
                     self._barrier_logs.append(tuple(row))
 
-    def optimize(self, wall_limit: Optional[float] = 0.0):
+    def optimize(self, wall_limit: Optional[float] = None):
 
         # prepare logs
         f = open(os.path.join(self._log_dir, 'mip_solution.csv'),'w'); f.write("runtime, objbst, objbnd, mip_gap, node_count, simplex_iterations\n")
@@ -2799,10 +2799,10 @@ class ExactOptimizer(BaseOptimizer):
                 
         worker = threading.Thread(target=optimization_runner, daemon=True)
         worker.start()
-        
+        worker_finished = self._worker_done.wait(timeout=wall_limit)
+
         # If wall_limit is set, wait for that amount of time
-        if wall_limit > 0:
-            worker_finished = self._worker_done.wait(timeout=wall_limit)
+        if wall_limit is not None:
             if not worker_finished:
                 logger.warning(f"[ExactOptimizer] Wall time limit of {wall_limit}s reached. Attempting to terminate optimization.")
                 self._terminate_requested = True
@@ -2818,6 +2818,11 @@ class ExactOptimizer(BaseOptimizer):
                         logger.warning("[ExactOptimizer] Optimization did not terminate gracefully after timeout.")
                 except Exception as e:
                     logger.error(f"[ExactOptimizer] Error during termination: {e}")
+        else:
+            # Wait for the worker to finish without a timeout
+            self._model.terminate()
+            worker_finished = self._worker_done.wait(timeout=10.0)
+            worker.join()
 
         # Check model status regardless of how it terminated
         if getattr(self._model, 'status', None) is None or self._model.status == GRB.INFEASIBLE:
