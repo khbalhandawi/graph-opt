@@ -2437,6 +2437,24 @@ class ExactOptimizer(BaseOptimizer):
                     if x[t, k].getAttr('X') > 0.5:
                         assert communities_dict[self._evaluator._gloader.attr_i2key[t]] is None, "error: multiple communities assigned to the same attribute"
                         communities_dict[self._evaluator._gloader.attr_i2key[t]] = k
+        
+        # number of attributes with a community assigned
+        n_unassigned = sum(1 for v in communities_dict.values() if v is None)
+        n_assigned = len(communities_dict) - n_unassigned
+        new_assigned_community = len(self._K)
+        # Handle case where no community is assigned to an attribute by using the unused k values
+        if n_unassigned > 0:
+            logger.warning("Some attributes do not have a community assigned. Assigning unused communities to these attributes.")
+            unused_k = set(self._K) - set(communities_dict.values())
+            for t in self._T:
+                if communities_dict[self._evaluator._gloader.attr_i2key[t]] is None:
+                    if unused_k:
+                        k_assign = unused_k.pop()
+                    else:
+                        k_assign = new_assigned_community
+                        new_assigned_community += 1
+                    logger.warning(f"Attribute {self._evaluator._gloader.attr_i2key[t]} does not have a community assigned. Assigning community {k_assign}.")
+                    communities_dict[self._evaluator._gloader.attr_i2key[t]] = k_assign
 
         return communities_dict
 
@@ -2609,8 +2627,7 @@ class ExactOptimizer(BaseOptimizer):
         super().load(directory, **kwargs)
 
         if os.path.exists(os.path.join(directory,"{}.lp".format(self._model_name))) is False:
-            logger.error(f"[ExactOptimizer] Model file {self._model_name}.lp not found in {directory}. \
-                         Please build the model first.")
+            logger.error(f"[ExactOptimizer] Model file {self._model_name}.lp not found in {directory}. Please build the model first.")
         else:
             logger.info(f"[ExactOptimizer] Loading model from {directory}/{self._model_name}.lp")
 
@@ -2619,8 +2636,7 @@ class ExactOptimizer(BaseOptimizer):
             self.model_built = True
 
         if os.path.exists(os.path.join(self._log_dir, 'mip_solution.csv')) is False:
-            logger.error(f"[ExactOptimizer] Log file mip_solution.csv not found in {self._log_dir}. \
-                         Please run optimize() first.")
+            logger.error(f"[ExactOptimizer] Log file mip_solution.csv not found in {self._log_dir}. Please run optimize() first.")
         else:
             logger.info(f"[ExactOptimizer] Loading MIP logs from {self._log_dir}/mip_solution.csv")
             with open(os.path.join(self._log_dir, 'mip_solution.csv'), 'r') as f:
@@ -2629,8 +2645,7 @@ class ExactOptimizer(BaseOptimizer):
                     self._mip_logs.append(tuple(row))
 
         if os.path.exists(os.path.join(self._log_dir, 'simplex_solution.csv')) is False:
-            logger.error(f"[ExactOptimizer] Log file simplex_solution.csv not found in {self._log_dir}. \
-                         Please run optimize() first.")
+            logger.error(f"[ExactOptimizer] Log file simplex_solution.csv not found in {self._log_dir}. Please run optimize() first.")
         else:
             logger.info(f"[ExactOptimizer] Loading Simplex logs from {self._log_dir}/simplex_solution.csv")
             with open(os.path.join(self._log_dir, 'simplex_solution.csv'), 'r') as f:
@@ -2639,8 +2654,7 @@ class ExactOptimizer(BaseOptimizer):
                     self._simplex_logs.append(tuple(row))
 
         if os.path.exists(os.path.join(self._log_dir, 'barrier_solution.csv')) is False:
-            logger.error(f"[ExactOptimizer] Log file barrier_solution.csv not found in {self._log_dir}. \
-                         Please run optimize() first.")
+            logger.error(f"[ExactOptimizer] Log file barrier_solution.csv not found in {self._log_dir}. Please run optimize() first.")
         else:
             logger.info(f"[ExactOptimizer] Loading Barrier logs from {self._log_dir}/barrier_solution.csv")
             with open(os.path.join(self._log_dir, 'barrier_solution.csv'), 'r') as f:
@@ -2808,8 +2822,7 @@ class ExactOptimizer(BaseOptimizer):
         # Check model status regardless of how it terminated
         if getattr(self._model, 'status', None) is None or self._model.status == GRB.INFEASIBLE:
             status = "INFEASIBLE"
-            logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. \
-                            The model may be infeasible or not solved to optimality.")
+            logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. The model may be infeasible or not solved to optimality.")
             self.optimal = False
         else:
             status = self._model.status
@@ -2817,8 +2830,7 @@ class ExactOptimizer(BaseOptimizer):
                 logger.info(f"[ExactOptimizer] Optimization completed successfully with status {status}.")
                 self.optimal = True
             else:
-                logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. \
-                                The model may not be solved to optimality.")
+                logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. The model may not be solved to optimality.")
                 self.optimal = False
                 
         # Even if we were terminated early, try to get the best solution found so far
