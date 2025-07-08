@@ -2795,65 +2795,63 @@ class ExactOptimizer(BaseOptimizer):
                 try:
                     self._model.terminate()
                     # Give a short grace period for the callback to process termination
-                    worker_finished = self._worker_done.wait(timeout=500.0)
+                    worker_finished = self._worker_done.wait(timeout=10.0)
                     # kill the worker thread if it hasn't finished
                     if worker.is_alive():
                         logger.warning("[ExactOptimizer] Worker thread did not finish after termination request. Forcefully terminating.")
-                        worker.join(timeout=500.0)
+                        worker.join(timeout=10.0)
                     if not worker_finished:
                         logger.warning("[ExactOptimizer] Optimization did not terminate gracefully after timeout.")
                 except Exception as e:
                     logger.error(f"[ExactOptimizer] Error during termination: {e}")
 
-        time.sleep(500.0)  # Give some time for the callback to finish processing
         # Check model status regardless of how it terminated
-        try:
-            if getattr(self._model, 'status', None) is None or self._model.status == GRB.INFEASIBLE:
-                status = "INFEASIBLE"
-                logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. \
-                               The model may be infeasible or not solved to optimality.")
-                self.optimal = False
+        if getattr(self._model, 'status', None) is None or self._model.status == GRB.INFEASIBLE:
+            status = "INFEASIBLE"
+            logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. \
+                            The model may be infeasible or not solved to optimality.")
+            self.optimal = False
+        else:
+            status = self._model.status
+            if status == GRB.OPTIMAL:
+                logger.info(f"[ExactOptimizer] Optimization completed successfully with status {status}.")
+                self.optimal = True
             else:
-                status = self._model.status
-                if status == GRB.OPTIMAL:
-                    logger.info(f"[ExactOptimizer] Optimization completed successfully with status {status}.")
-                    self.optimal = True
-                else:
-                    logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. \
-                                   The model may not be solved to optimality.")
-                    self.optimal = False
-                    
-            # Even if we were terminated early, try to get the best solution found so far
-            try:
-                self._f = self._model.objVal
-                self._communities_dict = self.process_communities_dict(self._x)
-
-                # Use this solution to update scores
-                self._evaluator.update_scores(self._communities_dict)
-                self._f1 = -np.mean(list(self._evaluator.hhi.values()))
-                self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
-            except Exception as e:
-                logger.error(f"[ExactOptimizer] Error retrieving solution after optimization: {e}")
+                logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. \
+                                The model may not be solved to optimality.")
+                self.optimal = False
                 
-                # If we have a solution history from callbacks, use the best one
-                if len(self._communities_history) > 0:
-                    logger.info(f"[ExactOptimizer] Using best solution from callback history ({len(self._communities_history)} solutions).")
-                    best_idx = np.argmax(self._f_history) if len(self._f_history) > 0 else -1
-                    if best_idx >= 0:
-                        self._communities_dict = self._communities_history[best_idx]
-                        self._f = self._f_history[best_idx]
-                        self._f1, self._f2 = self._multi_history[best_idx]
+        # Even if we were terminated early, try to get the best solution found so far
+        try: 
+            self._f = self._model.objVal
         except Exception as e:
-            logger.error(f"[ExactOptimizer] Error processing optimization results: {e}")
-            
-            # Try to recover the best solution from callback history
+            logger.warning("[ExactOptimizer] Model does not have an objective value. Obtaining it from history.")
+            if len(self._f_history) > 0:
+                self._f = self._f_history[-1]
+            else:
+                logger.error("[ExactOptimizer] No objective value found in history. Setting to None.")
+                self._f = None
+
+        try:
+            self._communities_dict = self.process_communities_dict(self._x)
+        except Exception as e:
+            logger.error(f"[ExactOptimizer] Error processing communities from decision variables: {e}")
             if len(self._communities_history) > 0:
-                logger.info(f"[ExactOptimizer] Using best solution from callback history due to error.")
+                logger.info("[ExactOptimizer] Using best communities from history.")
                 best_idx = np.argmax(self._f_history) if len(self._f_history) > 0 else -1
                 if best_idx >= 0:
                     self._communities_dict = self._communities_history[best_idx]
-                    self._f = self._f_history[best_idx]
-                    self._f1, self._f2 = self._multi_history[best_idx]
+                else:
+                    self._communities_dict = None
+
+        # Use this solution to update scores
+        if self._communities_dict is None:
+            logger.error("[ExactOptimizer] Communities dictionary is None. Cannot update scores.")
+            return
+        
+        self._evaluator.update_scores(self._communities_dict)
+        self._f1 = -np.mean(list(self._evaluator.hhi.values()))
+        self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
 
         return
     
