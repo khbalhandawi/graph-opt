@@ -2604,6 +2604,10 @@ class ExactOptimizer(BaseOptimizer):
         for key, value in self._model_settings.items():
             self._model.setParam(key, value)
 
+        for t in self._T:
+            k = t % len(self._K) # round-robin, or any greedy rule
+            self._x[t, k].start = 1
+
         self.model_built = True
 
     def save(self, directory=None, **kwargs):
