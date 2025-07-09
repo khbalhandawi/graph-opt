@@ -2440,22 +2440,13 @@ class ExactOptimizer(BaseOptimizer):
         
         # number of attributes with a community assigned
         n_unassigned = sum(1 for v in communities_dict.values() if v is None)
-        n_assigned = len(communities_dict) - n_unassigned
-        new_assigned_community = len(self._K)
         # Handle case where no community is assigned to an attribute by using the unused k values
         if n_unassigned > 0:
-            logger.warning("Some attributes do not have a community assigned. Assigning unused communities to these attributes.")
-            unused_k = set(self._K) - set(communities_dict.values())
-            for t in self._T:
-                if communities_dict[self._evaluator._gloader.attr_i2key[t]] is None:
-                    if unused_k:
-                        k_assign = unused_k.pop()
-                    else:
-                        k_assign = new_assigned_community
-                        new_assigned_community += 1
-                    logger.warning(f"Attribute {self._evaluator._gloader.attr_i2key[t]} does not have a community assigned. Assigning community {k_assign}.")
-                    communities_dict[self._evaluator._gloader.attr_i2key[t]] = k_assign
-
+            raise ValueError(
+                f"Error: {n_unassigned} attributes have no community assigned. "
+                f"Please ensure that all attributes are assigned to a community. "
+            )
+        
         return communities_dict
 
     def process_communities_values(self, x: Dict[Tuple[int, int], int]) -> Dict[str, int]:
@@ -2864,7 +2855,7 @@ class ExactOptimizer(BaseOptimizer):
         # Use this solution to update scores
         if self._communities_dict is None:
             logger.error("[ExactOptimizer] Communities dictionary is None. Cannot update scores.")
-            return
+            raise ValueError("Communities dictionary is None. Ensure the model was built and solved correctly.")
         
         self._evaluator.update_scores(self._communities_dict)
         self._f1 = -np.mean(list(self._evaluator.hhi.values()))

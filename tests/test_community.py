@@ -1048,7 +1048,7 @@ class _TestOptimize():
     def test_save_load_greedy(
         self, 
         optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
-        get_evaluator: SampleEvaluator | ExactOptimizer,
+        get_evaluator: SampleEvaluator | ExactEvaluator,
         tmp_path
     ):
         
@@ -1187,8 +1187,8 @@ class TestProcessCommunitiesDict:
         expected = {'AT': 0, 'BT': 1, 'CT': 2}
         assert result == expected
     
-    def test_process_communities_dict_partial_assignment_with_unused_communities(self, caplog):
-        """Test when some attributes are unassigned but unused communities are available"""
+    def test_process_communities_dict_partial_assignment_with_unused_communities(self):
+        """Test when some attributes are unassigned - should raise ValueError"""
         optimizer = self.setup_mock_optimizer(n_attr=3, n_communities=5, 
                                             attr_names=['AT', 'BT', 'CT'])
         
@@ -1211,20 +1211,12 @@ class TestProcessCommunitiesDict:
             (2, 4): self.create_mock_var(0.0),
         }
         
-        with caplog.at_level(logging.WARNING):
-            result = optimizer.process_communities_dict(x)
-        
-        # Should log warnings about unassigned attributes
-        assert "Some attributes do not have a community assigned" in caplog.text
-        assert "does not have a community assigned" in caplog.text
-        
-        # Should assign unassigned attribute to an unused community (2, 3, or 4)
-        assert result['AT'] == 0
-        assert result['BT'] == 1
-        assert result['CT'] in [2, 3, 4]  # One of the unused communities
+        # Should raise ValueError for unassigned attributes
+        with pytest.raises(ValueError, match="Error: 1 attributes have no community assigned"):
+            optimizer.process_communities_dict(x)
     
-    def test_process_communities_dict_partial_assignment_no_unused_communities(self, caplog):
-        """Test when some attributes are unassigned and no unused communities are available"""
+    def test_process_communities_dict_partial_assignment_no_unused_communities(self):
+        """Test when some attributes are unassigned - should raise ValueError"""
         optimizer = self.setup_mock_optimizer(n_attr=4, n_communities=2, 
                                             attr_names=['AT', 'BT', 'CT', 'DT'])
         
@@ -1240,17 +1232,9 @@ class TestProcessCommunitiesDict:
             (3, 1): self.create_mock_var(0.0),
         }
         
-        with caplog.at_level(logging.WARNING):
-            result = optimizer.process_communities_dict(x)
-        
-        # Should log warnings about unassigned attributes
-        assert "Some attributes do not have a community assigned" in caplog.text
-        
-        # Should create new communities for unassigned attributes
-        assert result['AT'] == 0
-        assert result['BT'] == 1
-        assert result['CT'] == 2  # New community
-        assert result['DT'] == 3  # Another new community
+        # Should raise ValueError for unassigned attributes
+        with pytest.raises(ValueError, match="Error: 2 attributes have no community assigned"):
+            optimizer.process_communities_dict(x)
     
     def test_process_communities_dict_fractional_values(self):
         """Test with fractional values (should only consider values > 0.5)"""
@@ -1291,8 +1275,8 @@ class TestProcessCommunitiesDict:
         with pytest.raises(AssertionError, match="No decision variables found"):
             optimizer.process_communities_dict({})
     
-    def test_process_communities_dict_vars_without_x_attribute(self, caplog):
-        """Test with variables that don't have X attribute (should be skipped)"""
+    def test_process_communities_dict_vars_without_x_attribute(self):
+        """Test with variables that don't have X attribute - should raise ValueError for unassigned"""
         optimizer = self.setup_mock_optimizer(n_attr=2, n_communities=2, 
                                             attr_names=['AT', 'BT'])
         
@@ -1307,18 +1291,12 @@ class TestProcessCommunitiesDict:
             (1, 1): self.create_mock_var(0.8),  # attr 1 -> community 1
         }
         
-        # Should handle missing X attribute gracefully and assign unassigned attributes
-        with caplog.at_level(logging.WARNING):
-            result = optimizer.process_communities_dict(x)
-        
-        # Should log warnings about unassigned attributes
-        assert "Some attributes do not have a community assigned" in caplog.text
-        
-        assert result['AT'] == 0  # Should get assigned to unused community
-        assert result['BT'] == 1
+        # Should raise ValueError for unassigned attributes (attr 0 has no valid assignment)
+        with pytest.raises(ValueError, match="Error: 1 attributes have no community assigned"):
+            optimizer.process_communities_dict(x)
     
-    def test_process_communities_dict_real_attribute_names(self, caplog):
-        """Test with realistic attribute names"""
+    def test_process_communities_dict_real_attribute_names(self):
+        """Test with realistic attribute names - should raise ValueError for unassigned"""
         attr_names = ['airport_type', 'building_type', 'city_type', 'hub_type', 'vessel_type']
         optimizer = self.setup_mock_optimizer(n_attr=5, n_communities=3, 
                                             attr_names=attr_names)
@@ -1341,15 +1319,22 @@ class TestProcessCommunitiesDict:
             (4, 2): self.create_mock_var(0.0),
         }
         
-        with caplog.at_level(logging.WARNING):
-            result = optimizer.process_communities_dict(x)
+        # Should raise ValueError for unassigned attributes
+        with pytest.raises(ValueError, match="Error: 2 attributes have no community assigned"):
+            optimizer.process_communities_dict(x)
+    
+    def test_process_communities_dict_all_values_below_threshold(self):
+        """Test when all variables have values below 0.5 threshold - should raise ValueError"""
+        optimizer = self.setup_mock_optimizer(n_attr=2, n_communities=2, 
+                                            attr_names=['AT', 'BT'])
         
-        # Should log warnings about unassigned attributes
-        assert "Some attributes do not have a community assigned" in caplog.text
+        x = {
+            (0, 0): self.create_mock_var(0.3),  # attr 0 -> not assigned (< 0.5)
+            (0, 1): self.create_mock_var(0.4),  # attr 0 -> not assigned (< 0.5)
+            (1, 0): self.create_mock_var(0.2),  # attr 1 -> not assigned (< 0.5)
+            (1, 1): self.create_mock_var(0.1),  # attr 1 -> not assigned (< 0.5)
+        }
         
-        assert result['airport_type'] == 0
-        assert result['building_type'] == 1
-        assert result['city_type'] == 2
-        # Unassigned attributes should get new community IDs
-        assert result['hub_type'] == 3
-        assert result['vessel_type'] == 4
+        # Should raise ValueError for all unassigned attributes
+        with pytest.raises(ValueError, match="Error: 2 attributes have no community assigned"):
+            optimizer.process_communities_dict(x)
