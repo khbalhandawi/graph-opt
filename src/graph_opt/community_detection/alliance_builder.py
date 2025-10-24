@@ -31,6 +31,12 @@ from .utilities import distinct_communities, generate_membership_combinations, g
 from .utilities_cpu import edge_sampler_cpu, spatial_random_walk, attr_sampler_cpu
 from .utilities_cpu import calc_sample_w_i_cpu, calc_sample_w_it_cpu, edge_sample_p_et_cpu, edge_sample_p_ek_cpu, calc_sample_w_ik_cpu, calc_sample_mpc_cpu
 from .utilities_cpu import edge_postprocess_cpu, calc_hhi_cpu, calc_w_it_cpu, calc_w_ik_cpu, calc_mpc_cpu, calc_p_iv_cpu, calc_p_iv_t_cpu, calc_p_it_L, calc_p_ik_L
+from .utilities_weighted_cpu import (
+    calc_p_iv_t_weighted_cpu,
+    calc_s_t_weighted_cpu, calc_s_k_weighted_cpu, calc_s_total_weighted_cpu,
+    calc_normalized_mpc_weighted_cpu, calc_normalized_mpc_k_weighted_cpu,
+    calc_mpc_weighted_cpu
+)
 
 from ..utilities import _default_if_none, cpu_gpu_dispatcher, cuda_blocks, safe_log, serialize, deserialize
 
@@ -41,6 +47,7 @@ __all__ = [
     'GraphLoader',
     'NeighbourSampler',
     'ExactEvaluator',
+    'ExactWeightedEvaluator',
     'SampleEvaluator',
     'GreedyOptimizer',
     'BruteForce',
@@ -1358,6 +1365,270 @@ class ExactEvaluator(BaseEvaluator):
         return state
 
     def __del__(self):
+        super().__del__()
+
+
+class ExactWeightedEvaluator(BaseEvaluator):
+    """
+    Exact weighted evaluator that computes p_it and p_ik using weighted recursive formulation.
+    
+    This evaluator implements the weighted capacity-based approach where:
+    - P_i(v) = w_{i,v} / Z_i is the neighbor PMF
+    - P_{i,v}(tau) = w_{i,v,tau} / w_{i,v} is the conditional attribute PMF
+    - S_tau(i, L) and S_alpha_k(i, L) are computed recursively
+    - Normalized MPC scores are computed from the weighted scores
+    
+    Parameters
+    ----------
+    gloader : GraphLoader
+        Graph loader containing the multi-digraph data
+    use_gpu : bool, optional
+        Whether to use GPU acceleration (default: False). Currently only CPU is supported.
+    n_communities : int, optional
+        Number of communities/alliances (default: number of attributes)
+    walk_length : int, optional
+        Depth L for recursive calculation (default: 3)
+    lambda_decay : float, optional
+        Decay factor lambda for recursive terms (default: 1.0)
+    threads_per_block_1D : int, optional
+        GPU threads per block for 1D kernels (default: 484)
+    threads_per_block_2D : Union[int, Tuple[int,int]], optional
+        GPU threads per block for 2D kernels (default: 22)
+    threads_per_block_3D : Union[int, Tuple[int,int,int]], optional
+        GPU threads per block for 3D kernels (default: 8)
+    stream : optional
+        CUDA stream for GPU operations (default: None)
+    """
+    
+    def __init__(
+            self,
+            gloader: 'GraphLoader',
+            use_gpu: Optional[bool] = False,
+            n_communities: Optional[int] = None,
+            walk_length: Optional[int] = 3,
+            lambda_decay: Optional[float] = 1.0,
+            threads_per_block_1D: Optional[int] = 484,
+            threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 22,
+            threads_per_block_3D: Optional[Union[int,Tuple[int,int,int]]] = 8,
+            stream: Optional[Any] = None
+        ) -> None:
+        self.walk_length = walk_length
+        self.lambda_decay = lambda_decay
+        
+        if use_gpu:
+            raise NotImplementedError("GPU acceleration is not yet implemented for ExactWeightedEvaluator. Please use use_gpu=False.")
+        
+        super().__init__(gloader, use_gpu, n_communities, threads_per_block_1D, threads_per_block_2D, threads_per_block_3D, stream)
+
+    @property
+    def p_it(self):
+        """Return normalized attribute probabilities p_tilde(t | i, L)."""
+        if self.use_gpu:
+            return self._p_t_normalized_d.copy_to_host()
+        else:
+            return self._p_t_normalized.copy()
+
+    @property
+    def p_et(self):
+        """Return edge conditional probabilities."""
+        if self.use_gpu:
+            return self._gloader._cp_d.copy_to_host()
+        else:
+            return self._gloader._cp.copy()
+
+    def _post_init_cpu(self, *args, **kwargs):
+        """Initialize CPU-specific arrays and compute base probabilities."""
+        super()._post_init_cpu(args, kwargs)
+
+        # Initialize probability arrays
+        self._p_iv = np.zeros((self._gloader.n_nodes_spatial, self._gloader.n_nodes_spatial), dtype=np.float32)
+        self._p_iv_t = np.zeros((self._gloader.n_nodes_spatial, self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32)
+        
+        # Weighted score arrays
+        self._s_t = np.zeros((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32)
+        self._s_k = np.zeros((self._gloader.n_nodes_spatial, self._n_communities), dtype=np.float32)
+        self._s_total = np.zeros(self._gloader.n_nodes_spatial, dtype=np.float32)
+        
+        # Normalized probability arrays
+        self._p_t_normalized = np.zeros((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32)
+        self._p_k_normalized = np.zeros((self._gloader.n_nodes_spatial, self._n_communities), dtype=np.float32)
+
+        # Compute w_it (attribute weights per node) - reuse existing method
+        calc_w_it_cpu(
+            adj=self._gloader._adj_sparse,
+            adj3=self._gloader._adj3,
+            w_it=self._w_it
+        )
+
+        # Compute w_i (total outgoing weights) - same as Z_i
+        self._w_i = np.sum(self._w_it, axis=1)
+
+        # Compute P_i(v) = w_{i,v} / w_i - reuse existing method
+        calc_p_iv_cpu(
+            adj_sparse=self._gloader._adj_sparse,
+            adj_weight=self._gloader._adj,
+            w_i=self._w_i,
+            p_iv=self._p_iv
+        )
+
+        # Compute P_{i,v}(t) for weighted version
+        calc_p_iv_t_weighted_cpu(
+            adj_multi_attr_sparse=self._gloader._adj_multi_attr_sparse,
+            adj_multi_attr_type=self._gloader._adj_multi_attr_type,
+            adj_multi_attr_weight=self._gloader._adj_multi_attr,
+            adj_multi_attr_index=self._gloader._adj_multi_attr_index,
+            adj_weight=self._gloader._adj,
+            p_iv_t=self._p_iv_t
+        )
+
+        # Compute total capacity scores (attribute-agnostic)
+        calc_s_total_weighted_cpu(
+            p_iv=self._p_iv,
+            w_i=self._w_i,
+            L=self.walk_length,
+            lambda_decay=self.lambda_decay,
+            s_total=self._s_total
+        )
+
+        # Compute attribute scores
+        calc_s_t_weighted_cpu(
+            p_iv=self._p_iv,
+            w_i=self._w_i,
+            p_iv_t=self._p_iv_t,
+            L=self.walk_length,
+            lambda_decay=self.lambda_decay,
+            s_t=self._s_t
+        )
+
+        # Normalize to get probabilities
+        calc_normalized_mpc_weighted_cpu(
+            s_t=self._s_t,
+            s_total=self._s_total,
+            p_t_normalized=self._p_t_normalized
+        )
+
+        # Store in w_it for compatibility with base class (overwrite initial computation)
+        self._w_it = self._p_t_normalized.copy()
+
+        return None
+
+    def _post_init_gpu(
+            self,
+            threads_per_block_1D: int,
+            threads_per_block_2D: Union[int,Tuple[int,int]],
+            threads_per_block_3D: Union[int,Tuple[int,int,int]],
+            stream: Optional[Any] = None
+        ):
+        """GPU initialization - not yet implemented."""
+        raise NotImplementedError("GPU acceleration is not yet implemented for ExactWeightedEvaluator.")
+
+    def update_scores(self, communities_dict: Dict[str,str]):
+        """Update HHI and MPC scores for a given community assignment."""
+        super().update_scores(communities_dict)
+
+        self._update_hhi_scores()
+        self._update_mpc_scores()
+        self._update_community_weights()
+
+    def update_scores_membership(self, membership: np.ndarray):
+        """Update HHI and MPC scores for a given membership array."""
+        super().update_scores_membership(membership)
+
+        self._update_hhi_scores()
+        self._update_mpc_scores()
+        self._update_community_weights()
+
+    @cpu_gpu_dispatcher('_update_hhi_scores_cpu', '_update_hhi_scores_gpu')
+    def _update_hhi_scores(self, **kwargs):
+        pass
+
+    def _update_hhi_scores_cpu(self):
+        """Compute HHI scores based on edge community probabilities."""
+        edge_postprocess_cpu(
+            edges_cp=self._gloader._cp,
+            membership=self._membership,
+            edges_communities=self._edges_communities
+        )
+
+        calc_hhi_cpu(
+            edges_communities=self._edges_communities,
+            hhi_edges=self._hhi_edges,
+        )
+
+        # Update the hhi dictionary
+        for i, edge in enumerate(self._gloader.edge_unique_list):
+            self._hhi[edge] = self._hhi_edges[i]
+
+    def _update_hhi_scores_gpu(self):
+        """GPU version - not yet implemented."""
+        raise NotImplementedError("GPU acceleration is not yet implemented for ExactWeightedEvaluator.")
+
+    @cpu_gpu_dispatcher('_update_mpc_scores_cpu', '_update_mpc_scores_gpu')
+    def _update_mpc_scores(self):
+        pass
+
+    def _update_mpc_scores_cpu(self):
+        """Compute MPC scores using weighted recursive formulation."""
+        # Reset alliance scores
+        self._s_k = np.zeros((self._gloader.n_nodes_spatial, self._n_communities), dtype=np.float32)
+
+        # Compute alliance scores S_k(i, L)
+        calc_s_k_weighted_cpu(
+            p_iv=self._p_iv,
+            w_i=self._w_i,
+            p_iv_t=self._p_iv_t,
+            L=self.walk_length,
+            lambda_decay=self.lambda_decay,
+            membership=self._membership,
+            s_k=self._s_k
+        )
+
+        # Normalize alliance scores
+        calc_normalized_mpc_k_weighted_cpu(
+            s_k=self._s_k,
+            s_total=self._s_total,
+            p_k_normalized=self._p_k_normalized
+        )
+
+        # Store in w_ik for compatibility with base class
+        self._w_ik = self._p_k_normalized.copy()
+
+        # Compute MPC as product of attribute and alliance probabilities
+        calc_mpc_weighted_cpu(
+            membership=self._membership,
+            p_t_normalized=self._p_t_normalized,
+            p_k_normalized=self._p_k_normalized,
+            mpc=self._mpc_attrs
+        )
+
+        self._log_mpc_attrs = safe_log(self._mpc_attrs)
+
+        # Update the mpc dictionaries
+        for attr in self._gloader.attr_list:
+            self._mpc[attr] = self._mpc_attrs[self._gloader.attr_key2i[attr]]
+            self._log_mpc[attr] = self._log_mpc_attrs[self._gloader.attr_key2i[attr]]
+
+    def _update_mpc_scores_gpu(self):
+        """GPU version - not yet implemented."""
+        raise NotImplementedError("GPU acceleration is not yet implemented for ExactWeightedEvaluator.")
+
+    def _create_copy_instance(self, stream: Optional[Any] = None) -> 'ExactWeightedEvaluator':
+        """Create a copy of this evaluator instance."""
+        return self.__class__(
+            gloader=self._gloader,
+            use_gpu=self.use_gpu,
+            walk_length=self.walk_length,
+            lambda_decay=self.lambda_decay,
+            n_communities=self._n_communities
+        )
+
+    def __getstate__(self):
+        """Prepare instance for pickling."""
+        state = super().__getstate__()
+        return state
+
+    def __del__(self):
+        """Destructor."""
         super().__del__()
 
 

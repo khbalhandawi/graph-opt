@@ -1,0 +1,311 @@
+"""
+Utility functions for weighted exact evaluation on CPU.
+
+This module implements the recursive weighted probability calculations
+for computing S_t(i,L) and S_k(i,L) based on edge weights.
+
+Note: We reuse calc_p_iv_cpu from utilities_cpu.py for computing P_i(v).
+"""
+
+import numpy as np
+import numba
+
+
+@numba.njit
+def calc_p_iv_t_weighted_cpu(
+        adj_multi_attr_sparse,
+        adj_multi_attr_type,
+        adj_multi_attr_weight,
+        adj_multi_attr_index,
+        adj_weight,
+        p_iv_t
+    ):
+    """
+    Calculate P_{i,v}(tau) = w_{i,v,tau} / w_{i,v} for each (i,v,tau).
+    
+    This is the conditional probability of attribute tau given edge (i,v).
+    """
+    n_edges = adj_multi_attr_sparse.shape[0]
+    n_nodes = p_iv_t.shape[0]
+    n_attr = p_iv_t.shape[2]
+    
+    # Initialize
+    for i in range(n_nodes):
+        for v in range(n_nodes):
+            for t in range(n_attr):
+                p_iv_t[i, v, t] = 0.0
+    
+    # Compute conditional probabilities
+    for edge_idx in range(n_edges):
+        source = adj_multi_attr_sparse[edge_idx, 0]
+        target = adj_multi_attr_sparse[edge_idx, 1]
+        attr = adj_multi_attr_type[edge_idx]
+        attr_weight = adj_multi_attr_weight[edge_idx]
+        total_edge_weight = adj_weight[adj_multi_attr_index[edge_idx]]
+        
+        if total_edge_weight > 0:
+            p_iv_t[source, target, attr] = attr_weight / total_edge_weight
+
+
+def calc_s_t_weighted_cpu(
+        p_iv,
+        w_i,
+        p_iv_t,
+        L,
+        lambda_decay,
+        s_t
+    ):
+    """
+    Calculate S_t(i, L) recursively using the weighted formulation.
+    
+    S_t(i,L) = sum_{v in N_i} P_i(v) * [w_i * P_i(v) * P_{i,v}(t) + lambda * S_t(v, L-1)]
+    
+    Parameters
+    ----------
+    p_iv : np.ndarray
+        Neighbor PMF of shape (n_nodes, n_nodes), computed as P_i(v) = w_{i,v} / w_i
+    w_i : np.ndarray
+        Total outgoing weights of shape (n_nodes,), equivalent to Z_i
+    p_iv_t : np.ndarray
+        Conditional attribute PMF of shape (n_nodes, n_nodes, n_attr)
+    L : int
+        Walk depth
+    lambda_decay : float
+        Decay factor for recursive term
+    s_t : np.ndarray
+        Output array of shape (n_nodes, n_attr) to store attribute scores
+    """
+    n_nodes, n_attr = s_t.shape
+    
+    # Recursive function to calculate S_t(i, depth)
+    def calc_s_t_recursive(i, t, depth):
+        if depth == 0:
+            return 0.0
+        
+        sum_v = 0.0
+        
+        for v in range(n_nodes):
+            if p_iv[i, v] == 0:
+                continue
+                
+            # Direct term: w_i * P_i(v) * P_{i,v}(t)
+            direct_term = w_i[i] * p_iv[i, v] * p_iv_t[i, v, t]
+            
+            # Recursive term: lambda * S_t(v, depth-1)
+            recursive_term = lambda_decay * calc_s_t_recursive(v, t, depth - 1)
+            
+            sum_v += p_iv[i, v] * (direct_term + recursive_term)
+        
+        return sum_v
+    
+    # Calculate for each node and attribute
+    for i in range(n_nodes):
+        for t in range(n_attr):
+            s_t[i, t] = calc_s_t_recursive(i, t, L)
+
+
+def calc_s_k_weighted_cpu(
+        p_iv,
+        w_i,
+        p_iv_t,
+        L,
+        lambda_decay,
+        membership,
+        s_k
+    ):
+    """
+    Calculate S_k(i, L) recursively using the weighted formulation.
+    
+    S_k(i,L) = sum_{v in N_i} P_i(v) * [w_i * P_i(v) * sum_{t: x_t,k=1} P_{i,v}(t) + lambda * S_k(v, L-1)]
+    
+    Parameters
+    ----------
+    p_iv : np.ndarray
+        Neighbor PMF of shape (n_nodes, n_nodes)
+    w_i : np.ndarray
+        Total outgoing weights of shape (n_nodes,)
+    p_iv_t : np.ndarray
+        Conditional attribute PMF of shape (n_nodes, n_nodes, n_attr)
+    L : int
+        Walk depth
+    lambda_decay : float
+        Decay factor for recursive term
+    membership : np.ndarray
+        Alliance membership array of shape (n_attr,) mapping attributes to alliances
+    s_k : np.ndarray
+        Output array of shape (n_nodes, n_communities) to store alliance scores
+    """
+    n_nodes, n_communities = s_k.shape
+    n_attr = p_iv_t.shape[2]
+    
+    # Recursive function to calculate S_k(i, depth)
+    def calc_s_k_recursive(i, k, depth):
+        if depth == 0:
+            return 0.0
+        
+        sum_v = 0.0
+        
+        for v in range(n_nodes):
+            if p_iv[i, v] == 0:
+                continue
+            
+            # Direct term: w_i * P_i(v) * sum_{t: membership[t]=k} P_{i,v}(t)
+            direct_sum = 0.0
+            for t in range(n_attr):
+                if membership[t] == k:
+                    direct_sum += p_iv_t[i, v, t]
+            
+            direct_term = w_i[i] * p_iv[i, v] * direct_sum
+            
+            # Recursive term: lambda * S_k(v, depth-1)
+            recursive_term = lambda_decay * calc_s_k_recursive(v, k, depth - 1)
+            
+            sum_v += p_iv[i, v] * (direct_term + recursive_term)
+        
+        return sum_v
+    
+    # Calculate for each node and community
+    for i in range(n_nodes):
+        for k in range(n_communities):
+            s_k[i, k] = calc_s_k_recursive(i, k, L)
+
+
+def calc_s_total_weighted_cpu(
+        p_iv,
+        w_i,
+        L,
+        lambda_decay,
+        s_total
+    ):
+    """
+    Calculate S_total(i, L) recursively (attribute-agnostic capacity score).
+    
+    S_total(i,L) = sum_{v in N_i} P_i(v) * [w_i * P_i(v) + lambda * S_total(v, L-1)]
+    
+    Parameters
+    ----------
+    p_iv : np.ndarray
+        Neighbor PMF of shape (n_nodes, n_nodes)
+    w_i : np.ndarray
+        Total outgoing weights of shape (n_nodes,)
+    L : int
+        Walk depth
+    lambda_decay : float
+        Decay factor for recursive term
+    s_total : np.ndarray
+        Output array of shape (n_nodes,) to store total capacity scores
+    """
+    n_nodes = s_total.shape[0]
+    
+    # Recursive function to calculate S_total(i, depth)
+    def calc_s_total_recursive(i, depth):
+        if depth == 0:
+            return 0.0
+        
+        sum_v = 0.0
+        
+        for v in range(n_nodes):
+            if p_iv[i, v] == 0:
+                continue
+            
+            # Direct term: w_i * P_i(v)
+            direct_term = w_i[i] * p_iv[i, v]
+            
+            # Recursive term: lambda * S_total(v, depth-1)
+            recursive_term = lambda_decay * calc_s_total_recursive(v, depth - 1)
+            
+            sum_v += p_iv[i, v] * (direct_term + recursive_term)
+        
+        return sum_v
+    
+    # Calculate for each node
+    for i in range(n_nodes):
+        s_total[i] = calc_s_total_recursive(i, L)
+
+
+@numba.njit
+def calc_normalized_mpc_weighted_cpu(
+        s_t,
+        s_total,
+        p_t_normalized
+    ):
+    """
+    Calculate normalized MPC: p_tilde(t | i, L) = S_t(i, L) / S_total(i, L).
+    
+    Parameters
+    ----------
+    s_t : np.ndarray
+        Attribute scores of shape (n_nodes, n_attr)
+    s_total : np.ndarray
+        Total capacity scores of shape (n_nodes,)
+    p_t_normalized : np.ndarray
+        Output normalized probabilities of shape (n_nodes, n_attr)
+    """
+    n_nodes, n_attr = s_t.shape
+    
+    for i in range(n_nodes):
+        for t in range(n_attr):
+            if s_total[i] > 0:
+                p_t_normalized[i, t] = s_t[i, t] / s_total[i]
+            else:
+                p_t_normalized[i, t] = 0.0
+
+
+@numba.njit
+def calc_normalized_mpc_k_weighted_cpu(
+        s_k,
+        s_total,
+        p_k_normalized
+    ):
+    """
+    Calculate normalized alliance MPC: p_tilde(k | i, L) = S_k(i, L) / S_total(i, L).
+    
+    Parameters
+    ----------
+    s_k : np.ndarray
+        Alliance scores of shape (n_nodes, n_communities)
+    s_total : np.ndarray
+        Total capacity scores of shape (n_nodes,)
+    p_k_normalized : np.ndarray
+        Output normalized probabilities of shape (n_nodes, n_communities)
+    """
+    n_nodes, n_communities = s_k.shape
+    
+    for i in range(n_nodes):
+        for k in range(n_communities):
+            if s_total[i] > 0:
+                p_k_normalized[i, k] = s_k[i, k] / s_total[i]
+            else:
+                p_k_normalized[i, k] = 0.0
+
+
+@numba.njit
+def calc_mpc_weighted_cpu(
+        membership,
+        p_t_normalized,
+        p_k_normalized,
+        mpc
+    ):
+    """
+    Calculate MPC as the product of normalized attribute and alliance probabilities.
+    
+    MPC[t] = sum_i p_tilde(t | i, L) * p_tilde(k | i, L) where k = membership[t]
+    
+    Parameters
+    ----------
+    membership : np.ndarray
+        Alliance membership of shape (n_attr,)
+    p_t_normalized : np.ndarray
+        Normalized attribute probabilities of shape (n_nodes, n_attr)
+    p_k_normalized : np.ndarray
+        Normalized alliance probabilities of shape (n_nodes, n_communities)
+    mpc : np.ndarray
+        Output MPC array of shape (n_attr,)
+    """
+    n_nodes, n_attr = p_t_normalized.shape
+    
+    for t in range(n_attr):
+        mpc[t] = 0.0
+        k = membership[t]
+        for i in range(n_nodes):
+            mpc[t] += p_t_normalized[i, t] * p_k_normalized[i, k]
