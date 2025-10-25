@@ -228,23 +228,31 @@ def calc_p_iv_cpu(
         w_i,
         p_iv
     ):
-
+    """
+    Calculate P_i(v) = w_{i,v} / w_i for each (i,v).
+    
+    This is the neighbor probability mass function.
+    
+    This efficient implementation loops through edges once (O(n_edges)) 
+    rather than checking all edges for each (i,v) pair.
+    """
     n_nodes = w_i.shape[0]
-    n_global_edges = adj_sparse.shape[0]
-
+    n_edges = adj_sparse.shape[0]
+    
+    # Initialize
     for i in range(n_nodes):
         for v in range(n_nodes):
+            p_iv[i, v] = 0.0
+    
+    # Compute neighbor PMF
+    for edge_idx in range(n_edges):
+        source = adj_sparse[edge_idx, 0]
+        target = adj_sparse[edge_idx, 1]
+        edge_weight = adj_weight[edge_idx]
+        
+        if w_i[source] > 0:
+            p_iv[source, target] = edge_weight / w_i[source]
 
-            p_iv[i,v] = 0.0
-            for global_edge_index in range(n_global_edges):
-                source, target = adj_sparse[global_edge_index]
-
-                if source != i or target != v:
-                    continue
-
-                edge_weight = adj_weight[global_edge_index]
-                p_iv[i,v] = edge_weight / w_i[source]
-                break
 
 @numba.njit
 def calc_p_iv_t_cpu(
@@ -255,29 +263,35 @@ def calc_p_iv_t_cpu(
         adj_weight,
         p_iv_t
     ):
-
+    """
+    Calculate P_{i,v}(t) = w_{i,v,t} / w_{i,v} for each (i,v,t).
+    
+    This is the conditional probability of attribute t given edge (i,v).
+    
+    This efficient implementation loops through edges once (O(n_edges)) 
+    rather than checking all edges for each (i,v,t) combination.
+    """
     n_edges = adj_multi_attr_sparse.shape[0]
     n_nodes = p_iv_t.shape[0]
     n_attr = p_iv_t.shape[2]
-
+    
+    # Initialize
     for i in range(n_nodes):
         for v in range(n_nodes):
             for t in range(n_attr):
+                p_iv_t[i, v, t] = 0.0
+    
+    # Compute conditional probabilities
+    for edge_idx in range(n_edges):
+        source = adj_multi_attr_sparse[edge_idx, 0]
+        target = adj_multi_attr_sparse[edge_idx, 1]
+        attr = adj_multi_attr_type[edge_idx]
+        attr_weight = adj_multi_attr_weight[edge_idx]
+        total_edge_weight = adj_weight[adj_multi_attr_index[edge_idx]]
+        
+        if total_edge_weight > 0:
+            p_iv_t[source, target, attr] = attr_weight / total_edge_weight
 
-                p_iv_t[i,v,t] = 0.0
-                for edge_index in range(n_edges):
-
-                    source, target = adj_multi_attr_sparse[edge_index]
-                    attr_current = adj_multi_attr_type[edge_index]
-
-                    if source != i or attr_current != t or target != v:
-                        continue
-
-                    attr_weight = adj_multi_attr_weight[edge_index]
-                    edge_weight = adj_weight[adj_multi_attr_index[edge_index]]
-                    p_iv_t[i,v,t] = (attr_weight / edge_weight)
-
-                    break
 
 def calc_p_it_L(
         p_iv,

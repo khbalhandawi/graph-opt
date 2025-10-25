@@ -3,48 +3,10 @@ Utility functions for weighted exact evaluation on CPU.
 
 This module implements the recursive weighted probability calculations
 for computing S_t(i,L) and S_k(i,L) based on edge weights.
-
-Note: We reuse calc_p_iv_cpu from utilities_cpu.py for computing P_i(v).
 """
 
 import numpy as np
 import numba
-
-
-@numba.njit
-def calc_p_iv_t_weighted_cpu(
-        adj_multi_attr_sparse,
-        adj_multi_attr_type,
-        adj_multi_attr_weight,
-        adj_multi_attr_index,
-        adj_weight,
-        p_iv_t
-    ):
-    """
-    Calculate P_{i,v}(tau) = w_{i,v,tau} / w_{i,v} for each (i,v,tau).
-    
-    This is the conditional probability of attribute tau given edge (i,v).
-    """
-    n_edges = adj_multi_attr_sparse.shape[0]
-    n_nodes = p_iv_t.shape[0]
-    n_attr = p_iv_t.shape[2]
-    
-    # Initialize
-    for i in range(n_nodes):
-        for v in range(n_nodes):
-            for t in range(n_attr):
-                p_iv_t[i, v, t] = 0.0
-    
-    # Compute conditional probabilities
-    for edge_idx in range(n_edges):
-        source = adj_multi_attr_sparse[edge_idx, 0]
-        target = adj_multi_attr_sparse[edge_idx, 1]
-        attr = adj_multi_attr_type[edge_idx]
-        attr_weight = adj_multi_attr_weight[edge_idx]
-        total_edge_weight = adj_weight[adj_multi_attr_index[edge_idx]]
-        
-        if total_edge_weight > 0:
-            p_iv_t[source, target, attr] = attr_weight / total_edge_weight
 
 
 def calc_s_t_weighted_cpu(

@@ -32,7 +32,6 @@ from .utilities_cpu import edge_sampler_cpu, spatial_random_walk, attr_sampler_c
 from .utilities_cpu import calc_sample_w_i_cpu, calc_sample_w_it_cpu, edge_sample_p_et_cpu, edge_sample_p_ek_cpu, calc_sample_w_ik_cpu, calc_sample_mpc_cpu
 from .utilities_cpu import edge_postprocess_cpu, calc_hhi_cpu, calc_w_it_cpu, calc_w_ik_cpu, calc_mpc_cpu, calc_p_iv_cpu, calc_p_iv_t_cpu, calc_p_it_L, calc_p_ik_L
 from .utilities_weighted_cpu import (
-    calc_p_iv_t_weighted_cpu,
     calc_s_t_weighted_cpu, calc_s_k_weighted_cpu, calc_s_total_weighted_cpu,
     calc_normalized_mpc_weighted_cpu, calc_normalized_mpc_k_weighted_cpu,
     calc_mpc_weighted_cpu
@@ -1471,8 +1470,8 @@ class ExactWeightedEvaluator(BaseEvaluator):
             p_iv=self._p_iv
         )
 
-        # Compute P_{i,v}(t) for weighted version
-        calc_p_iv_t_weighted_cpu(
+        # Compute P_{i,v}(t) - conditional attribute PMF
+        calc_p_iv_t_cpu(
             adj_multi_attr_sparse=self._gloader._adj_multi_attr_sparse,
             adj_multi_attr_type=self._gloader._adj_multi_attr_type,
             adj_multi_attr_weight=self._gloader._adj_multi_attr,
