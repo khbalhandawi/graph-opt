@@ -5,7 +5,7 @@ from optparse import Option
 import pytest
 import os
 
-from graph_opt.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, SampleEvaluator, GreedyOptimizer, BruteForce, ExactOptimizer, multiobjective
+from graph_opt.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, ExactWeightedEvaluator, SampleEvaluator, GreedyOptimizer, BruteForce, ExactOptimizer, multiobjective
 from graph_opt.community_detection.utilities import same_community
 from graph_opt.utilities import cuda_blocks
 
@@ -1338,3 +1338,383 @@ class TestProcessCommunitiesDict:
         # Should raise ValueError for all unassigned attributes
         with pytest.raises(ValueError, match="Error: 2 attributes have no community assigned"):
             optimizer.process_communities_dict(x)
+
+
+@pytest.fixture(scope="class",
+    params=[
+        {
+            "merge_communities_test": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 2,
+                'HT': 3,
+                'VT': 4
+            },
+            "membership_test": np.array([0, 1, 2, 3, 4]),
+            "test_HHI": {
+                ('0', '1'): 0.52,
+                ('0', '2'): 1.0,
+                ('0', '4'): 1.0,
+                ('1', '2'): 1.0,
+                ('3', '4'): 0.68,
+                ('4', '0'): 1.0,
+            },
+            "n_communities": 5,
+        },
+        {
+            "merge_communities_test": {
+                'AT': 1,
+                'BT': 1,
+                'CT': 2,
+                'HT': 3,
+                'VT': 4
+            },
+            "membership_test": np.array([1, 1, 2, 3, 4]),
+            "test_HHI": {
+                ('0', '1'): 0.52,
+                ('0', '2'): 1.0,
+                ('0', '4'): 1.0,
+                ('1', '2'): 1.0,
+                ('3', '4'): 0.68,
+                ('4', '0'): 1.0,
+            },
+            "n_communities": None,
+        },
+        {
+            "merge_communities_test": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 4,
+                'HT': 3,
+                'VT': 4
+            },
+            "membership_test": np.array([0, 1, 4, 3, 4]),
+            "test_HHI": {
+                ('0', '1'): 0.52,
+                ('0', '2'): 1.0,
+                ('0', '4'): 1.0,
+                ('1', '2'): 1.0,
+                ('3', '4'): 0.68,
+                ('4', '0'): 1.0,
+            },
+            "n_communities": None,
+        },
+        {
+            "merge_communities_test": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 2,
+                'HT': 4,
+                'VT': 4
+            },
+            "membership_test": np.array([0, 1, 2, 4, 4]),
+            "test_HHI": {
+                ('0', '1'): 1.0,
+                ('0', '2'): 1.0,
+                ('0', '4'): 1.0,
+                ('1', '2'): 1.0,
+                ('3', '4'): 0.68,
+                ('4', '0'): 1.0,
+            },
+            "n_communities": None,
+        },
+        {
+            "merge_communities_test": {
+                'AT': 0,
+                'BT': 1,
+                'CT': 2,
+                'HT': 3,
+                'VT': 3
+            },
+            "membership_test": np.array([0, 1, 2, 3, 3]),
+            "test_HHI": {
+                ('0', '1'): 1.0,
+                ('0', '2'): 1.0,
+                ('0', '4'): 1.0,
+                ('1', '2'): 1.0,
+                ('3', '4'): 0.68,
+                ('4', '0'): 1.0,
+            },
+            "n_communities": 4,
+        },
+    ],
+    ids=[
+        'weighted default init',
+        'weighted nondefault init 1',
+        'weighted nondefault init 2',
+        'weighted nondefault init 3',
+        'weighted n_communities < n_attr'
+    ]
+)
+def example_case_param_weighted(request):
+    """
+    Fixture for weighted evaluator test cases with dynamically computed expected values.
+    
+    This fixture computes the expected p_t_normalized and p_k_normalized values on-the-fly
+    using the same weighted recursive formulation that the ExactWeightedEvaluator uses.
+    This ensures the tests are self-contained and don't rely on external pre-computed values.
+    
+    The computation follows these steps:
+    1. Load the test graph and extract parameters
+    2. Compute w_it (attribute weights) and w_i (total weights) 
+    3. Compute p_iv (neighbor PMF) and p_iv_t (conditional attribute PMF)
+    4. Apply the weighted recursive formulation to get S_t, S_k, and S_total
+    5. Normalize to get p_t_normalized and p_k_normalized
+    6. Convert to dictionary format for test comparisons
+    """
+    
+    # Import required modules for computation
+    from graph_opt.community_detection.utilities_cpu import calc_w_it_cpu, calc_p_iv_cpu, calc_p_iv_t_cpu
+    from graph_opt.community_detection.utilities_weighted_cpu import (
+        calc_s_t_weighted_cpu, calc_s_k_weighted_cpu, calc_s_total_weighted_cpu,
+        calc_normalized_mpc_weighted_cpu, calc_normalized_mpc_k_weighted_cpu
+    )
+    
+    # Load test graph
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join('..', 'test_data')
+    MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir, data_dir, 'test_DG_AP_AL.graphml'))
+    graph = GraphLoader(MG=MG, use_gpu=False)
+    
+    # Get test case parameters
+    param = request.param
+    communities_test = param["merge_communities_test"]
+    membership_test = param["membership_test"]
+    test_HHI = param["test_HHI"]
+    n_communities = param["n_communities"]
+    
+    # Set default n_communities if None
+    if n_communities is None:
+        n_communities = graph.n_attr
+    
+    # Compute w_it (attribute weights per node)
+    w_it_array = np.zeros((graph.n_nodes_spatial, graph.n_attr), dtype=np.float32)
+    calc_w_it_cpu(
+        adj=graph._adj_sparse,
+        adj3=graph._adj3,
+        w_it=w_it_array
+    )
+    
+    # Convert to dictionary format for compatibility
+    w_it = {}
+    attr_names = ['AT', 'BT', 'CT', 'HT', 'VT']
+    for i in range(graph.n_nodes_spatial):
+        w_it[i] = {}
+        for j, attr in enumerate(attr_names):
+            w_it[i][attr] = float(w_it_array[i, j])
+    
+    # Compute w_i (total outgoing weights)
+    w_i_array = np.sum(w_it_array, axis=1)
+    w_i = {i: float(w_i_array[i]) for i in range(graph.n_nodes_spatial)}
+    
+    # Compute p_iv (neighbor PMF)
+    p_iv = np.zeros((graph.n_nodes_spatial, graph.n_nodes_spatial), dtype=np.float32)
+    calc_p_iv_cpu(
+        adj_sparse=graph._adj_sparse,
+        adj_weight=graph._adj,
+        w_i=w_i_array,
+        p_iv=p_iv
+    )
+    
+    # Compute p_iv_t (conditional attribute PMF)
+    p_iv_t = np.zeros((graph.n_nodes_spatial, graph.n_nodes_spatial, graph.n_attr), dtype=np.float32)
+    calc_p_iv_t_cpu(
+        adj_multi_attr_sparse=graph._adj_multi_attr_sparse,
+        adj_multi_attr_type=graph._adj_multi_attr_type,
+        adj_multi_attr_weight=graph._adj_multi_attr,
+        adj_multi_attr_index=graph._adj_multi_attr_index,
+        adj_weight=graph._adj,
+        p_iv_t=p_iv_t
+    )
+    
+    # Initialize weighted score arrays
+    s_t = np.zeros((graph.n_nodes_spatial, graph.n_attr), dtype=np.float32)
+    s_k = np.zeros((graph.n_nodes_spatial, n_communities), dtype=np.float32)
+    s_total = np.zeros(graph.n_nodes_spatial, dtype=np.float32)
+    
+    # Compute weighted scores with walk_length=1, lambda_decay=1.0
+    calc_s_t_weighted_cpu(p_iv, w_i_array, p_iv_t, 1, 1.0, s_t)
+    calc_s_k_weighted_cpu(p_iv, w_i_array, p_iv_t, 1, 1.0, membership_test, s_k)
+    calc_s_total_weighted_cpu(p_iv, w_i_array, 1, 1.0, s_total)
+    
+    # Compute normalized probabilities
+    p_t_normalized_array = np.zeros((graph.n_nodes_spatial, graph.n_attr), dtype=np.float32)
+    p_k_normalized_array = np.zeros((graph.n_nodes_spatial, n_communities), dtype=np.float32)
+    
+    calc_normalized_mpc_weighted_cpu(s_t, s_total, p_t_normalized_array)
+    calc_normalized_mpc_k_weighted_cpu(s_k, s_total, p_k_normalized_array)
+    
+    # Convert to dictionary format for test comparisons
+    p_t_normalized = {}
+    for i in range(graph.n_nodes_spatial):
+        p_t_normalized[i] = {}
+        for j, attr in enumerate(attr_names):
+            p_t_normalized[i][attr] = float(p_t_normalized_array[i, j])
+    
+    p_k_normalized = {}
+    for i in range(graph.n_nodes_spatial):
+        p_k_normalized[i] = {}
+        for k in range(n_communities):
+            p_k_normalized[i][k] = float(p_k_normalized_array[i, k])
+
+    return communities_test, membership_test, n_communities, test_HHI, w_it, w_i, p_t_normalized, p_k_normalized
+
+
+class _TestDeterministicWeighted():
+    """Test class for ExactWeightedEvaluator with deterministic weighted calculations."""
+    
+    num_streams = 4
+    tile_size = 2
+    threads_per_block = 8
+    use_gpu = False
+    update_membership = False
+    walk_length = 1
+    lambda_decay = 1.0
+    tolerance = 1e-6
+
+    @pytest.fixture(scope="function")
+    def read_graph(self) -> GraphLoader:
+        # This setup will run once for the entire class
+        script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
+        data_dir = os.path.join('..','test_data')
+        MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir, data_dir, 'test_DG_AP_AL.graphml'))
+
+        graph = GraphLoader(
+            MG=MG,
+            use_gpu=self.use_gpu
+        )
+
+        return graph
+
+    def test_evaluator(self, read_graph: GraphLoader, example_case_param_weighted):
+        """Test the ExactWeightedEvaluator against expected weighted probability values."""
+        
+        graph = read_graph
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+
+        # Import the ExactWeightedEvaluator
+        from graph_opt.community_detection.alliance_builder import ExactWeightedEvaluator
+
+        test_class = ExactWeightedEvaluator(
+            gloader=graph,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities,
+            walk_length=self.walk_length,
+            lambda_decay=self.lambda_decay,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        if self.update_membership:
+            test_class.update_scores_membership(membership_test)
+        else:
+            test_class.update_scores(communities_dict=init_communities_test)
+
+        # Check all keys in test dictionary are present for HHI
+        assert all(key in test_HHI.keys() for key in test_class.hhi)
+
+        for key, value in test_class.hhi.items():
+            assert abs(test_class.hhi[key] - test_HHI[key]) < self.tolerance, \
+                f"HHI mismatch for {key}: expected {test_HHI[key]}, got {test_class.hhi[key]}"
+
+        # Check that w_it now contains p_t_normalized (since weighted evaluator overwrites it)
+        for node_id, attrs in test_p_t_normalized.items():
+            for attr in attrs.keys():
+                attr_idx = graph.attr_key2i[attr]
+                expected_val = test_p_t_normalized[node_id][attr]
+                actual_val = test_class.w_it[node_id, attr_idx]  # For weighted evaluator, this contains p_t_normalized
+                assert abs(actual_val - expected_val) < self.tolerance, \
+                    f"w_it (p_t_normalized) mismatch for node {node_id}, attr {attr}: expected {expected_val}, got {actual_val}"
+
+        # Check w_i values (should be exactly the same as in ExactEvaluator)
+        for node_id, (node, value) in enumerate(test_w_i.items()):
+            expected_val = test_w_i[node_id]
+            actual_val = test_class.w_i[node_id]
+            assert abs(actual_val - expected_val) < self.tolerance, \
+                f"w_i mismatch for node {node_id}: expected {expected_val}, got {actual_val}"
+
+        # Check p_t_normalized values (these are stored in _w_it after weighted computation)
+        for node_id, attrs in test_p_t_normalized.items():
+            for attr in attrs.keys():
+                attr_idx = graph.attr_key2i[attr]
+                expected_val = test_p_t_normalized[node_id][attr]
+                actual_val = test_class._w_it[node_id, attr_idx]  # For weighted evaluator, this contains p_t_normalized
+                assert abs(actual_val - expected_val) < self.tolerance, \
+                    f"p_t_normalized mismatch for node {node_id}, attr {attr}: expected {expected_val}, got {actual_val}"
+
+        # Check p_k_normalized values (these are stored in _w_ik for compatibility)
+        for node_id, communities in test_p_k_normalized.items():
+            for k in communities.keys():
+                expected_val = test_p_k_normalized[node_id][k]
+                actual_val = test_class._w_ik[node_id, k]  # For weighted evaluator, this contains p_k_normalized
+                assert abs(actual_val - expected_val) < self.tolerance, \
+                    f"p_k_normalized mismatch for node {node_id}, community {k}: expected {expected_val}, got {actual_val}"
+
+        # Verify that the communities dictionary is correctly set
+        assert same_community(init_communities_test, test_class.communities_dict)
+
+    def test_save_load(self, read_graph: GraphLoader, example_case_param_weighted, tmp_path):
+        """Test save/load functionality for ExactWeightedEvaluator."""
+        
+        graph = read_graph
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+
+        from graph_opt.community_detection.alliance_builder import ExactWeightedEvaluator
+
+        test_class = ExactWeightedEvaluator(
+            gloader=graph,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities,
+            walk_length=self.walk_length,
+            lambda_decay=self.lambda_decay,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        directory = tmp_path / "test_save_weighted"
+        directory.mkdir()
+
+        if self.update_membership:
+            test_class.update_scores_membership(membership_test)
+        else:
+            test_class.update_scores(communities_dict=init_communities_test)
+
+        test_class.save(directory=directory)
+
+        # Test loading
+        loaded_class = ExactWeightedEvaluator(
+            gloader=graph,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities,
+            walk_length=self.walk_length,
+            lambda_decay=self.lambda_decay,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        loaded_class.load(directory=directory)
+
+        # Verify loaded data matches original
+        assert same_community(test_class.communities_dict, loaded_class.communities_dict)
+        assert test_class.log_mpc == loaded_class.log_mpc
+        assert test_class.mpc == loaded_class.mpc
+
+        # Verify HHI values match
+        for key in test_class.hhi.keys():
+            assert abs(test_class.hhi[key] - loaded_class.hhi[key]) < self.tolerance
+
+
+class TestDeterministicWeightedCPU(_TestDeterministicWeighted):
+    """CPU tests for ExactWeightedEvaluator."""
+    use_gpu = False
+
+
+class TestDeterministicWeightedGPU(_TestDeterministicWeighted):
+    """GPU tests for ExactWeightedEvaluator (when implemented)."""
+    use_gpu = True
