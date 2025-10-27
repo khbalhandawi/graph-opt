@@ -35,6 +35,7 @@ def spatial_random_walk(
         adj: np.ndarray,
         adj_i: np.ndarray,
         V: np.ndarray,
+        W_total: np.ndarray,
         walks_edges: np.ndarray,
         rs: Random,
     ):
@@ -50,6 +51,9 @@ def spatial_random_walk(
     V : np.ndarray
         array of shape n_nodes x n_samples x walk_length
         to store the generated walks
+    W_total : np.ndarray
+        array of shape n_nodes x n_samples x walk_length
+        to store the total weights of the edges associated with the sampled nodes
     walks_edges : np.ndarray
         array of shape n_nodes x n_samples x walk_length-1
         to store the edge indices of the generated walks
@@ -80,7 +84,9 @@ def spatial_random_walk(
 
                 current_node = choice
                 current_edge = edges[choice]
+                current_weight = weights[choice]
                 V[current_node,j,k+1] = choice
+                W_total[i,j,k] = current_weight
                 walks_edges[i,j,k] = current_edge
 
 def attr_sampler_cpu(

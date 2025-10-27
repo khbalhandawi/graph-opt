@@ -271,3 +271,235 @@ def calc_mpc_weighted_cpu(
         k = membership[t]
         for i in range(n_nodes):
             mpc[t] += p_t_normalized[i, t] * p_k_normalized[i, k]
+
+
+# Weighted sampling functions for SampleWeightedEvaluator
+@numba.njit
+def calc_sample_s_t_weighted_cpu(
+        T_ijk,
+        W_total_ijk,
+        s_t
+    ):
+    """
+    Calculate weighted S_t estimates from sampling.
+    
+    Implements: S_hat_t(i,L) = (1/n_walks) * sum_j sum_k W_total_{i,j,k} * 1_{t}(T_{i,j,k})
+    
+    Parameters
+    ----------
+    T_ijk : np.ndarray
+        Attribute tensor of shape (n_nodes, n_walks, walk_length-1)
+    W_total_ijk : np.ndarray  
+        Total weight tensor of shape (n_nodes, n_walks, walk_length-1)
+    s_t : np.ndarray
+        Output weighted attribute scores of shape (n_nodes, n_attr)
+    """
+    n_nodes, n_walks, walk_length_minus_1 = T_ijk.shape
+    n_nodes, n_attr = s_t.shape
+    
+    # Initialize
+    for i in range(n_nodes):
+        for t in range(n_attr):
+            s_t[i, t] = 0.0
+    
+    # Aggregate weighted attribute scores
+    for i in range(n_nodes):
+        for j in range(n_walks):
+            for k in range(walk_length_minus_1):
+                current_attr = T_ijk[i, j, k]
+                current_weight = W_total_ijk[i, j, k]
+                
+                # Check if the current attribute is valid
+                if current_attr < 0:
+                    break  # Stop processing this walk if invalid
+                
+                s_t[i, current_attr] += current_weight
+    
+    # Apply the 1/n_walks normalization
+    for i in range(n_nodes):
+        for t in range(n_attr):
+            s_t[i, t] /= n_walks
+
+
+@numba.njit
+def calc_sample_s_k_weighted_cpu(
+        T_ijk,
+        W_total_ijk,
+        membership,
+        s_k
+    ):
+    """
+    Calculate weighted S_k estimates from sampling.
+    
+    Implements: S_hat_k(i,L) = (1/n_walks) * sum_j sum_l W_total_{i,j,l} * x_{T_{i,j,l},k}
+    
+    Parameters
+    ----------
+    T_ijk : np.ndarray
+        Attribute tensor of shape (n_nodes, n_walks, walk_length-1)
+    W_total_ijk : np.ndarray
+        Total weight tensor of shape (n_nodes, n_walks, walk_length-1)
+    membership : np.ndarray
+        Alliance membership of shape (n_attr,)
+    s_k : np.ndarray
+        Output weighted alliance scores of shape (n_nodes, n_communities)
+    """
+    n_nodes, n_walks, walk_length_minus_1 = T_ijk.shape
+    n_nodes, n_communities = s_k.shape
+    
+    # Initialize
+    for i in range(n_nodes):
+        for k in range(n_communities):
+            s_k[i, k] = 0.0
+    
+    # Aggregate weighted alliance scores
+    for i in range(n_nodes):
+        for j in range(n_walks):
+            for l in range(walk_length_minus_1):
+                current_attr = T_ijk[i, j, l]
+                current_weight = W_total_ijk[i, j, l]
+                
+                # Check if the current attribute is valid
+                if current_attr < 0:
+                    break  # Stop processing this walk if invalid
+                
+                current_community = membership[current_attr]
+                s_k[i, current_community] += current_weight
+    
+    # Apply the 1/n_walks normalization
+    for i in range(n_nodes):
+        for k in range(n_communities):
+            s_k[i, k] /= n_walks
+
+
+@numba.njit
+def calc_sample_s_total_weighted_cpu(
+        W_total_ijk,
+        s_total
+    ):
+    """
+    Calculate total weighted capacity estimates from sampling.
+    
+    Implements: S_hat_total(i,L) = (1/n_walks) * sum_j sum_k W_total{i,j,k}
+    
+    Parameters
+    ----------
+    W_total_ijk : np.ndarray
+        Weight tensor of shape (n_nodes, n_walks, walk_length-1)
+    s_total : np.ndarray
+        Output total capacity scores of shape (n_nodes,)
+    """
+    n_nodes, n_walks, walk_length_minus_1 = W_total_ijk.shape
+    
+    # Initialize
+    for i in range(n_nodes):
+        s_total[i] = 0.0
+    
+    # Aggregate total weighted scores
+    for i in range(n_nodes):
+        for j in range(n_walks):
+            for k in range(walk_length_minus_1):
+                current_weight = W_total_ijk[i, j, k]
+                s_total[i] += current_weight
+    
+    # Apply the 1/n_walks normalization
+    for i in range(n_nodes):
+        s_total[i] /= n_walks
+
+
+@numba.njit
+def calc_sample_normalized_s_t_weighted_cpu(
+        s_t,
+        s_total,
+        n_walks,
+        p_t_normalized
+    ):
+    """
+    Calculate normalized attribute probabilities from weighted sampling.
+    
+    Implements: p_hat(t | i, L) = S_hat_t(i, L) / S_hat_total(i, L)
+    
+    Parameters
+    ----------
+    s_t : np.ndarray
+        Weighted attribute scores of shape (n_nodes, n_attr) (already normalized by n_walks)
+    s_total : np.ndarray
+        Total capacity scores of shape (n_nodes,) (already normalized by n_walks)
+    n_walks : int
+        Number of walks (not used since normalization already applied)
+    p_t_normalized : np.ndarray
+        Output normalized probabilities of shape (n_nodes, n_attr)
+    """
+    n_nodes, n_attr = s_t.shape
+    
+    for i in range(n_nodes):
+        for t in range(n_attr):
+            if s_total[i] > 0:
+                p_t_normalized[i, t] = s_t[i, t] / s_total[i]
+            else:
+                p_t_normalized[i, t] = 0.0
+
+
+@numba.njit 
+def calc_sample_normalized_s_k_weighted_cpu(
+        s_k,
+        s_total,
+        n_walks,
+        p_k_normalized
+    ):
+    """
+    Calculate normalized alliance probabilities from weighted sampling.
+    
+    Implements: p_hat(k | i, L) = S_hat_k(i, L) / S_hat_total(i, L)
+    
+    Parameters
+    ----------
+    s_k : np.ndarray
+        Weighted alliance scores of shape (n_nodes, n_communities) (already normalized by n_walks)
+    s_total : np.ndarray
+        Total capacity scores of shape (n_nodes,) (already normalized by n_walks)
+    n_walks : int
+        Number of walks (not used since normalization already applied)
+    p_k_normalized : np.ndarray
+        Output normalized probabilities of shape (n_nodes, n_communities)
+    """
+    n_nodes, n_communities = s_k.shape
+    
+    for i in range(n_nodes):
+        for k in range(n_communities):
+            if s_total[i] > 0:
+                p_k_normalized[i, k] = s_k[i, k] / s_total[i]
+            else:
+                p_k_normalized[i, k] = 0.0
+
+
+@numba.njit
+def calc_sample_mpc_weighted_cpu(
+        membership,
+        p_t_normalized, 
+        p_k_normalized,
+        mpc
+    ):
+    """
+    Calculate MPC from normalized weighted sampling probabilities.
+    
+    Implements: w_hat_{t,i} = sum_k x_{t,k} * p_hat(k|i,L) * p_hat(t|i,L)
+    
+    Parameters
+    ----------
+    membership : np.ndarray
+        Alliance membership of shape (n_attr,)
+    p_t_normalized : np.ndarray
+        Normalized attribute probabilities of shape (n_nodes, n_attr)
+    p_k_normalized : np.ndarray
+        Normalized alliance probabilities of shape (n_nodes, n_communities)
+    mpc : np.ndarray
+        Output MPC array of shape (n_attr,)
+    """
+    n_nodes, n_attr = p_t_normalized.shape
+    
+    for t in range(n_attr):
+        mpc[t] = 0.0
+        k = membership[t]
+        for i in range(n_nodes):
+            mpc[t] += p_t_normalized[i, t] * p_k_normalized[i, k]

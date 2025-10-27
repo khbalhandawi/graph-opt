@@ -5,7 +5,7 @@ from optparse import Option
 import pytest
 import os
 
-from graph_opt.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, ExactWeightedEvaluator, SampleEvaluator, GreedyOptimizer, BruteForce, ExactOptimizer, multiobjective
+from graph_opt.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, ExactWeightedEvaluator, SampleEvaluator, SampleWeightedEvaluator, GreedyOptimizer, BruteForce, ExactOptimizer, multiobjective
 from graph_opt.community_detection.utilities import same_community
 from graph_opt.utilities import cuda_blocks
 
@@ -1717,4 +1717,245 @@ class TestDeterministicWeightedCPU(_TestDeterministicWeighted):
 
 class TestDeterministicWeightedGPU(_TestDeterministicWeighted):
     """GPU tests for ExactWeightedEvaluator (when implemented)."""
+    use_gpu = True
+
+
+class _TestStochasticWeighted():
+    """Test class for SampleWeightedEvaluator with stochastic weighted sampling."""
+    
+    n_samples_edge = 5000
+    walk_length = 1
+    threads_per_block = 8
+    n_walks = 10000
+    use_gpu = False
+    tolerance = 2e-1  # Increased tolerance for stochastic sampling
+    update_membership = True
+
+    @pytest.fixture(scope="function")
+    def read_graph(self) -> Tuple[GraphLoader, NeighbourSampler]:
+        # This setup will run once for the entire class
+        script_dir = os.path.dirname(os.path.abspath(__file__))  # Get the absolute directory of the script
+        data_dir = os.path.join('..', 'test_data')
+        MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir, data_dir, 'test_DG_AP_AL.graphml'))  # store graph
+
+        graph = GraphLoader(
+            MG=MG,
+            use_gpu=self.use_gpu
+        )
+
+        sampler = NeighbourSampler(
+            gloader=graph,
+            seed=seed,
+            use_gpu=self.use_gpu,
+            n_samples_edge=self.n_samples_edge,
+            n_walks=self.n_walks,
+            walk_length=self.walk_length,
+        )
+
+        sampler.execute_randomwalk()
+
+        return graph, sampler
+
+    def test_evaluator(self, read_graph: Tuple[GraphLoader, NeighbourSampler], example_case_param_weighted):
+        """Test the SampleWeightedEvaluator basic functionality and reasonable results."""
+        
+        graph, sampler = read_graph
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+
+        # Import the SampleWeightedEvaluator
+        from graph_opt.community_detection.alliance_builder import SampleWeightedEvaluator
+
+        test_class = SampleWeightedEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        if self.update_membership:
+            test_class.update_scores_membership(membership_test)
+        else:
+            test_class.update_scores(communities_dict=init_communities_test)
+
+        # Check all keys in test dictionary are present for HHI
+        assert all(key in test_HHI.keys() for key in test_class.hhi)
+
+        # Check HHI values are within reasonable tolerance
+        for key, value in test_class.hhi.items():
+            assert abs(test_HHI[key] - value) < self.tolerance, \
+                f"HHI mismatch for {key}: expected {test_HHI[key]}, got {value}"
+
+        # Test that p_it values are valid probabilities (sum to 1 for each node)
+        p_it_sums = np.sum(test_class.p_it, axis=1)
+        for i, row_sum in enumerate(p_it_sums):
+            if test_w_i[i] > 0:  # Only check nodes with outgoing edges
+                assert abs(row_sum - 1.0) < 2e-5, f"p_it probabilities don't sum to 1.0 for node {i}: got {row_sum}"
+
+        # Test that p_ik values are valid probabilities (sum to 1 for each node)
+        p_ik_sums = np.sum(test_class.p_ik, axis=1)
+        for i, row_sum in enumerate(p_ik_sums):
+            if test_w_i[i] > 0:  # Only check nodes with outgoing edges
+                assert abs(row_sum - 1.0) < 2e-5, f"p_ik probabilities don't sum to 1.0 for node {i}: got {row_sum}"
+
+        # Check that values are non-negative
+        assert np.all(test_class.p_it >= 0), "p_it contains negative values"
+        assert np.all(test_class.p_ik >= 0), "p_ik contains negative values"
+
+        # Check that for nodes with outgoing edges, at least some attributes have non-zero probability
+        for i in range(graph.n_nodes_spatial):
+            if test_w_i[i] > 0:
+                assert np.any(test_class.p_it[i] > 0), f"Node {i} has outgoing edges but all p_it values are zero"
+                assert np.any(test_class.p_ik[i] > 0), f"Node {i} has outgoing edges but all p_ik values are zero"
+
+        if not self.update_membership:
+            assert same_community(init_communities_test, test_class.communities_dict)
+
+    def test_save_load(self, read_graph: Tuple[GraphLoader, NeighbourSampler], example_case_param_weighted, tmp_path):
+        """Test save/load functionality for SampleWeightedEvaluator."""
+        
+        graph, sampler = read_graph
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+
+        from graph_opt.community_detection.alliance_builder import SampleWeightedEvaluator
+
+        test_class = SampleWeightedEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        directory = tmp_path / "test_save_weighted_sample"
+        directory.mkdir()
+
+        if self.update_membership:
+            test_class.update_scores_membership(membership_test)
+        else:
+            test_class.update_scores(communities_dict=init_communities_test)
+
+        test_class.save(directory=directory)
+
+        data_to_load = {
+            'communities_dict': {"name": '_communities_dict', "dtype": dict},
+            'log_mpc': {"name": '_log_mpc', "dtype": dict},
+            'mpc': {"name": '_mpc', "dtype": dict},
+            'hhi': {"name": '_hhi', "dtype": Dict[Tuple[str, str], int]},
+        }
+
+        test_data = {}
+        for name, attr in data_to_load.items():
+            test_data[name] = getattr(test_class, attr["name"])
+
+        # Create new sampler and evaluator for loading
+        sampler_new = NeighbourSampler(
+            gloader=graph,
+            seed=seed,
+            use_gpu=self.use_gpu,
+            n_samples_edge=self.n_samples_edge,
+            n_walks=self.n_walks,
+            walk_length=self.walk_length,
+        )
+
+        test_class_new = SampleWeightedEvaluator(
+            gloader=graph,
+            sampler=sampler_new,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        test_class_new.load(directory=directory)
+
+        for name, attr in data_to_load.items():
+            if attr["dtype"] == np.ndarray:
+                assert np.allclose(getattr(test_class_new, attr["name"]), test_data[name], rtol=1e-1)
+            elif attr["dtype"] == list:
+                for value, test_value in zip(getattr(test_class_new, attr["name"]), test_data[name]):
+                    assert abs(value - test_value) < 1e-6
+            elif attr["dtype"] == List[Dict[str, int]]:
+                for value, test_value in zip(getattr(test_class_new, attr["name"]), test_data[name]):
+                    assert value == test_value
+            elif attr["dtype"] == List[Tuple[float, float]]:
+                for value, test_value in zip(getattr(test_class_new, attr["name"]), test_data[name]):
+                    for value_i, test_value_i in zip(value, test_value):
+                        assert abs(value_i - test_value_i) < 1e-6
+            else:
+                assert getattr(test_class_new, attr["name"]) == test_data[name]
+
+    def test_with_exact_weighted(self, read_graph: Tuple[GraphLoader, NeighbourSampler], example_case_param_weighted):
+        """Test SampleWeightedEvaluator produces results in same ballpark as ExactWeightedEvaluator."""
+        
+        graph, sampler = read_graph
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+
+        from graph_opt.community_detection.alliance_builder import SampleWeightedEvaluator, ExactWeightedEvaluator
+
+        test_class = SampleWeightedEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        test_class.update_scores_membership(membership_test)
+
+        test_class_exact = ExactWeightedEvaluator(
+            gloader=graph,
+            use_gpu=self.use_gpu,
+            n_communities=n_communities,
+            walk_length=self.walk_length,
+            lambda_decay=1.0,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+        test_class_exact.update_scores(communities_dict=init_communities_test)
+
+        if not self.use_gpu:
+            # Check that both methods agree on the general trend/direction
+            # For nodes with significant weight differences, check correlation
+            for i in range(graph.n_nodes_spatial):
+                if test_w_i[i] > 0:  # Only check nodes with outgoing edges
+                    # Check that dominant attributes in exact also have high probability in sample
+                    exact_max_attr = np.argmax(test_class_exact.p_it[i])
+                    sample_max_attr = np.argmax(test_class.p_it[i])
+                    
+                    # Allow for some variation in stochastic sampling
+                    # Check that the top attributes are at least in the top 2 for both methods
+                    exact_top2 = np.argsort(test_class_exact.p_it[i])[-2:]
+                    sample_top2 = np.argsort(test_class.p_it[i])[-2:]
+                    
+                    # At least one of the top 2 should overlap
+                    overlap = len(set(exact_top2) & set(sample_top2))
+                    assert overlap >= 1, f"No overlap in top-2 attributes for node {i}: exact={exact_top2}, sample={sample_top2}"
+
+        # Compare HHI scores - these should be much closer since they use edge sampling
+        assert np.allclose(test_class.hhi_edges, test_class_exact.hhi_edges, rtol=self.tolerance), \
+            "HHI scores differ significantly between sample and exact weighted evaluators"
+
+
+class TestStochasticWeightedCPU(_TestStochasticWeighted):
+    """CPU tests for SampleWeightedEvaluator."""
+    use_gpu = False
+
+
+class TestStochasticWeightedGPU(_TestStochasticWeighted):
+    """GPU tests for SampleWeightedEvaluator (when implemented)."""
     use_gpu = True

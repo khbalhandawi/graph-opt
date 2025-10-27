@@ -34,7 +34,10 @@ from .utilities_cpu import edge_postprocess_cpu, calc_hhi_cpu, calc_w_it_cpu, ca
 from .utilities_weighted_cpu import (
     calc_s_t_weighted_cpu, calc_s_k_weighted_cpu, calc_s_total_weighted_cpu,
     calc_normalized_mpc_weighted_cpu, calc_normalized_mpc_k_weighted_cpu,
-    calc_mpc_weighted_cpu
+    calc_mpc_weighted_cpu,
+    calc_sample_s_t_weighted_cpu, calc_sample_s_k_weighted_cpu, calc_sample_s_total_weighted_cpu,
+    calc_sample_normalized_s_t_weighted_cpu, calc_sample_normalized_s_k_weighted_cpu,
+    calc_sample_mpc_weighted_cpu
 )
 
 from ..utilities import _default_if_none, cpu_gpu_dispatcher, cuda_blocks, safe_log, serialize, deserialize
@@ -48,6 +51,7 @@ __all__ = [
     'ExactEvaluator',
     'ExactWeightedEvaluator',
     'SampleEvaluator',
+    'SampleWeightedEvaluator',
     'GreedyOptimizer',
     'BruteForce',
     'ExactOptimizer'
@@ -375,6 +379,7 @@ class NeighbourSampler(BaseSampler):
         self._walks_edges = np.zeros((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.int32)
         self._T = np.zeros((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.int32)
         self._W = np.zeros((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32)
+        self._W_total = np.zeros((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32)
 
         self._init_sampling()
 
@@ -413,6 +418,13 @@ class NeighbourSampler(BaseSampler):
         else:
             return self._W.copy()
 
+    @property
+    def W_total(self):
+        if self.use_gpu:
+            return self._W_total_d.copy_to_host()
+        else:
+            return self._W_total.copy()
+
     @cpu_gpu_dispatcher('_init_sampling_cpu', '_init_sampling_gpu')
     def _init_sampling(self):
         pass
@@ -425,6 +437,7 @@ class NeighbourSampler(BaseSampler):
         self._walks_edges = np.full((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), -10000, dtype=np.int32)
         self._T = np.full((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), -10000, dtype=np.int32)
         self._W = np.zeros((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32)
+        self._W_total = np.zeros((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32)
 
     def _init_sampling_gpu(self):
 
@@ -445,6 +458,7 @@ class NeighbourSampler(BaseSampler):
         self._walks_edges_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.int32)
         self._T_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.int32)
         self._W_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32)
+        self._W_total_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32)
 
     @cpu_gpu_dispatcher('_randomwalk_cpu', '_randomwalk_gpu')
     def execute_randomwalk(self):
@@ -471,6 +485,7 @@ class NeighbourSampler(BaseSampler):
             adj = self._gloader._adj_dense,
             adj_i = self._gloader._adj_dense_index,
             V = self._V,
+            W_total = self._W_total,
             walks_edges = self._walks_edges,
             rs = rng,
         )
@@ -510,6 +525,7 @@ class NeighbourSampler(BaseSampler):
             self._gloader._adj_dense_d,
             self._gloader._adj_dense_index_d,
             self._V_d,
+            self._W_total_d,
             self._walks_edges_d,
             cuda_random_state,
             cumsum_d,
@@ -2021,6 +2037,254 @@ class EvaluatorManager:
                 return self.evaluators[i], i, lock
 
         raise RuntimeError("No available evaluators")
+
+
+class SampleWeightedEvaluator(BaseEvaluator):
+    """
+    Sample-based weighted evaluator that estimates p_it and p_ik using random walks with weighted sampling.
+    
+    This evaluator implements the sampling-based weighted approach where:
+    - Random walks generate samples V_{i,j,k}, T_{i,j,k}, W_{i,j,k}
+    - S_hat_t(i,L) and S_hat_k(i,L) are estimated from weighted samples
+    - Normalized probabilities p_hat(t|i,L) and p_hat(k|i,L) are computed
+    - MPC scores are estimated from the weighted sampling distributions
+    
+    Parameters
+    ----------
+    gloader : GraphLoader
+        Graph loader containing the multi-digraph data
+    sampler : NeighbourSampler
+        Random walk sampler providing T, W tensors
+    use_gpu : bool, optional
+        Whether to use GPU acceleration (default: False). Currently only CPU is supported.
+    n_communities : int, optional
+        Number of communities/alliances (default: number of attributes)
+    threads_per_block_1D : int, optional
+        GPU threads per block for 1D kernels (default: 484)
+    threads_per_block_2D : Union[int, Tuple[int,int]], optional
+        GPU threads per block for 2D kernels (default: 22)
+    threads_per_block_3D : Union[int, Tuple[int,int,int]], optional
+        GPU threads per block for 3D kernels (default: 8)
+    stream : optional
+        CUDA stream for GPU operations (default: None)
+    """
+    
+    def __init__(
+            self,
+            gloader: 'GraphLoader',
+            sampler: 'NeighbourSampler',
+            use_gpu: Optional[bool] = False,
+            n_communities: Optional[int] = None,
+            threads_per_block_1D: Optional[int] = 484,
+            threads_per_block_2D: Optional[Union[int,Tuple[int,int]]] = 22,
+            threads_per_block_3D: Optional[Union[int,Tuple[int,int,int]]] = 8,
+            stream: Optional[Any] = None
+        ) -> None:
+        
+        self._sampler = sampler
+        super().__init__(
+            gloader = gloader,
+            use_gpu = use_gpu,
+            n_communities = n_communities,
+            threads_per_block_1D = threads_per_block_1D,
+            threads_per_block_2D = threads_per_block_2D,
+            threads_per_block_3D = threads_per_block_3D,
+            stream = stream
+        )
+
+    @property
+    def p_it(self):
+        """Normalized attribute probabilities p_hat(t | i, L)."""
+        if self.use_gpu:
+            return self._p_t_normalized_d.copy_to_host()
+        else:
+            return self._p_t_normalized.copy()
+
+    @property 
+    def p_ik(self):
+        """Normalized alliance probabilities p_hat(k | i, L)."""
+        if self.use_gpu:
+            return self._p_k_normalized_d.copy_to_host()
+        else:
+            return self._p_k_normalized.copy()
+
+    @property
+    def s_t(self):
+        """Weighted attribute scores S_hat_t(i, L)."""
+        if self.use_gpu:
+            return self._s_t_d.copy_to_host()
+        else:
+            return self._s_t.copy()
+
+    @property
+    def s_k(self):
+        """Weighted alliance scores S_hat_k(i, L).""" 
+        if self.use_gpu:
+            return self._s_k_d.copy_to_host()
+        else:
+            return self._s_k.copy()
+
+    @property
+    def s_total(self):
+        """Total capacity scores S_hat_total(i, L)."""
+        if self.use_gpu:
+            return self._s_total_d.copy_to_host()
+        else:
+            return self._s_total.copy()
+
+    def _post_init_cpu(self, **kwargs):
+        super()._post_init_cpu(**kwargs)
+
+        self._edges_attrs = np.zeros((self._gloader.n_unique_edges,self._gloader.n_attr))
+
+        edge_sample_p_et_cpu(
+            samples = self._sampler.N_uv,
+            counts = self._edges_attrs
+        )
+
+        # Initialize weighted score arrays
+        self._s_t = np.zeros((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32)
+        self._s_k = np.zeros((self._gloader.n_nodes_spatial, self.n_communities), dtype=np.float32)
+        self._s_total = np.zeros((self._gloader.n_nodes_spatial,), dtype=np.float32)
+        self._p_t_normalized = np.zeros((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32)
+        self._p_k_normalized = np.zeros((self._gloader.n_nodes_spatial, self.n_communities), dtype=np.float32)
+
+        # Calculate membership-independent scores from sampling using W_total for consistency
+        calc_sample_s_t_weighted_cpu(
+            T_ijk = self._sampler.T,
+            W_total_ijk = self._sampler.W_total,
+            s_t = self._s_t
+        )
+
+        calc_sample_s_total_weighted_cpu(
+            W_total_ijk = self._sampler.W_total,
+            s_total = self._s_total
+        )
+
+        # Calculate normalized attribute probabilities (doesn't depend on membership)
+        calc_sample_normalized_s_t_weighted_cpu(
+            s_t = self._s_t,
+            s_total = self._s_total,
+            n_walks = self._sampler.n_walks,
+            p_t_normalized = self._p_t_normalized
+        )
+
+        # Note: s_k and p_k_normalized will be calculated in _update_scores methods
+        # when membership information becomes available
+
+    def _post_init_gpu(
+            self,
+            threads_per_block_1D: int,
+            threads_per_block_2D: Union[int,Tuple[int,int]],
+            threads_per_block_3D: Union[int,Tuple[int,int,int]],
+            stream: Optional[Any] = None
+        ):
+        raise NotImplementedError("GPU implementation for SampleWeightedEvaluator not yet available")
+
+    def update_scores(self, communities_dict: Dict[str,str]):
+        """Update scores using new community assignments."""
+        super().update_scores(communities_dict)
+        self._update_hhi_scores()
+        self._update_mpc_scores()
+
+    def update_scores_membership(self, membership: np.ndarray):
+        """Update scores using new membership array."""
+        super().update_scores_membership(membership)
+        self._update_hhi_scores()
+        self._update_mpc_scores()
+
+    @cpu_gpu_dispatcher('_update_hhi_scores_cpu', '_update_hhi_scores_gpu')
+    def _update_hhi_scores(self):
+        pass
+
+    def _update_hhi_scores_cpu(self):
+        """Calculate HHI scores - same as existing SampleEvaluator."""
+        # HHI calculation remains identical to SampleEvaluator
+        # We can reuse the edge sampling approach
+        edge_sample_p_ek_cpu(
+            samples = self._sampler.N_uv,
+            membership = self._membership,
+            counts = self._edges_communities
+        )
+
+        edge_counts = self._edges_communities / self._sampler.n_samples_edge
+
+        hhi_estimate = edge_counts**2
+        self._hhi_edges = np.nansum(hhi_estimate,axis=1)
+
+        # Update the hhi
+        for i, edge in enumerate(self._gloader.edge_unique_list):
+            self._hhi[edge] = self._hhi_edges[i]
+
+    def _update_hhi_scores_gpu(self):
+        raise NotImplementedError("GPU implementation for SampleWeightedEvaluator not yet available")
+
+    @cpu_gpu_dispatcher('_update_mpc_scores_cpu', '_update_mpc_scores_gpu')
+    def _update_mpc_scores(self):
+        pass
+
+    def _update_mpc_scores_cpu(self):
+        """Calculate MPC scores using weighted sampling approach."""
+        
+        # Recalculate weighted alliance scores with new membership using W_total for consistency
+        calc_sample_s_k_weighted_cpu(
+            T_ijk = self._sampler.T,
+            W_total_ijk = self._sampler.W_total,
+            membership = self._membership,
+            s_k = self._s_k
+        )
+
+        # Recalculate normalized alliance probabilities
+        calc_sample_normalized_s_k_weighted_cpu(
+            s_k = self._s_k,
+            s_total = self._s_total,
+            n_walks = self._sampler.n_walks,
+            p_k_normalized = self._p_k_normalized
+        )
+
+        # Calculate MPC using weighted sampling approach
+        calc_sample_mpc_weighted_cpu(
+            membership = self._membership,
+            p_t_normalized = self._p_t_normalized,
+            p_k_normalized = self._p_k_normalized,
+            mpc = self._mpc_attrs
+        )
+
+        self._log_mpc_attrs = safe_log(self._mpc_attrs)
+
+        # Update the mpc dictionaries
+        for attr in self._gloader.attr_list:
+            attr_index = self._gloader.attr_key2i[attr]
+            self._mpc[attr] = float(self._mpc_attrs[attr_index])
+            self._log_mpc[attr] = float(self._log_mpc_attrs[attr_index])
+
+    def _update_mpc_scores_gpu(self):
+        raise NotImplementedError("GPU implementation for SampleWeightedEvaluator not yet available")
+
+    def _create_copy_instance(self, stream: Optional[Any] = None) -> 'SampleWeightedEvaluator':
+        """Create a copy of this SampleWeightedEvaluator instance."""
+        copy_instance = SampleWeightedEvaluator(
+            gloader=self._gloader,
+            sampler=self._sampler,
+            use_gpu=self.use_gpu,
+            n_communities=self.n_communities,
+            threads_per_block_1D=self.TPB_1D,
+            threads_per_block_2D=self.TPB_2D,
+            threads_per_block_3D=self.TPB_3D,
+            stream=stream
+        )
+        return copy_instance
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        # Remove sampler from state if using GPU to avoid CUDA context issues
+        if self.use_gpu:
+            state.pop('_sampler', None)
+        return state
+
+    def __del__(self):
+        """Destructor."""
+        super().__del__()
 
 
 class BaseOptimizer(ABC):

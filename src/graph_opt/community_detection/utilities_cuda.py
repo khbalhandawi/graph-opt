@@ -51,6 +51,7 @@ def define_cuda_kernels_sampling(
             adj:DeviceNDArray,
             adj_i:DeviceNDArray,
             V:DeviceNDArray,
+            W_total:DeviceNDArray,
             walks_edges:DeviceNDArray,
             rng_states:DeviceNDArray,
             cumsum:DeviceNDArray,
@@ -86,10 +87,13 @@ def define_cuda_kernels_sampling(
 
                     V[i,j,k] = chosen
                     chosen_edge = adj_i[current_node,chosen]
+                    chosen_weight = adj[current_node,chosen]
                     if math.isnan(chosen_edge):
                         walks_edges[i,j,k-1] = -1e6
+                        W_total[i,j,k-1] = 0.0
                     else:
                         walks_edges[i,j,k-1] = chosen_edge
+                        W_total[i,j,k-1] = chosen_weight
                     current_node = chosen
 
     @cuda.jit
