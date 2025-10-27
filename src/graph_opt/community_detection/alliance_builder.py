@@ -688,6 +688,11 @@ class BaseEvaluator(ABC):
 
     @abstractmethod
     def _post_init_cpu(self, *args, **kwargs):
+        # Extract thread parameters from kwargs
+        self.TPB_1D = kwargs.get('threads_per_block_1D', 484)
+        self.TPB_2D = kwargs.get('threads_per_block_2D', 22)
+        self.TPB_3D = kwargs.get('threads_per_block_3D', 8)
+        
         self._hhi_edges = np.zeros(self._gloader.n_unique_edges,dtype=np.float32)
         self._mpc_attrs = np.zeros(self._gloader.n_attr,dtype=np.float32)
         self._log_mpc_attrs = np.zeros(self._gloader.n_attr,dtype=np.float32)

@@ -230,7 +230,7 @@ def example_case_param(request):
     ids=[
         'minimize HHI',
         'maximize HHI',
-        'maximize MAI',
+        'maximize MPC',
     ]
 )
 def optimization_cases(request):
@@ -895,7 +895,6 @@ class _TestOptimize():
 
         assert abs(optimizer.f - f) / f < 1e-6
 
-
     def test_save_load_exact(
         self, 
         optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
@@ -1113,6 +1112,181 @@ class _TestOptimize():
                         assert key == test_key
                         for value_i, test_value_i in zip(value[key].values(), test_value[test_key].values()):
                             assert abs(value_i - test_value_i) < 1e-6
+
+
+class _TestOptimizeWeighted():
+    """Test class for optimization with weighted evaluators (both exact and sample)."""
+
+    epsilon = 0.5
+    rtol = 1e-6
+    n_samples_edge = 500
+    walk_length = 2
+    threads_per_block = 8
+    n_walks = 1000
+    num_streams = 2
+
+    @pytest.fixture(scope="function")
+    def read_graph(self) -> Tuple[GraphLoader, NeighbourSampler]:
+        """Setup graph and sampler for weighted optimization tests."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join('..', 'test_data')
+        MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir, data_dir, 'test_DG_AP_AL.graphml'))
+
+        graph = GraphLoader(
+            MG=MG,
+            use_gpu=self.use_gpu
+        )
+
+        sampler = NeighbourSampler(
+            gloader=graph,
+            seed=seed,
+            use_gpu=self.use_gpu,
+            n_samples_edge=self.n_samples_edge,
+            n_walks=self.n_walks,
+            walk_length=self.walk_length,
+        )
+
+        sampler.execute_randomwalk()
+
+        return graph, sampler
+
+    @pytest.fixture(scope="function",
+        params=[
+            {
+                "type": "exact_weighted",
+            },
+            {
+                "type": "sample_weighted",
+            },
+        ],
+        ids=[
+            'exact_weighted',
+            'sample_weighted',
+        ]
+    )
+    def get_weighted_evaluator(
+            self, 
+            read_graph: Tuple[GraphLoader, NeighbourSampler], 
+            get_sample_weighted_evaluator: SampleWeightedEvaluator,
+            get_exact_weighted_evaluator: ExactWeightedEvaluator,
+            request
+        ) -> ExactWeightedEvaluator | SampleWeightedEvaluator:
+        """Fixture to get either exact or sample weighted evaluator based on test parameter."""
+
+        param = request.param
+
+        if param["type"] == 'sample_weighted':
+            return get_sample_weighted_evaluator
+        elif param["type"] == 'exact_weighted':
+            return get_exact_weighted_evaluator
+
+    @pytest.fixture(scope="function")
+    def get_sample_weighted_evaluator(self, read_graph: Tuple[GraphLoader, NeighbourSampler]) -> SampleWeightedEvaluator:
+        """Create SampleWeightedEvaluator for optimization tests."""
+        graph, sampler = read_graph
+
+        return SampleWeightedEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            use_gpu=self.use_gpu,
+            n_communities=None, 
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+
+    @pytest.fixture(scope="function")
+    def get_exact_weighted_evaluator(self, read_graph: Tuple[GraphLoader, NeighbourSampler]) -> ExactWeightedEvaluator:
+        """Create ExactWeightedEvaluator for optimization tests."""
+        graph, sampler = read_graph
+
+        return ExactWeightedEvaluator(
+            gloader=graph,
+            use_gpu=self.use_gpu,
+            n_communities=None,
+            walk_length=self.walk_length,
+            lambda_decay=1.0,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None
+        )
+    
+    @pytest.mark.parametrize("n_sample_pairs", [None, 8], ids=['no sampling', '8 samples'])
+    def test_greedy_optimize(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_weighted_evaluator: SampleWeightedEvaluator | ExactWeightedEvaluator, 
+        n_sample_pairs: int
+    ):
+        """Test greedy optimization with weighted evaluators."""
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_weighted_evaluator
+
+        optimizer = GreedyOptimizer(
+            evaluator=evaluator,
+            seed=seed,
+            num_streams=self.num_streams,
+            weights=weights,
+            use_gpu=self.use_gpu
+        )
+
+        optimizer.optimize(
+            max_iterations=1000,
+            epsilon=self.epsilon,
+            rtol=self.rtol,
+            n_sample_pairs=n_sample_pairs,
+            multiprocess=self.use_multiprocessing
+        )
+
+        assert same_community(optimizer.communities_dict, test_communities_dict)
+
+    @pytest.mark.parametrize("max_iterations", [None, 1000], ids=['unlimited budget', '1000 budget'])
+    def test_brute_force_optimize(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_weighted_evaluator: SampleWeightedEvaluator | ExactWeightedEvaluator, 
+        max_iterations: int
+    ):
+        """Test brute force optimization with weighted evaluators."""
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_weighted_evaluator
+
+        optimizer = BruteForce(
+            evaluator=evaluator,
+            seed=seed,
+            num_streams=self.num_streams,
+            weights=weights,
+            use_gpu=self.use_gpu
+        )
+
+        optimizer.optimize(
+            max_iterations=max_iterations,
+            rtol=self.rtol,
+            multiprocess=self.use_multiprocessing
+        )
+
+        evaluator.update_scores(test_communities_dict)
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f = multiobjective(f1, f2, weights)
+
+        assert optimizer.f == f
+
+
+class TestOptimizeWeightedGPU(_TestOptimizeWeighted):
+    """GPU tests for weighted optimization."""
+    use_gpu = True
+    use_multiprocessing = False
+
+
+class TestOptimizeWeightedCPU(_TestOptimizeWeighted):
+    """CPU tests for weighted optimization."""
+    use_gpu = False
+    use_multiprocessing = False
 
 class TestOptimizeGPU(_TestOptimize):
 
