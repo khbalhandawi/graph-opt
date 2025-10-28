@@ -213,19 +213,19 @@ def calc_w_ik_cpu(
 @numba.njit
 def calc_mpc_cpu(
         membership,
-        w_it,
-        w_ik,
+        p_it,
+        p_ik,
         mpc,
     ):
 
-    n_nodes, n_attr = w_it.shape
-    n_nodes, n_communities = w_ik.shape
+    n_nodes, n_attr = p_it.shape
+    n_nodes, n_communities = p_ik.shape
 
     # Grid stride loop
     for t in range(n_attr):
         for i in range(n_nodes):
             k = membership[t]
-            mpc[t] += w_it[i, t] * w_ik[i, k]
+            mpc[t] += p_it[i, t] * p_ik[i, k]
 
 @numba.njit
 def calc_p_iv_cpu(

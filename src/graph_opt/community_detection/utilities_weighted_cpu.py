@@ -186,7 +186,7 @@ def calc_s_total_weighted_cpu(
 
 
 @numba.njit
-def calc_normalized_mpc_weighted_cpu(
+def calc_normalized_p_t_weighted_cpu(
         s_t,
         s_total,
         p_t_normalized
@@ -214,7 +214,7 @@ def calc_normalized_mpc_weighted_cpu(
 
 
 @numba.njit
-def calc_normalized_mpc_k_weighted_cpu(
+def calc_normalized_p_k_weighted_cpu(
         s_k,
         s_total,
         p_k_normalized
@@ -408,7 +408,7 @@ def calc_sample_s_total_weighted_cpu(
 
 
 @numba.njit
-def calc_sample_normalized_s_t_weighted_cpu(
+def calc_sample_normalized_p_t_weighted_cpu(
         s_t,
         s_total,
         p_t_normalized
@@ -438,7 +438,7 @@ def calc_sample_normalized_s_t_weighted_cpu(
 
 
 @numba.njit 
-def calc_sample_normalized_s_k_weighted_cpu(
+def calc_sample_normalized_p_k_weighted_cpu(
         s_k,
         s_total,
         p_k_normalized
