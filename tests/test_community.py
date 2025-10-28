@@ -1624,7 +1624,7 @@ def example_case_param_weighted(request):
     """
     Fixture for weighted evaluator test cases with dynamically computed expected values.
     
-    This fixture computes the expected p_t_normalized and p_k_normalized values on-the-fly
+    This fixture computes the expected w_it and w_ik values on-the-fly
     using the same weighted recursive formulation that the ExactWeightedEvaluator uses.
     This ensures the tests are self-contained and don't rely on external pre-computed values.
     
@@ -1633,7 +1633,7 @@ def example_case_param_weighted(request):
     2. Compute w_it (attribute weights) and w_i (total weights) 
     3. Compute p_iv (neighbor PMF) and p_iv_t (conditional attribute PMF)
     4. Apply the weighted recursive formulation to get S_t, S_k, and S_total
-    5. Normalize to get p_t_normalized and p_k_normalized
+    5. Normalize to get w_it and w_ik
     6. Convert to dictionary format for test comparisons
     """
     
@@ -1712,26 +1712,26 @@ def example_case_param_weighted(request):
     calc_s_total_weighted_cpu(p_iv, w_i_array, 1, 1.0, s_total)
     
     # Compute normalized probabilities
-    p_t_normalized_array = np.zeros((graph.n_nodes_spatial, graph.n_attr), dtype=np.float32)
-    p_k_normalized_array = np.zeros((graph.n_nodes_spatial, n_communities), dtype=np.float32)
-    
-    calc_normalized_mpc_weighted_cpu(s_t, s_total, p_t_normalized_array)
-    calc_normalized_mpc_k_weighted_cpu(s_k, s_total, p_k_normalized_array)
-    
-    # Convert to dictionary format for test comparisons
-    p_t_normalized = {}
-    for i in range(graph.n_nodes_spatial):
-        p_t_normalized[i] = {}
-        for j, attr in enumerate(attr_names):
-            p_t_normalized[i][attr] = float(p_t_normalized_array[i, j])
-    
-    p_k_normalized = {}
-    for i in range(graph.n_nodes_spatial):
-        p_k_normalized[i] = {}
-        for k in range(n_communities):
-            p_k_normalized[i][k] = float(p_k_normalized_array[i, k])
+    w_it_array = np.zeros((graph.n_nodes_spatial, graph.n_attr), dtype=np.float32)
+    w_ik_array = np.zeros((graph.n_nodes_spatial, n_communities), dtype=np.float32)
 
-    return communities_test, membership_test, n_communities, test_HHI, w_it, w_i, p_t_normalized, p_k_normalized
+    calc_normalized_mpc_weighted_cpu(s_t, s_total, w_it_array)
+    calc_normalized_mpc_k_weighted_cpu(s_k, s_total, w_ik_array)
+
+    # Convert to dictionary format for test comparisons
+    w_it = {}
+    for i in range(graph.n_nodes_spatial):
+        w_it[i] = {}
+        for j, attr in enumerate(attr_names):
+            w_it[i][attr] = float(w_it_array[i, j])
+
+    w_ik = {}
+    for i in range(graph.n_nodes_spatial):
+        w_ik[i] = {}
+        for k in range(n_communities):
+            w_ik[i][k] = float(w_ik_array[i, k])
+
+    return communities_test, membership_test, n_communities, test_HHI, w_it, w_i, w_it, w_ik
 
 
 class _TestDeterministicWeighted():
@@ -1764,7 +1764,7 @@ class _TestDeterministicWeighted():
         """Test the ExactWeightedEvaluator against expected weighted probability values."""
         
         graph = read_graph
-        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_it, test_w_ik = example_case_param_weighted
 
         # Import the ExactWeightedEvaluator
         from graph_opt.community_detection.alliance_builder import ExactWeightedEvaluator
@@ -1794,13 +1794,13 @@ class _TestDeterministicWeighted():
                 f"HHI mismatch for {key}: expected {test_HHI[key]}, got {test_class.hhi[key]}"
 
         # Check that w_it now contains p_t_normalized (since weighted evaluator overwrites it)
-        for node_id, attrs in test_p_t_normalized.items():
+        for node_id, attrs in test_w_it.items():
             for attr in attrs.keys():
                 attr_idx = graph.attr_key2i[attr]
-                expected_val = test_p_t_normalized[node_id][attr]
-                actual_val = test_class.w_it[node_id, attr_idx]  # For weighted evaluator, this contains p_t_normalized
+                expected_val = test_w_it[node_id][attr]
+                actual_val = test_class.w_it[node_id, attr_idx]  # For weighted evaluator, this contains w_it
                 assert abs(actual_val - expected_val) < self.tolerance, \
-                    f"w_it (p_t_normalized) mismatch for node {node_id}, attr {attr}: expected {expected_val}, got {actual_val}"
+                    f"w_it mismatch for node {node_id}, attr {attr}: expected {expected_val}, got {actual_val}"
 
         # Check w_i values (should be exactly the same as in ExactEvaluator)
         for node_id, (node, value) in enumerate(test_w_i.items()):
@@ -1809,22 +1809,13 @@ class _TestDeterministicWeighted():
             assert abs(actual_val - expected_val) < self.tolerance, \
                 f"w_i mismatch for node {node_id}: expected {expected_val}, got {actual_val}"
 
-        # Check p_t_normalized values (these are stored in _w_it after weighted computation)
-        for node_id, attrs in test_p_t_normalized.items():
-            for attr in attrs.keys():
-                attr_idx = graph.attr_key2i[attr]
-                expected_val = test_p_t_normalized[node_id][attr]
-                actual_val = test_class._w_it[node_id, attr_idx]  # For weighted evaluator, this contains p_t_normalized
-                assert abs(actual_val - expected_val) < self.tolerance, \
-                    f"p_t_normalized mismatch for node {node_id}, attr {attr}: expected {expected_val}, got {actual_val}"
-
-        # Check p_k_normalized values (these are stored in _w_ik for compatibility)
-        for node_id, communities in test_p_k_normalized.items():
+        # Check w_ik values (these are stored in _w_ik for compatibility)
+        for node_id, communities in test_w_ik.items():
             for k in communities.keys():
-                expected_val = test_p_k_normalized[node_id][k]
-                actual_val = test_class._w_ik[node_id, k]  # For weighted evaluator, this contains p_k_normalized
+                expected_val = test_w_ik[node_id][k]
+                actual_val = test_class.w_ik[node_id, k]  # For weighted evaluator, this contains w_k_normalized
                 assert abs(actual_val - expected_val) < self.tolerance, \
-                    f"p_k_normalized mismatch for node {node_id}, community {k}: expected {expected_val}, got {actual_val}"
+                    f"w_ik mismatch for node {node_id}, community {k}: expected {expected_val}, got {actual_val}"
 
         # Verify that the communities dictionary is correctly set
         assert same_community(init_communities_test, test_class.communities_dict)
@@ -1833,7 +1824,7 @@ class _TestDeterministicWeighted():
         """Test save/load functionality for ExactWeightedEvaluator."""
         
         graph = read_graph
-        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_it, test_w_ik = example_case_param_weighted
 
         from graph_opt.community_detection.alliance_builder import ExactWeightedEvaluator
 
@@ -1934,7 +1925,7 @@ class _TestStochasticWeighted():
         """Test the SampleWeightedEvaluator basic functionality and reasonable results."""
         
         graph, sampler = read_graph
-        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_it, test_w_ik = example_case_param_weighted
 
         # Import the SampleWeightedEvaluator
         from graph_opt.community_detection.alliance_builder import SampleWeightedEvaluator
@@ -1992,7 +1983,7 @@ class _TestStochasticWeighted():
         """Test save/load functionality for SampleWeightedEvaluator."""
         
         graph, sampler = read_graph
-        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_it, test_w_ik = example_case_param_weighted
 
         from graph_opt.community_detection.alliance_builder import SampleWeightedEvaluator
 
@@ -2071,7 +2062,7 @@ class _TestStochasticWeighted():
         """Test SampleWeightedEvaluator produces results in same ballpark as ExactWeightedEvaluator."""
         
         graph, sampler = read_graph
-        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_p_t_normalized, test_p_k_normalized = example_case_param_weighted
+        init_communities_test, membership_test, n_communities, test_HHI, test_w_it, test_w_i, test_w_it, test_w_ik = example_case_param_weighted
 
         from graph_opt.community_detection.alliance_builder import SampleWeightedEvaluator, ExactWeightedEvaluator
 

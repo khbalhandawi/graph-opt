@@ -411,7 +411,6 @@ def calc_sample_s_total_weighted_cpu(
 def calc_sample_normalized_s_t_weighted_cpu(
         s_t,
         s_total,
-        n_walks,
         p_t_normalized
     ):
     """
@@ -425,8 +424,6 @@ def calc_sample_normalized_s_t_weighted_cpu(
         Weighted attribute scores of shape (n_nodes, n_attr) (already normalized by n_walks)
     s_total : np.ndarray
         Total capacity scores of shape (n_nodes,) (already normalized by n_walks)
-    n_walks : int
-        Number of walks (not used since normalization already applied)
     p_t_normalized : np.ndarray
         Output normalized probabilities of shape (n_nodes, n_attr)
     """
@@ -444,7 +441,6 @@ def calc_sample_normalized_s_t_weighted_cpu(
 def calc_sample_normalized_s_k_weighted_cpu(
         s_k,
         s_total,
-        n_walks,
         p_k_normalized
     ):
     """
@@ -458,8 +454,6 @@ def calc_sample_normalized_s_k_weighted_cpu(
         Weighted alliance scores of shape (n_nodes, n_communities) (already normalized by n_walks)
     s_total : np.ndarray
         Total capacity scores of shape (n_nodes,) (already normalized by n_walks)
-    n_walks : int
-        Number of walks (not used since normalization already applied)
     p_k_normalized : np.ndarray
         Output normalized probabilities of shape (n_nodes, n_communities)
     """

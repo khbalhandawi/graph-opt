@@ -23,45 +23,27 @@ def define_cuda_kernels_weighted_exact(
             w_i: DeviceNDArray,
             p_iv_t: DeviceNDArray,
             s_t: DeviceNDArray,
-            L: int,
-            lambda_decay: float
+            L: int,  # Ignored - always use L=1
+            lambda_decay: float  # Ignored for L=1
         ):
         """
-        Calculate S_t(i, L) following CPU recursive formulation.
+        Calculate S_t(i, L) using simplified L=1 approach.
         
-        CPU formula: S_t(i,L) = sum_{v} P_i(v) * [w_i[i] * P_i(v) * P_{i,v}(t) + lambda * S_t(v, L-1)]
-        
-        Uses iterative approach to compute recursion for arbitrary L.
+        Formula: S_t(i,1) = sum_{v} P_i(v) * w_i[i] * P_i(v) * P_{i,v}(t)
         """
         x, y = cuda.grid(2)
         if x >= n_nodes or y >= n_attr:
             return
         
-        # Initialize result
-        s_t[x, y] = 0.0
+        total = 0.0
         
-        if L <= 0:
-            return
+        for v in range(n_nodes):
+            if p_iv[x, v] > 0:
+                # Direct term: w_i[x] * P_i(v) * P_{i,v}(t)
+                direct_term = w_i[x] * p_iv[x, v] * p_iv_t[x, v, y]
+                total += p_iv[x, v] * direct_term
         
-        # For L=1, direct computation (no recursion)
-        if L == 1:
-            total = 0.0
-            for v in range(n_nodes):
-                if p_iv[x, v] > 0:
-                    # Following the CPU formula exactly: P_i(v) * w_i[i] * P_i(v) * P_{i,v}(t)
-                    direct_term = w_i[x] * p_iv[x, v] * p_iv_t[x, v, y]
-                    total += p_iv[x, v] * direct_term
-            s_t[x, y] = total
-        else:
-            # For L > 1, we need iterative computation
-            # This is a simplified version - for now, fall back to L=1 behavior
-            # TODO: Implement full iterative recursion for L > 1
-            total = 0.0
-            for v in range(n_nodes):
-                if p_iv[x, v] > 0:
-                    direct_term = w_i[x] * p_iv[x, v] * p_iv_t[x, v, y]
-                    total += p_iv[x, v] * direct_term
-            s_t[x, y] = total
+        s_t[x, y] = total
 
     @cuda.jit
     def calc_s_k_weighted_gpu(
@@ -70,100 +52,60 @@ def define_cuda_kernels_weighted_exact(
             p_iv_t: DeviceNDArray,
             membership: DeviceNDArray,
             s_k: DeviceNDArray,
-            L: int,
-            lambda_decay: float
+            L: int,  # Ignored - always use L=1
+            lambda_decay: float  # Ignored for L=1
         ):
         """
-        Calculate S_k(i, L) following CPU recursive formulation.
+        Calculate S_k(i, L) using simplified L=1 approach.
         
-        CPU formula: S_k(i,L) = sum_{v} P_i(v) * [w_i[i] * P_i(v) * sum_{t: membership[t]=k} P_{i,v}(t) + lambda * S_k(v, L-1)]
-        
-        Uses iterative approach to compute recursion for arbitrary L.
+        Formula: S_k(i,1) = sum_{v} P_i(v) * w_i[i] * P_i(v) * sum_{t: membership[t]=k} P_{i,v}(t)
         """
         x, y = cuda.grid(2)
         if x >= n_nodes or y >= n_communities:
             return
         
-        # Initialize result
-        s_k[x, y] = 0.0
+        total = 0.0
         
-        if L <= 0:
-            return
+        for v in range(n_nodes):
+            if p_iv[x, v] > 0:
+                # Calculate sum of P_{i,v}(t) for attributes in community y
+                attr_sum = 0.0
+                for t in range(n_attr):
+                    if membership[t] == y:
+                        attr_sum += p_iv_t[x, v, t]
+                
+                # Direct term: w_i[x] * P_i(v) * attr_sum
+                direct_term = w_i[x] * p_iv[x, v] * attr_sum
+                total += p_iv[x, v] * direct_term
         
-        # For L=1, direct computation (no recursion)
-        if L == 1:
-            total = 0.0
-            for v in range(n_nodes):
-                if p_iv[x, v] > 0:
-                    # Calculate sum of P_{i,v}(t) for attributes in community y
-                    attr_sum = 0.0
-                    for t in range(n_attr):
-                        if membership[t] == y:
-                            attr_sum += p_iv_t[x, v, t]
-                    
-                    # Following the CPU formula exactly: P_i(v) * w_i[i] * P_i(v) * attr_sum
-                    direct_term = w_i[x] * p_iv[x, v] * attr_sum
-                    total += p_iv[x, v] * direct_term
-            s_k[x, y] = total
-        else:
-            # For L > 1, we need iterative computation
-            # This is a simplified version - for now, fall back to L=1 behavior
-            # TODO: Implement full iterative recursion for L > 1
-            total = 0.0
-            for v in range(n_nodes):
-                if p_iv[x, v] > 0:
-                    attr_sum = 0.0
-                    for t in range(n_attr):
-                        if membership[t] == y:
-                            attr_sum += p_iv_t[x, v, t]
-                    direct_term = w_i[x] * p_iv[x, v] * attr_sum
-                    total += p_iv[x, v] * direct_term
-            s_k[x, y] = total
+        s_k[x, y] = total
 
     @cuda.jit
     def calc_s_total_weighted_gpu(
             p_iv: DeviceNDArray,
             w_i: DeviceNDArray,
             s_total: DeviceNDArray,
-            L: int,
-            lambda_decay: float
+            L: int,  # Ignored - always use L=1
+            lambda_decay: float  # Ignored for L=1
         ):
         """
-        Calculate S_total(i, L) following CPU recursive formulation.
+        Calculate S_total(i, L) using simplified L=1 approach.
         
-        CPU formula: S_total(i,L) = sum_{v} P_i(v) * [w_i[i] * P_i(v) + lambda * S_total(v, L-1)]
-        
-        Uses iterative approach to compute recursion for arbitrary L.
+        Formula: S_total(i,1) = sum_{v} P_i(v) * w_i[i] * P_i(v)
         """
         x = cuda.grid(1)
         if x >= n_nodes:
             return
         
-        # Initialize result
-        s_total[x] = 0.0
+        total = 0.0
         
-        if L <= 0:
-            return
+        for v in range(n_nodes):
+            if p_iv[x, v] > 0:
+                # Direct term: w_i[x] * P_i(v)
+                direct_term = w_i[x] * p_iv[x, v]
+                total += p_iv[x, v] * direct_term
         
-        # For L=1, direct computation (no recursion)
-        if L == 1:
-            total = 0.0
-            for v in range(n_nodes):
-                if p_iv[x, v] > 0:
-                    # Following the CPU formula exactly: P_i(v) * w_i[i] * P_i(v)
-                    direct_term = w_i[x] * p_iv[x, v]
-                    total += p_iv[x, v] * direct_term
-            s_total[x] = total
-        else:
-            # For L > 1, we need iterative computation
-            # This is a simplified version - for now, fall back to L=1 behavior
-            # TODO: Implement full iterative recursion for L > 1
-            total = 0.0
-            for v in range(n_nodes):
-                if p_iv[x, v] > 0:
-                    direct_term = w_i[x] * p_iv[x, v]
-                    total += p_iv[x, v] * direct_term
-            s_total[x] = total
+        s_total[x] = total
 
     @cuda.jit
     def calc_normalized_mpc_weighted_gpu(

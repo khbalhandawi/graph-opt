@@ -1451,9 +1451,9 @@ class ExactWeightedEvaluator(BaseEvaluator):
     def p_it(self):
         """Return normalized attribute probabilities p_tilde(t | i, L)."""
         if self.use_gpu:
-            return self._p_t_normalized_d.copy_to_host()
+            return self._w_it_d.copy_to_host()
         else:
-            return self._p_t_normalized.copy()
+            return self._w_it.copy()
 
     @property
     def p_et(self):
@@ -1476,10 +1476,6 @@ class ExactWeightedEvaluator(BaseEvaluator):
         self._s_k = np.zeros((self._gloader.n_nodes_spatial, self._n_communities), dtype=np.float32)
         self._s_total = np.zeros(self._gloader.n_nodes_spatial, dtype=np.float32)
         
-        # Normalized probability arrays
-        self._p_t_normalized = np.zeros((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32)
-        self._p_k_normalized = np.zeros((self._gloader.n_nodes_spatial, self._n_communities), dtype=np.float32)
-
         # Compute w_it (attribute weights per node) - reuse existing method
         calc_w_it_cpu(
             adj=self._gloader._adj_sparse,
@@ -1531,11 +1527,8 @@ class ExactWeightedEvaluator(BaseEvaluator):
         calc_normalized_mpc_weighted_cpu(
             s_t=self._s_t,
             s_total=self._s_total,
-            p_t_normalized=self._p_t_normalized
+            p_t_normalized=self._w_it
         )
-
-        # Store in w_it for compatibility with base class (overwrite initial computation)
-        self._w_it = self._p_t_normalized.copy()
 
         return None
 
@@ -1641,24 +1634,24 @@ class ExactWeightedEvaluator(BaseEvaluator):
         self._p_iv_d.copy_to_device(p_iv_host)
         self._p_iv_t_d.copy_to_device(p_iv_t_host)
 
-        # Compute total capacity scores
+        # Compute total capacity scores (L=1 only)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial,), TPB=self.TPB_1D)
         self.calc_s_total_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._p_iv_d,
             self._w_i_d,
             self._s_total_d,
-            self.walk_length,
+            1,  # L=1 always
             self.lambda_decay
         )
 
-        # Compute attribute scores
+        # Compute attribute scores (L=1 only)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB=self.TPB_2D)
         self.calc_s_t_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._p_iv_d,
             self._w_i_d,
             self._p_iv_t_d,
             self._s_t_d,
-            self.walk_length,
+            1,  # L=1 always
             self.lambda_decay
         )
 
@@ -1666,17 +1659,10 @@ class ExactWeightedEvaluator(BaseEvaluator):
         self.calc_normalized_mpc_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._s_t_d,
             self._s_total_d,
-            self._p_t_normalized_d
+            self._w_it_d
         )
 
         self.stream.synchronize()
-        
-        # Copy to w_it_d for compatibility with base class (GPU version)
-        p_t_normalized_host = self._p_t_normalized_d.copy_to_host()
-        self._w_it_d.copy_to_device(p_t_normalized_host)
-        
-        # Also set CPU version for consistency
-        self._w_it = p_t_normalized_host
 
     def update_scores(self, communities_dict: Dict[str,str]):
         """Update HHI and MPC scores for a given community assignment."""
@@ -1783,17 +1769,14 @@ class ExactWeightedEvaluator(BaseEvaluator):
         calc_normalized_mpc_k_weighted_cpu(
             s_k=self._s_k,
             s_total=self._s_total,
-            p_k_normalized=self._p_k_normalized
+            p_k_normalized=self._w_ik
         )
-
-        # Store in w_ik for compatibility with base class
-        self._w_ik = self._p_k_normalized.copy()
 
         # Compute MPC as product of attribute and alliance probabilities
         calc_mpc_weighted_cpu(
             membership=self._membership,
-            p_t_normalized=self._p_t_normalized,
-            p_k_normalized=self._p_k_normalized,
+            p_t_normalized=self._w_it,
+            p_k_normalized=self._w_ik,
             mpc=self._mpc_attrs
         )
 
@@ -1806,7 +1789,7 @@ class ExactWeightedEvaluator(BaseEvaluator):
 
     def _update_mpc_scores_gpu(self):
         """GPU version of MPC score computation using weighted formulation."""
-        # Compute alliance scores S_k(i, L)
+        # Compute alliance scores S_k(i, L) (L=1 only)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB=self.TPB_2D)
         self.calc_s_k_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._p_iv_d,
@@ -1814,7 +1797,7 @@ class ExactWeightedEvaluator(BaseEvaluator):
             self._p_iv_t_d,
             self._membership_d,
             self._s_k_d,
-            self.walk_length,
+            1,  # L=1 always
             self.lambda_decay
         )
 
@@ -1822,23 +1805,11 @@ class ExactWeightedEvaluator(BaseEvaluator):
         self.calc_normalized_mpc_k_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._s_k_d,
             self._s_total_d,
-            self._p_k_normalized_d
+            self._w_ik_d
         )
 
         self.stream.synchronize()
         
-        # Copy to w_ik for compatibility with base class
-        p_k_normalized_host = self._p_k_normalized_d.copy_to_host()
-        self._w_ik_d.copy_to_device(p_k_normalized_host)
-        
-        # Also update CPU versions - synchronize ALL arrays for property access
-        self._w_ik = p_k_normalized_host.copy()
-        self._p_k_normalized = p_k_normalized_host.copy()
-        
-        # Update w_i and w_it CPU arrays for property consistency
-        self._w_i = self._w_i_d.copy_to_host()
-        self._w_it = self._w_it_d.copy_to_host()
-
         # Initialize MPC array
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_attr,), TPB=self.TPB_1D)
         self.init_mpc[blockspergrid, threadsperblock, self.stream](
@@ -1849,8 +1820,8 @@ class ExactWeightedEvaluator(BaseEvaluator):
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_attr, self._gloader.n_nodes_spatial), TPB=self.TPB_2D)
         self.calc_mpc_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._membership_d,
-            self._p_t_normalized_d,
-            self._p_k_normalized_d,
+            self._w_it_d,
+            self._w_ik_d,
             self._mpc_attrs_d
         )
 
@@ -1884,8 +1855,6 @@ class ExactWeightedEvaluator(BaseEvaluator):
             safe_delete(state, '_s_t_d')
             safe_delete(state, '_s_k_d')
             safe_delete(state, '_s_total_d')
-            safe_delete(state, '_p_t_normalized_d')
-            safe_delete(state, '_p_k_normalized_d')
 
             state.pop('calc_s_t_weighted_gpu', None)
             state.pop('calc_s_k_weighted_gpu', None)
@@ -1910,10 +1879,6 @@ class ExactWeightedEvaluator(BaseEvaluator):
                 del self._s_k_d
             if hasattr(self, '_s_total_d'):
                 del self._s_total_d
-            if hasattr(self, '_p_t_normalized_d'):
-                del self._p_t_normalized_d
-            if hasattr(self, '_p_k_normalized_d'):
-                del self._p_k_normalized_d
         super().__del__()
 
 
@@ -2369,17 +2334,17 @@ class SampleWeightedEvaluator(BaseEvaluator):
     def p_it(self):
         """Normalized attribute probabilities p_hat(t | i, L)."""
         if self.use_gpu:
-            return self._p_t_normalized_d.copy_to_host()
+            return self._w_it_d.copy_to_host()
         else:
-            return self._p_t_normalized.copy()
+            return self._w_it.copy()
 
     @property 
     def p_ik(self):
         """Normalized alliance probabilities p_hat(k | i, L)."""
         if self.use_gpu:
-            return self._p_k_normalized_d.copy_to_host()
+            return self._w_ik_d.copy_to_host()
         else:
-            return self._p_k_normalized.copy()
+            return self._w_ik.copy()
 
     @property
     def s_t(self):
@@ -2419,8 +2384,6 @@ class SampleWeightedEvaluator(BaseEvaluator):
         self._s_t = np.zeros((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32)
         self._s_k = np.zeros((self._gloader.n_nodes_spatial, self.n_communities), dtype=np.float32)
         self._s_total = np.zeros((self._gloader.n_nodes_spatial,), dtype=np.float32)
-        self._p_t_normalized = np.zeros((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32)
-        self._p_k_normalized = np.zeros((self._gloader.n_nodes_spatial, self.n_communities), dtype=np.float32)
 
         # Calculate membership-independent scores from sampling using W_total for consistency
         calc_sample_s_t_weighted_cpu(
@@ -2438,8 +2401,7 @@ class SampleWeightedEvaluator(BaseEvaluator):
         calc_sample_normalized_s_t_weighted_cpu(
             s_t = self._s_t,
             s_total = self._s_total,
-            n_walks = self._sampler.n_walks,
-            p_t_normalized = self._p_t_normalized
+            p_t_normalized = self._w_it
         )
 
         # Note: s_k and p_k_normalized will be calculated in _update_scores methods
@@ -2482,12 +2444,12 @@ class SampleWeightedEvaluator(BaseEvaluator):
             n_communities=self._n_communities
         )
         
-        self.calc_sample_s_t_weighted_gpu           : Callable = weighted_kernels[0]
-        self.calc_sample_s_k_weighted_gpu           : Callable = weighted_kernels[1]
-        self.calc_sample_s_total_weighted_gpu       : Callable = weighted_kernels[2]
-        self.calc_sample_normalized_s_t_weighted_gpu : Callable = weighted_kernels[3]
-        self.calc_sample_normalized_s_k_weighted_gpu : Callable = weighted_kernels[4]
-        self.calc_sample_mpc_weighted_gpu           : Callable = weighted_kernels[5]
+        self.calc_sample_s_t_weighted_gpu               : Callable = weighted_kernels[0]
+        self.calc_sample_s_k_weighted_gpu               : Callable = weighted_kernels[1]
+        self.calc_sample_s_total_weighted_gpu           : Callable = weighted_kernels[2]
+        self.calc_sample_normalized_s_t_weighted_gpu    : Callable = weighted_kernels[3]
+        self.calc_sample_normalized_s_k_weighted_gpu    : Callable = weighted_kernels[4]
+        self.calc_sample_mpc_weighted_gpu               : Callable = weighted_kernels[5]
 
         # Allocate GPU arrays for edge attributes
         self._edges_attrs_d = self.cuda.device_array((self._gloader.n_unique_edges, self._gloader.n_attr), dtype=np.float32, stream=self.stream)
@@ -2503,8 +2465,6 @@ class SampleWeightedEvaluator(BaseEvaluator):
         self._s_t_d = self.cuda.device_array((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32, stream=self.stream)
         self._s_k_d = self.cuda.device_array((self._gloader.n_nodes_spatial, self._n_communities), dtype=np.float32, stream=self.stream)
         self._s_total_d = self.cuda.device_array((self._gloader.n_nodes_spatial,), dtype=np.float32, stream=self.stream)
-        self._p_t_normalized_d = self.cuda.device_array((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32, stream=self.stream)
-        self._p_k_normalized_d = self.cuda.device_array((self._gloader.n_nodes_spatial, self._n_communities), dtype=np.float32, stream=self.stream)
 
         # Calculate membership-independent scores from sampling using W_total for consistency
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB=self.TPB_2D)
@@ -2514,18 +2474,22 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._s_t_d
         )
 
+        self.stream.synchronize()
+
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial,), TPB=self.TPB_1D)
         self.calc_sample_s_total_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._sampler._W_total_d,
             self._s_total_d
         )
 
+        self.stream.synchronize()
+
         # Calculate normalized attribute probabilities (doesn't depend on membership)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB=self.TPB_2D)
         self.calc_sample_normalized_s_t_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._s_t_d,
             self._s_total_d,
-            self._p_t_normalized_d
+            self._w_it_d
         )
 
         self.stream.synchronize()
@@ -2538,12 +2502,14 @@ class SampleWeightedEvaluator(BaseEvaluator):
         super().update_scores(communities_dict)
         self._update_hhi_scores()
         self._update_mpc_scores()
+        self._update_community_weights()
 
     def update_scores_membership(self, membership: np.ndarray):
         """Update scores using new membership array."""
         super().update_scores_membership(membership)
         self._update_hhi_scores()
         self._update_mpc_scores()
+        self._update_community_weights()
 
     @cpu_gpu_dispatcher('_update_hhi_scores_cpu', '_update_hhi_scores_gpu')
     def _update_hhi_scores(self):
@@ -2624,15 +2590,14 @@ class SampleWeightedEvaluator(BaseEvaluator):
         calc_sample_normalized_s_k_weighted_cpu(
             s_k = self._s_k,
             s_total = self._s_total,
-            n_walks = self._sampler.n_walks,
-            p_k_normalized = self._p_k_normalized
+            p_k_normalized = self._w_ik
         )
 
         # Calculate MPC using weighted sampling approach
         calc_sample_mpc_weighted_cpu(
             membership = self._membership,
-            p_t_normalized = self._p_t_normalized,
-            p_k_normalized = self._p_k_normalized,
+            p_t_normalized = self._w_it,
+            p_k_normalized = self._w_ik,
             mpc = self._mpc_attrs
         )
 
@@ -2656,12 +2621,16 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._s_k_d
         )
 
+        self.stream.synchronize()
+
         # Recalculate normalized alliance probabilities
         self.calc_sample_normalized_s_k_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._s_k_d,
             self._s_total_d,
-            self._p_k_normalized_d
+            self._w_ik_d
         )
+
+        self.stream.synchronize()
 
         # Initialize MPC array
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_attr,), TPB=self.TPB_1D)
@@ -2669,12 +2638,14 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._mpc_attrs_d
         )
 
+        self.stream.synchronize()
+
         # Calculate MPC using weighted sampling approach
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_attr, self._gloader.n_nodes_spatial), TPB=self.TPB_2D)
         self.calc_sample_mpc_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._membership_d,
-            self._p_t_normalized_d,
-            self._p_k_normalized_d,
+            self._w_it_d,
+            self._w_ik_d,
             self._mpc_attrs_d
         )
 
@@ -2711,8 +2682,6 @@ class SampleWeightedEvaluator(BaseEvaluator):
             safe_delete(state, '_s_t_d')
             safe_delete(state, '_s_k_d')
             safe_delete(state, '_s_total_d')
-            safe_delete(state, '_p_t_normalized_d')
-            safe_delete(state, '_p_k_normalized_d')
 
             state.pop('init_sample_p_et', None)
             state.pop('init_sample_p_ek', None)
@@ -2743,10 +2712,6 @@ class SampleWeightedEvaluator(BaseEvaluator):
                 del self._s_k_d
             if hasattr(self, '_s_total_d'):
                 del self._s_total_d
-            if hasattr(self, '_p_t_normalized_d'):
-                del self._p_t_normalized_d
-            if hasattr(self, '_p_k_normalized_d'):
-                del self._p_k_normalized_d
         super().__del__()
 
 
