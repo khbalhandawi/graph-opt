@@ -5,7 +5,7 @@ from optparse import Option
 import pytest
 import os
 
-from graph_opt.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, ExactWeightedEvaluator, SampleEvaluator, SampleWeightedEvaluator, GreedyOptimizer, BruteForce, ExactOptimizer, multiobjective
+from graph_opt.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, ExactWeightedEvaluator, SampleEvaluator, SampleWeightedEvaluator, GreedyOptimizer, BruteForce, ExactOptimizer, ExactWeightedOptimizer, multiobjective
 from graph_opt.community_detection.utilities import same_community
 from graph_opt.utilities import cuda_blocks
 
@@ -1277,6 +1277,156 @@ class _TestOptimizeWeighted():
         # assert same_community(optimizer.communities_dict, test_communities_dict)
 
         assert optimizer.f == f
+
+    def test_exact_optimize(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_weighted_evaluator: SampleWeightedEvaluator | ExactWeightedEvaluator, 
+        tmp_path
+    ):
+        """Test exact optimization with weighted evaluators using ExactWeightedOptimizer."""
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_weighted_evaluator
+
+        directory = tmp_path / "test_save"
+        directory.mkdir()
+
+        model_settings = {
+            'MIPGap': 1e-12,  # Stop if the gap is within 0.01%
+            'Heuristics': 0.1,  # Use more aggressive heuristics
+            'MIPFocus': 1,  # Focus on finding feasible solutions
+            'VarBranch': 0,  # More aggressive variable branching
+            'Presolve': 2 # Turn off presolve
+        }
+        model_settings = {
+            'TimeLimit': 7_200,  # Time limit in seconds, e.g., 3600 seconds for 1 hour
+            'NodefileStart': 0.5,  # Start writing nodes to disk after 50% of the time limit
+            'SoftMemLimit': 54*1e9,  # Memory limit in MB, e.g., 55296 MB for 54 GB
+            'MIPGap': 1e-3,  # Stop if the gap is within 0.01%
+            'Heuristics': 0.2,  # default heuristics 0.05
+            'MIPFocus': 1,  # balanced Focus on finding feasible solutions and proving optimality (1 for feasible, 2 for optimal)
+            # 'VarBranch': 2,  # More aggressive variable branching
+            'Cuts': -1, # automatic (the default)
+            'Presolve': 2,  # aggressive presolve
+            'Threads': 12,  # Adjust based on your CPU core count
+            'ScaleFlag': 2,  # Enable scaling (more aggressive)
+            'Method': 2,  # Set to 1 for dual simplex (2 for barrier, -1 for automatic)
+            'FeasibilityTol': 1e-6, # Feasibility tolerance
+            'IntFeasTol': 1e-5, # Integer feasibility tolerance
+            'PreQLinearize': 2,  # Enable pre-queue linearization
+            'Crossover': 0,  # keep the interior solution
+            'NodeMethod': 2,  # use Barrier inside the tree as well
+            'NumericFocus': 2,  # High numeric focus for better numerical stability
+            'BarConvTol': 1e-8,  # (optional) a bit tighter because we skip crossover
+        }
+
+        optimizer = ExactWeightedOptimizer(
+            evaluator=evaluator,
+            seed=seed,
+            weights=weights,
+            log_dir=directory,
+            log_interval=1,
+            model_settings=model_settings,
+        )
+
+        optimizer.build_model()
+        # optimizer.tune(time_limit=5)
+        optimizer.optimize()
+
+        evaluator.update_scores(optimizer.communities_dict)
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f = multiobjective(f1,f2,weights)
+
+        assert abs(optimizer.f - f) / f < 1e-6
+
+        evaluator.update_scores(test_communities_dict)
+        f1 = -np.mean(list(evaluator.hhi.values()))
+        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f = multiobjective(f1,f2,weights)
+
+        assert abs(optimizer.f - f) / f < 1e-6
+
+    def test_save_load_exact(
+        self, 
+        optimization_cases: Tuple[Tuple[float,float], Dict[str,int]],
+        get_sample_weighted_evaluator: SampleWeightedEvaluator,
+        tmp_path
+    ):
+        """Test saving and loading ExactWeightedOptimizer."""
+        
+        weights, test_communities_dict = optimization_cases
+        evaluator = get_sample_weighted_evaluator
+
+        directory = tmp_path / "test_save"
+        directory.mkdir()
+
+        model_settings = {
+            'MIPGap': 1e-12,  # Stop if the gap is within 0.01%
+            'Heuristics': 0.9,  # Use more aggressive heuristics
+            'MIPFocus': 3,  # Focus on finding feasible solutions
+            'VarBranch': 2,  # More aggressive variable branching
+            'Presolve': 0 # Turn off presolve
+        }
+
+        optimizer = ExactWeightedOptimizer(
+            evaluator=evaluator,
+            seed=seed,
+            weights=weights,
+            log_dir=directory,
+            log_interval=1,
+            model_settings=model_settings,
+        )
+
+        optimizer.build_model()
+        optimizer.optimize()
+
+        optimizer.save(directory=directory)
+
+        data_to_load = {
+            'communities_history':  {"name" : 'communities_history', "dtype" : List[Dict[str,int]]},
+            'f_history':            {"name" : 'f_history', "dtype" : list},
+            'multi_history':        {"name" : 'multi_history', "dtype" : List[Tuple[float,float]]},
+            'mip_logs':             {"name" : 'mip_logs', "dtype" : List[Tuple[float,float,float,float,float,float]]},
+            'simplex_logs':         {"name" : 'simplex_logs', "dtype" : List[Tuple[float,float,float,float]]},
+            'barrier_logs':         {"name" : 'barrier_logs', "dtype" : List[Tuple[float,float,float,float]]},
+        }
+
+        test_data = {}
+        for name, attr in data_to_load.items():
+            test_data[name] = getattr(optimizer,attr["name"])
+
+        optimizer = ExactWeightedOptimizer(
+            evaluator=evaluator,
+            seed=seed,
+            weights=weights,
+            log_dir=directory,
+            log_interval=1,
+            model_settings=model_settings,
+        )
+        
+        optimizer.load(directory=directory)
+
+        for name, attr in data_to_load.items():
+            if attr["dtype"] == np.ndarray:
+                assert np.allclose(getattr(optimizer,attr["name"]), test_data[name], rtol=1e-1)
+            elif attr["dtype"] == list:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    assert abs(value - test_value) < 1e-6
+            elif attr["dtype"] == List[Dict[str,int]]:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    assert value == test_value
+            elif attr["dtype"] == List[Tuple[float,float]]:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    for value_i, test_value_i in zip(value, test_value):
+                        assert abs(value_i - test_value_i) < 1e-6
+            elif attr["dtype"] == List[Dict[int,Any]]:
+                for value, test_value in zip(getattr(optimizer,attr["name"]), test_data[name]):
+                    for key, test_key in zip(value.keys(), test_value.keys()):
+                        assert key == test_key
+                        for value_i, test_value_i in zip(value[key].values(), test_value[test_key].values()):
+                            assert abs(value_i - test_value_i) < 1e-6
 
 
 class TestOptimizeWeightedGPU(_TestOptimizeWeighted):
