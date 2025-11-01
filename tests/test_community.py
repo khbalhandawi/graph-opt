@@ -5,7 +5,7 @@ from optparse import Option
 import pytest
 import os
 
-from graph_opt.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, ExactWeightedEvaluator, SampleEvaluator, SampleWeightedEvaluator, GreedyOptimizer, BruteForce, ExactOptimizer, ExactWeightedOptimizer, multiobjective
+from graph_opt.community_detection.alliance_builder import GraphLoader, NeighbourSampler, ExactEvaluator, ExactWeightedEvaluator, SampleEvaluator, SampleWeightedEvaluator, GreedyOptimizer, BruteForce, ExactOptimizer, multiobjective
 from graph_opt.community_detection.utilities import same_community
 from graph_opt.utilities import cuda_blocks
 
@@ -1284,7 +1284,7 @@ class _TestOptimizeWeighted():
         get_weighted_evaluator: SampleWeightedEvaluator | ExactWeightedEvaluator, 
         tmp_path
     ):
-        """Test exact optimization with weighted evaluators using ExactWeightedOptimizer."""
+        """Test exact optimization with weighted evaluators using ExactOptimizer."""
         
         weights, test_communities_dict = optimization_cases
         evaluator = get_weighted_evaluator
@@ -1321,7 +1321,7 @@ class _TestOptimizeWeighted():
             'BarConvTol': 1e-8,  # (optional) a bit tighter because we skip crossover
         }
 
-        optimizer = ExactWeightedOptimizer(
+        optimizer = ExactOptimizer(
             evaluator=evaluator,
             seed=seed,
             weights=weights,
@@ -1354,7 +1354,7 @@ class _TestOptimizeWeighted():
         get_sample_weighted_evaluator: SampleWeightedEvaluator,
         tmp_path
     ):
-        """Test saving and loading ExactWeightedOptimizer."""
+        """Test saving and loading ExactOptimizer."""
         
         weights, test_communities_dict = optimization_cases
         evaluator = get_sample_weighted_evaluator
@@ -1370,7 +1370,7 @@ class _TestOptimizeWeighted():
             'Presolve': 0 # Turn off presolve
         }
 
-        optimizer = ExactWeightedOptimizer(
+        optimizer = ExactOptimizer(
             evaluator=evaluator,
             seed=seed,
             weights=weights,
@@ -1397,7 +1397,7 @@ class _TestOptimizeWeighted():
         for name, attr in data_to_load.items():
             test_data[name] = getattr(optimizer,attr["name"])
 
-        optimizer = ExactWeightedOptimizer(
+        optimizer = ExactOptimizer(
             evaluator=evaluator,
             seed=seed,
             weights=weights,

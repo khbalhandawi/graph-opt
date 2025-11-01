@@ -7,6 +7,5 @@ from .alliance_builder import (
     SampleWeightedEvaluator,
     GreedyOptimizer, 
     BruteForce, 
-    ExactOptimizer, 
-    ExactWeightedOptimizer,
+    ExactOptimizer
 )
