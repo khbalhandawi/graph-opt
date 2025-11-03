@@ -3556,7 +3556,8 @@ class ExactOptimizer(BaseOptimizer):
             slack: Optional[float] = None, 
             num_points: Optional[int] = -1, 
             PWL_TOL: Optional[float] = 1e-6,
-            epsilon: Optional[float] = 1e-10
+            epsilon: Optional[float] = 1e-10,
+            mass_thresh: Optional[float] = 0.0,
         ):
         """
         Build the optimization model.
@@ -3573,6 +3574,8 @@ class ExactOptimizer(BaseOptimizer):
             The tolerance for the PWL approximation, by default 1e-6
         epsilon : float, optional
             The epsilon value to use for numerical stability, by default 1e-10
+        mass_thresh : float, optional
+            The mass threshold to include attribute t in f2 calculation, by default 1e-
         """
 
         p_it = self._evaluator.p_it
@@ -3605,12 +3608,22 @@ class ExactOptimizer(BaseOptimizer):
             for k in self._K:
                 p_ik_exp[i,k] = quicksum(self._x[t, k] * p_it[i, t] for t in self._T if p_it[i, t] > 0)
 
+        # Precompute which t to include and the effective count for normalization
+        included_t = []
+        for t in self._T:
+            # total "mass" of attribute t across all i
+            mass_t = sum(p_it[i, t] for i in self._V)
+            if mass_t >= mass_thresh:
+                included_t.append(t)
+
+        n_attr_eff = max(1, len(included_t))  # avoid /0 if everything is skipped
+
         # Create a PWL approximation of log(f2)
-        min_val = epsilon
-        max_val = 1 # Maximum expected value of f2_exp
+        min_val = 0.0
+        max_val = 1.0
 
         f2_exp = 0
-        for t in tqdm(self._T, desc="Building f2 expression"):
+        for t in tqdm(included_t, desc="Building f2 expression"):
             f2_t_exp = 0
             all_zeros = True
             for i in self._V:
@@ -3623,7 +3636,7 @@ class ExactOptimizer(BaseOptimizer):
             # take the log of f2_t_exp
             if not all_zeros:
                 f2_t_var = self._model.addVar(name=f"f2_t_{t}", lb=min_val, ub=max_val)
-                log_f2_t = self._model.addVar(name=f"log_f2_t_{t}", lb=np.log(min_val), ub=0)
+                log_f2_t = self._model.addVar(name=f"log_f2_t_{t}", lb=np.log(min_val+epsilon), ub=0.0)
 
                 if slack is None:
                     self._model.addConstr(f2_t_var == f2_t_exp, f"Link_f2_t_{t}")
@@ -3631,18 +3644,22 @@ class ExactOptimizer(BaseOptimizer):
                     slack_var = self._model.addVar(lb=-slack, ub=slack, name=f"slack_{t}")
                     self._model.addConstr(f2_t_var == f2_t_exp + slack_var, f"Link_f2_t_{t}")
 
+                # Create s_t = f2_t_var + epsilon  (guaranteed > 0)
+                s_t = self._model.addVar(lb=min_val+epsilon, ub=max_val+2*epsilon, name=f"s_t_{t}")
+                self._model.addConstr(s_t == f2_t_var + epsilon, name=f"shift_{t}")
+
                 if log_approx == 'PWL':
                     num_points = num_points if num_points > 0 else 100
                     breakpoints_x = np.logspace(np.log10(min_val), np.log10(max_val), num=num_points)
                     breakpoints_y = np.log(breakpoints_x)
 
                     # Add the PWL constraint that approximates log(f2)
-                    self._model.addGenConstrPWL(f2_t_var, log_f2_t, breakpoints_x, breakpoints_y, name=f"pwl_log_f2_t_{t}")
+                    self._model.addGenConstrPWL(s_t, log_f2_t, breakpoints_x, breakpoints_y, name=f"pwl_log_f2_t_{t}")
                 elif log_approx == 'EXPR':
                     # Adding the logarithmic constraint
-                    self._model.addGenConstrLog(f2_t_var, log_f2_t, name=f"log_constraint_t_{t}", options="FuncPieces=%i FuncPieceError=%f"%(num_points, PWL_TOL))
+                    self._model.addGenConstrLog(s_t, log_f2_t, name=f"log_constraint_t_{t}", options="FuncPieces=%i FuncPieceError=%f"%(num_points, PWL_TOL))
 
-                f2_exp += log_f2_t / n_attr
+                f2_exp += log_f2_t / n_attr_eff
 
         # Set the objective
         self._model.setObjective(-self.weights[0]*f1_expr + self.weights[1]*f2_exp, GRB.MAXIMIZE)
@@ -3660,6 +3677,29 @@ class ExactOptimizer(BaseOptimizer):
             self._x[t, k].start = 1
 
         self.model_built = True
+
+    def debug_model(self, directory: Optional[str] = None):
+        """
+        Debug the optimization model by writing it to a file and performing diagnostics.
+        """
+        assert self.model_built, "Model not built yet. Run build_model() first."
+
+        # >>> ensure model is fully synchronized before any copies/writes
+        self._model.update()
+        self._model.write("model.lp")   # should show nonzero rows/cols
+
+        self.model_built = True
+
+        # --- Diagnostics ---
+        # Feasibility relaxation on a proper copy
+        m_feas = self._model.copy()
+        m_feas.feasRelaxS(relaxobjtype=1, minrelax=True, vrelax=True, crelax=True)
+        m_feas.optimize()
+        if m_feas.status == GRB.OPTIMAL:
+            print("FeasRelax objective (sum of violations) =", m_feas.objVal)
+            path = os.path.join(directory or '.', 'feasrelax_solution_{}.sol'.format(self._model_name))
+            print("Writing feasibility relaxation solution to", path)
+            m_feas.write(path)
 
     def save(self, directory=None, **kwargs):
         super().save(directory, **kwargs)
@@ -3875,6 +3915,11 @@ class ExactOptimizer(BaseOptimizer):
             status = "INFEASIBLE"
             logger.warning(f"[ExactOptimizer] Optimization completed with status {status}. The model may be infeasible or not solved to optimality.")
             self.optimal = False
+
+            path = os.path.join(self._log_dir, 'infeasible_model_{}.lp'.format(self._model_name))
+
+            self._model.computeIIS()
+            self._model.write(path)
         else:
             status = self._model.status
             if status == GRB.OPTIMAL:
