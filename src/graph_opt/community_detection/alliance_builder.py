@@ -3650,7 +3650,7 @@ class ExactOptimizer(BaseOptimizer):
 
                 if log_approx == 'PWL':
                     num_points = num_points if num_points > 0 else 100
-                    breakpoints_x = np.logspace(np.log10(min_val), np.log10(max_val), num=num_points)
+                    breakpoints_x = np.logspace(np.log10(min_val+epsilon), np.log10(max_val), num=num_points)
                     breakpoints_y = np.log(breakpoints_x)
 
                     # Add the PWL constraint that approximates log(f2)
