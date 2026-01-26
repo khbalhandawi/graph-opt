@@ -2727,6 +2727,14 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._mpc[attr] = float(self._mpc_attrs[attr_index])
             self._log_mpc[attr] = float(self._log_mpc_attrs[attr_index])
 
+    def save(self, directory=None, **kwargs):
+        super().save(directory, **kwargs)
+        self._sampler.save(directory, **kwargs)
+
+    def load(self, directory=None, **kwargs):
+        super().load(directory, **kwargs)
+        self._sampler.load(directory, **kwargs)
+
     def _create_copy_instance(self, stream: Optional[Any] = None) -> 'SampleWeightedEvaluator':
         if self.use_gpu:
             return self.__class__(
