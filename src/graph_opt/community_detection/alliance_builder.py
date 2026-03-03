@@ -1796,6 +1796,8 @@ class ExactWeightedEvaluator(BaseEvaluator):
             mpc=self._mpc_attrs
         )
 
+        # Average over all root airports: (1/|V|) * sum_i w_{t,i}
+        self._mpc_attrs /= self._gloader.n_nodes_spatial
         self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         # Update the mpc dictionaries
@@ -1843,7 +1845,8 @@ class ExactWeightedEvaluator(BaseEvaluator):
 
         self.stream.synchronize()
 
-        self._mpc_attrs = self._mpc_attrs_d.copy_to_host()
+        # Average over all root airports: (1/|V|) * sum_i w_{t,i}
+        self._mpc_attrs = self._mpc_attrs_d.copy_to_host() / self._gloader.n_nodes_spatial
         self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         # Update the mpc dictionaries
@@ -2658,6 +2661,8 @@ class SampleWeightedEvaluator(BaseEvaluator):
             mpc = self._mpc_attrs
         )
 
+        # Average over all root airports: (1/|V|) * sum_i w_{t,i}
+        self._mpc_attrs /= self._gloader.n_nodes_spatial
         self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         # Update the mpc dictionaries
@@ -2718,7 +2723,8 @@ class SampleWeightedEvaluator(BaseEvaluator):
 
         self.stream.synchronize()
 
-        self._mpc_attrs = self._mpc_attrs_d.copy_to_host()
+        # Average over all root airports: (1/|V|) * sum_i w_{t,i}
+        self._mpc_attrs = self._mpc_attrs_d.copy_to_host() / self._gloader.n_nodes_spatial
         self._log_mpc_attrs = safe_log(self._mpc_attrs)
 
         # Update the mpc dictionaries
@@ -3583,7 +3589,7 @@ class ExactOptimizer(BaseOptimizer):
         epsilon : float, optional
             The epsilon value to use for numerical stability, by default 1e-10
         mass_thresh : float, optional
-            The mass threshold to include attribute t in f2 calculation, by default 1e-
+            The mass threshold to include attribute t in f2 calculation, by default 1e-6
         """
 
         p_it = self._evaluator.p_it
