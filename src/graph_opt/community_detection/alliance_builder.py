@@ -808,7 +808,8 @@ class BaseEvaluator(ABC):
 
         self._communities_dict = value.copy()
 
-        self.membership = np.array(list(self._communities_dict.values()))
+        # Extract membership in attr_list order to match internal array indexing
+        self.membership = np.array([value[attr] for attr in self._gloader.attr_list])
 
     @property
     def hhi(self) -> Dict[str,float]:

@@ -13,7 +13,7 @@ def define_cuda_kernels_sampling(
         n_nodes:int,
     ) -> Tuple[Callable, Callable, Callable]:
 
-    @cuda.jit
+    @cuda.jit(max_registers=64)
     def edge_sampler(
             adj3:DeviceNDArray,
             N_uv:DeviceNDArray,
@@ -96,7 +96,7 @@ def define_cuda_kernels_sampling(
                         W_total[i,j,k-1] = chosen_weight
                     current_node = chosen
 
-    @cuda.jit
+    @cuda.jit(max_registers=64)
     def attr_sampler(
             walks_edges:DeviceNDArray,
             adj:DeviceNDArray,
