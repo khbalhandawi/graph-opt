@@ -2884,6 +2884,27 @@ class BaseOptimizer(ABC):
     def multi_history(self) -> List[Tuple[float,float]]:
         return self._multi_history.copy()
 
+    def import_solution(self, communities_dict: Dict[str, int], weights: Tuple[float, float] = None):
+        """Import an external solution as the current state.
+
+        Parameters
+        ----------
+        communities_dict : Dict[str, int]
+            A mapping of attribute keys to community IDs.
+        weights : Tuple[float, float], optional
+            Weights for the multiobjective function. If None, uses
+            ``self.weights`` (which must exist on the subclass).
+        """
+        if weights is None:
+            weights = getattr(self, 'weights', (0.5, 0.5))
+
+        self._evaluator.update_scores(communities_dict)
+        self._communities_dict = self._evaluator.communities_dict
+
+        self._f1 = -np.mean(list(self._evaluator.hhi.values()))
+        self._f2 = np.mean(list(self._evaluator.log_mpc.values()))
+        self._f = multiobjective(self._f1, self._f2, weights)
+
     @abstractmethod
     def optimize(self, *args, **kwargs):
         pass
@@ -3165,6 +3186,28 @@ class GreedyOptimizer(BaseOptimizer):
         self._membership_pairs = {}
 
         self._post_init()
+
+    def import_solution(self, communities_dict: Dict[str, int]):
+        """Import an external community assignment as the starting point.
+
+        Resets the optimizer history and re-initializes from the given
+        solution so that a subsequent call to ``optimize()`` continues
+        from this state.
+
+        Parameters
+        ----------
+        communities_dict : Dict[str, int]
+            A mapping of attribute keys to community IDs.
+        """
+        super().import_solution(communities_dict, self.weights)
+        self.n_communities = self._evaluator.n_distinct_communities
+
+        # Reset history and record the imported solution as the starting point
+        self._communities_history = [self._communities_dict]
+        self._f_history = [self._f]
+        self._multi_history = [(self._f1, self._f2)]
+        self._n_evals = [0]
+        self._n_iterations = [0]
 
     def _post_init_cpu(self, **kwargs):
         super()._post_init_cpu(**kwargs)
@@ -3693,6 +3736,33 @@ class ExactOptimizer(BaseOptimizer):
 
         self.model_built = True
 
+    def import_solution(self, communities_dict: Dict[str, int]):
+        """Import an external community assignment as a MIP start.
+
+        Sets the Gurobi ``.start`` attribute on all binary decision
+        variables so that the solver begins from the provided solution.
+        The model must already be built via ``build_model()``.
+
+        Parameters
+        ----------
+        communities_dict : Dict[str, int]
+            A mapping of attribute keys to community IDs.
+        """
+        assert self.model_built, (
+            "Model not built yet. Run build_model() before importing a solution."
+        )
+        super().import_solution(communities_dict, self.weights)
+
+        # Set MIP start on all binary variables
+        attr_key2i = self._evaluator._gloader.attr_key2i
+        for t in self._T:
+            attr_key = self._evaluator._gloader.attr_i2key[t]
+            assigned_k = communities_dict[attr_key]
+            for k in self._K:
+                self._x[t, k].start = 1.0 if k == assigned_k else 0.0
+
+        self._model.update()
+
     def debug_model(self, directory: Optional[str] = None):
         """
         Debug the optimization model by writing it to a file and performing diagnostics.
@@ -4029,4 +4099,5 @@ class ExactOptimizer(BaseOptimizer):
                     print("Objective function appears to be a simple linear function.")
 
     def __del__(self):
-        self._model.dispose()
+        if hasattr(self, '_model'):
+            self._model.dispose()

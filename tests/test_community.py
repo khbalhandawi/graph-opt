@@ -2283,4 +2283,339 @@ class TestStochasticWeightedCPU(_TestStochasticWeighted):
 
 class TestStochasticWeightedGPU(_TestStochasticWeighted):
     """GPU tests for SampleWeightedEvaluator (when implemented)."""
+
+
+# ---------------------------------------------------------------------------
+# Tests for import_solution (warm-starting optimizers)
+# ---------------------------------------------------------------------------
+
+class _TestImportSolution:
+    """Tests for BaseOptimizer.import_solution and subclass overrides."""
+
+    use_gpu = False
+    use_multiprocessing = False
+    epsilon = 0.5
+    rtol = 1e-6
+    n_samples_edge = 500
+    walk_length = 2
+    threads_per_block = 8
+    n_walks = 1000
+    num_streams = 2
+
+    @pytest.fixture(scope="function")
+    def read_graph(self) -> Tuple[GraphLoader, NeighbourSampler]:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join('..', 'test_data')
+        MG = nx.readwrite.graphml.read_graphml(
+            os.path.join(script_dir, data_dir, 'test_DG_AP_AL.graphml')
+        )
+        graph = GraphLoader(MG=MG, use_gpu=self.use_gpu)
+        sampler = NeighbourSampler(
+            gloader=graph,
+            seed=seed,
+            use_gpu=self.use_gpu,
+            n_samples_edge=self.n_samples_edge,
+            n_walks=self.n_walks,
+            walk_length=self.walk_length,
+        )
+        sampler.execute_randomwalk()
+        return graph, sampler
+
+    @pytest.fixture(scope="function")
+    def get_evaluator(self, read_graph) -> SampleEvaluator:
+        graph, sampler = read_graph
+        return SampleEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            use_gpu=self.use_gpu,
+            n_communities=None,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None,
+        )
+
+    @pytest.fixture(scope="function")
+    def get_weighted_evaluator(self, read_graph) -> SampleWeightedEvaluator:
+        graph, sampler = read_graph
+        return SampleWeightedEvaluator(
+            gloader=graph,
+            sampler=sampler,
+            use_gpu=self.use_gpu,
+            n_communities=None,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None,
+        )
+
+    # -- Greedy import_solution -----------------------------------------
+
+    def test_greedy_import_sets_state(self, get_evaluator):
+        """Importing a solution should set the evaluator / optimizer state."""
+        evaluator = get_evaluator
+        weights = (1.0, 0.0)
+
+        optimizer = GreedyOptimizer(
+            evaluator=evaluator, seed=seed,
+            num_streams=self.num_streams, weights=weights,
+            use_gpu=self.use_gpu,
+        )
+
+        # A known target solution (all in one community)
+        solution = {attr: 0 for attr in evaluator._gloader.attr_list}
+        optimizer.import_solution(solution)
+
+        # Verify evaluator was scored with the imported solution
+        evaluator.update_scores(solution)
+        expected_f1 = -np.mean(list(evaluator.hhi.values()))
+        expected_f2 = np.mean(list(evaluator.log_mpc.values()))
+        expected_f = multiobjective(expected_f1, expected_f2, weights)
+
+        assert abs(optimizer.f - expected_f) < 1e-10
+        assert abs(optimizer.f1 - expected_f1) < 1e-10
+        assert abs(optimizer.f2 - expected_f2) < 1e-10
+
+        # History should contain exactly one entry (the imported solution)
+        assert len(optimizer.f_history) == 1
+        assert len(optimizer.communities_history) == 1
+        assert optimizer.n_communities == 1
+
+    def test_greedy_import_then_optimize(self, get_evaluator):
+        """Greedy optimizer should be able to continue from an imported solution."""
+        evaluator = get_evaluator
+        weights = (1.0, 0.0)
+
+        # Run greedy from scratch
+        opt_scratch = GreedyOptimizer(
+            evaluator=evaluator, seed=seed,
+            num_streams=self.num_streams, weights=weights,
+            use_gpu=self.use_gpu,
+        )
+        opt_scratch.optimize(
+            max_iterations=1000, epsilon=self.epsilon,
+            rtol=self.rtol, multiprocess=self.use_multiprocessing,
+        )
+        greedy_solution = opt_scratch.communities_dict
+        greedy_f = opt_scratch.f
+
+        # Import the greedy solution into a fresh greedy optimizer
+        opt_warm = GreedyOptimizer(
+            evaluator=evaluator, seed=seed,
+            num_streams=self.num_streams, weights=weights,
+            use_gpu=self.use_gpu,
+        )
+        opt_warm.import_solution(greedy_solution)
+
+        # Optimize should converge immediately (already optimal for greedy)
+        opt_warm.optimize(
+            max_iterations=1000, epsilon=self.epsilon,
+            rtol=self.rtol, multiprocess=self.use_multiprocessing,
+        )
+
+        # The final objective should be no worse than the imported one
+        assert opt_warm.f >= greedy_f - 1e-10
+
+    def test_greedy_import_partial_merge(self, get_evaluator):
+        """Import a partially-merged solution and verify greedy improves it."""
+        evaluator = get_evaluator
+        weights = (1.0, 0.0)  # minimize HHI
+
+        # Start from singletons (default) and run 1 iteration
+        opt_single = GreedyOptimizer(
+            evaluator=evaluator, seed=seed,
+            num_streams=self.num_streams, weights=weights,
+            use_gpu=self.use_gpu,
+        )
+        opt_single.optimize(
+            max_iterations=1, epsilon=self.epsilon,
+            rtol=self.rtol, multiprocess=self.use_multiprocessing,
+        )
+        partial_solution = opt_single.communities_dict
+        partial_f = opt_single.f
+
+        # Warm-start a new optimizer from this partial solution
+        opt_warm = GreedyOptimizer(
+            evaluator=evaluator, seed=seed,
+            num_streams=self.num_streams, weights=weights,
+            use_gpu=self.use_gpu,
+        )
+        opt_warm.import_solution(partial_solution)
+        assert abs(opt_warm.f - partial_f) < 1e-10
+
+        opt_warm.optimize(
+            max_iterations=1000, epsilon=self.epsilon,
+            rtol=self.rtol, multiprocess=self.use_multiprocessing,
+        )
+
+        # Must be at least as good as the starting point
+        assert opt_warm.f >= partial_f - 1e-10
+
+    # -- ExactOptimizer import_solution ---------------------------------
+
+    @pytest.mark.skipif(
+        not pytest.importorskip("gurobipy", reason="Gurobi not installed"),
+        reason="Gurobi not installed",
+    )
+    def test_exact_import_mip_start(self, get_evaluator, tmp_path):
+        """Importing a solution should set MIP start on the binary variables."""
+        evaluator = get_evaluator
+        weights = (1.0, 0.0)
+
+        directory = tmp_path / "exact_import"
+        directory.mkdir()
+
+        model_settings = {
+            'MIPGap': 1e-3,
+            'Presolve': 2,
+            'Threads': 4,
+            'Method': 2,
+            'Crossover': 0,
+        }
+
+        optimizer = ExactOptimizer(
+            evaluator=evaluator, seed=seed, weights=weights,
+            log_dir=str(directory), log_interval=1,
+            model_settings=model_settings,
+        )
+        optimizer.build_model()
+
+        # Import a known solution (all in community 0)
+        solution = {attr: 0 for attr in evaluator._gloader.attr_list}
+        optimizer.import_solution(solution)
+
+        # Verify the MIP start was set correctly
+        attr_key2i = evaluator._gloader.attr_key2i
+        for attr_key, community_id in solution.items():
+            t = attr_key2i[attr_key]
+            for k in optimizer._K:
+                expected = 1.0 if k == community_id else 0.0
+                assert optimizer._x[t, k].start == expected, \
+                    f"x[{t},{k}].start should be {expected}"
+
+        # Verify evaluator state was also updated
+        expected_f1 = -np.mean(list(evaluator.hhi.values()))
+        expected_f2 = np.mean(list(evaluator.log_mpc.values()))
+        expected_f = multiobjective(expected_f1, expected_f2, weights)
+        assert abs(optimizer.f - expected_f) < 1e-10
+
+    @pytest.mark.skipif(
+        not pytest.importorskip("gurobipy", reason="Gurobi not installed"),
+        reason="Gurobi not installed",
+    )
+    def test_exact_import_greedy_solution(self, get_evaluator, tmp_path):
+        """Import a greedy solution into the exact optimizer and verify it solves."""
+        evaluator = get_evaluator
+        weights = (1.0, 0.0)
+
+        # First run greedy
+        opt_greedy = GreedyOptimizer(
+            evaluator=evaluator, seed=seed,
+            num_streams=self.num_streams, weights=weights,
+            use_gpu=self.use_gpu,
+        )
+        opt_greedy.optimize(
+            max_iterations=1000, epsilon=self.epsilon,
+            rtol=self.rtol, multiprocess=self.use_multiprocessing,
+        )
+        greedy_solution = opt_greedy.communities_dict
+
+        directory = tmp_path / "exact_from_greedy"
+        directory.mkdir()
+
+        model_settings = {
+            'MIPGap': 1e-3,
+            'Presolve': 2,
+            'Threads': 4,
+            'Method': 2,
+            'Crossover': 0,
+        }
+
+        optimizer = ExactOptimizer(
+            evaluator=evaluator, seed=seed, weights=weights,
+            log_dir=str(directory), log_interval=1,
+            model_settings=model_settings,
+        )
+        optimizer.build_model()
+        optimizer.import_solution(greedy_solution)
+        optimizer.optimize()
+
+        # Exact should be at least as good as greedy
+        assert optimizer.f >= opt_greedy.f - 1e-6
+
+    @pytest.mark.skipif(
+        not pytest.importorskip("gurobipy", reason="Gurobi not installed"),
+        reason="Gurobi not installed",
+    )
+    def test_exact_import_requires_built_model(self, get_evaluator, tmp_path):
+        """import_solution should raise if the model hasn't been built."""
+        evaluator = get_evaluator
+        weights = (1.0, 0.0)
+
+        directory = tmp_path / "exact_no_build"
+        directory.mkdir()
+
+        optimizer = ExactOptimizer(
+            evaluator=evaluator, seed=seed, weights=weights,
+            log_dir=str(directory), log_interval=1,
+        )
+
+        solution = {attr: 0 for attr in evaluator._gloader.attr_list}
+        with pytest.raises(AssertionError, match="Model not built"):
+            optimizer.import_solution(solution)
+
+    # -- Cross-optimizer import -----------------------------------------
+
+    def test_greedy_import_from_different_seed(self, read_graph):
+        """Import solution from a greedy optimizer using a different seed."""
+        graph, sampler = read_graph
+        weights = (1.0, 0.0)
+
+        eval_a = SampleEvaluator(
+            gloader=graph, sampler=sampler, use_gpu=self.use_gpu,
+            n_communities=None,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None,
+        )
+        opt_a = GreedyOptimizer(
+            evaluator=eval_a, seed=42,
+            num_streams=self.num_streams, weights=weights,
+            use_gpu=self.use_gpu,
+        )
+        opt_a.optimize(
+            max_iterations=1000, epsilon=self.epsilon,
+            rtol=self.rtol, multiprocess=self.use_multiprocessing,
+        )
+        solution_a = opt_a.communities_dict
+
+        eval_b = SampleEvaluator(
+            gloader=graph, sampler=sampler, use_gpu=self.use_gpu,
+            n_communities=None,
+            threads_per_block_1D=self.threads_per_block,
+            threads_per_block_2D=self.threads_per_block,
+            threads_per_block_3D=self.threads_per_block,
+            stream=None,
+        )
+        opt_b = GreedyOptimizer(
+            evaluator=eval_b, seed=99,
+            num_streams=self.num_streams, weights=weights,
+            use_gpu=self.use_gpu,
+        )
+        opt_b.import_solution(solution_a)
+
+        # Objective should match since same evaluator data, same solution
+        assert abs(opt_b.f - opt_a.f) < 1e-10
+
+
+@pytest.mark.skipif(
+    "os.environ.get('CUDA_VISIBLE_DEVICES', '') == '' and not os.path.exists('/dev/nvidia0')",
+    reason="No GPU available",
+)
+class TestImportSolutionGPU(_TestImportSolution):
+    use_gpu = True
+
+
+class TestImportSolutionCPU(_TestImportSolution):
+    use_gpu = False
     use_gpu = True
