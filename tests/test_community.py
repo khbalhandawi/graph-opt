@@ -2563,6 +2563,98 @@ class _TestImportSolution:
         with pytest.raises(AssertionError, match="Model not built"):
             optimizer.import_solution(solution)
 
+    # -- Import with excess communities --------------------------------
+
+    def test_greedy_import_expands_n_communities(self, get_evaluator):
+        """Greedy import should auto-expand n_communities when partition exceeds it."""
+        evaluator = get_evaluator
+        weights = (1.0, 0.0)
+
+        # Start with everything in one community so n_communities==1
+        attr_list = evaluator._gloader.attr_list
+        initial = {attr: 0 for attr in attr_list}
+
+        optimizer = GreedyOptimizer(
+            evaluator=evaluator, seed=seed,
+            num_streams=self.num_streams, weights=weights,
+            use_gpu=self.use_gpu,
+            communities_dict=initial,
+        )
+        assert optimizer.n_communities == 1
+
+        # Artificially shrink the evaluator limit below the singleton count
+        evaluator.n_communities = 2
+
+        # Import a singleton solution (5 communities for 5 attrs) — should NOT raise
+        solution = {attr: i for i, attr in enumerate(attr_list)}
+        optimizer.import_solution(solution)
+
+        # n_communities should have been expanded to accommodate
+        assert evaluator.n_communities == len(attr_list)
+        assert optimizer.n_communities == len(attr_list)
+
+    @pytest.mark.skipif(
+        not pytest.importorskip("gurobipy", reason="Gurobi not installed"),
+        reason="Gurobi not installed",
+    )
+    def test_exact_import_consolidates_communities(self, get_evaluator, tmp_path):
+        """Exact import should consolidate communities when partition exceeds K."""
+        evaluator = get_evaluator
+        weights = (1.0, 0.0)
+
+        # Set a small n_communities and build the model
+        evaluator.n_communities = 3
+        directory = tmp_path / "exact_consolidate"
+        directory.mkdir()
+
+        optimizer = ExactOptimizer(
+            evaluator=evaluator, seed=seed, weights=weights,
+            log_dir=str(directory), log_interval=1,
+        )
+        optimizer.build_model()
+
+        # Build a singleton solution (5 communities for 5 attrs)
+        attr_list = evaluator._gloader.attr_list
+        solution = {attr: i for i, attr in enumerate(attr_list)}
+
+        # This should NOT raise — communities are consolidated to fit K=3
+        optimizer.import_solution(solution)
+
+        # Verify the imported partition has at most 3 communities
+        imported = optimizer.communities_dict
+        n_imported = len(set(imported.values()))
+        assert n_imported <= 3
+
+        # MIP starts should reference only valid community indices
+        for t in optimizer._T:
+            attr_key = evaluator._gloader.attr_i2key[t]
+            assigned_k = imported[attr_key]
+            assert assigned_k in optimizer._K
+            assert optimizer._x[t, assigned_k].start == 1.0
+
+    def test_consolidate_communities_static(self):
+        """Test the _consolidate_communities static method directly."""
+        cd = {'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 3}  # 4 distinct
+
+        # No-op when within limit
+        result = ExactOptimizer._consolidate_communities(cd, 4)
+        assert result == cd
+
+        result = ExactOptimizer._consolidate_communities(cd, 10)
+        assert result == cd
+
+        # Merge to fit: keep 2 largest (community 3 has 2 members, 0/1/2 have 1 each)
+        # Keep 3 with 2 members, and one of 0/1/2 — merge the rest
+        result = ExactOptimizer._consolidate_communities(cd, 3)
+        assert len(set(result.values())) == 3
+        # The two members of original community 3 should still be together
+        assert result['D'] == result['E']
+
+        # Merge to 2 communities
+        result = ExactOptimizer._consolidate_communities(cd, 2)
+        assert len(set(result.values())) == 2
+        assert result['D'] == result['E']
+
     # -- Cross-optimizer import -----------------------------------------
 
     def test_greedy_import_from_different_seed(self, read_graph):

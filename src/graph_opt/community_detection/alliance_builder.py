@@ -2898,6 +2898,15 @@ class BaseOptimizer(ABC):
         if weights is None:
             weights = getattr(self, 'weights', (0.5, 0.5))
 
+        n_distinct = len(set(communities_dict.values()))
+        if n_distinct > self._evaluator.n_communities:
+            logger.info(
+                "[import_solution] Expanding n_communities from %d to %d "
+                "to accommodate imported partition.",
+                self._evaluator.n_communities, n_distinct,
+            )
+            self._evaluator.n_communities = n_distinct
+
         self._evaluator.update_scores(communities_dict)
         self._communities_dict = self._evaluator.communities_dict
 
@@ -3736,12 +3745,45 @@ class ExactOptimizer(BaseOptimizer):
 
         self.model_built = True
 
+    @staticmethod
+    def _consolidate_communities(
+        communities_dict: Dict[str, int], max_communities: int
+    ) -> Dict[str, int]:
+        """Merge the smallest communities so that *n_distinct* <= *max_communities*.
+
+        Keeps the ``max_communities - 1`` largest communities intact and
+        merges every remaining community into a single catch-all group.
+        The returned dict has contiguous IDs starting from 0.
+        """
+        from collections import Counter
+
+        counts = Counter(communities_dict.values())
+        if len(counts) <= max_communities:
+            return communities_dict
+
+        keep_ids = set(
+            cid for cid, _ in counts.most_common(max_communities - 1)
+        )
+        merge_id = max(communities_dict.values()) + 1
+        merged = {
+            k: (v if v in keep_ids else merge_id)
+            for k, v in communities_dict.items()
+        }
+        # Compact to contiguous IDs
+        old_ids = sorted(set(merged.values()))
+        remap = {old: new for new, old in enumerate(old_ids)}
+        return {k: remap[v] for k, v in merged.items()}
+
     def import_solution(self, communities_dict: Dict[str, int]):
         """Import an external community assignment as a MIP start.
 
         Sets the Gurobi ``.start`` attribute on all binary decision
         variables so that the solver begins from the provided solution.
         The model must already be built via ``build_model()``.
+
+        If the imported partition contains more distinct communities than
+        the model's *K* (number of community slots), the smallest
+        communities are merged into a single group so the solution fits.
 
         Parameters
         ----------
@@ -3751,6 +3793,19 @@ class ExactOptimizer(BaseOptimizer):
         assert self.model_built, (
             "Model not built yet. Run build_model() before importing a solution."
         )
+
+        max_k = len(self._K)
+        n_distinct = len(set(communities_dict.values()))
+        if n_distinct > max_k:
+            logger.info(
+                "[ExactOptimizer.import_solution] Consolidating imported "
+                "partition from %d to %d communities to fit model.",
+                n_distinct, max_k,
+            )
+            communities_dict = self._consolidate_communities(
+                communities_dict, max_k
+            )
+
         super().import_solution(communities_dict, self.weights)
 
         # Set MIP start on all binary variables
