@@ -806,6 +806,14 @@ class BaseEvaluator(ABC):
 
         assert self.n_distinct_communities <= self._n_communities, f"error: number of communities {self.n_distinct_communities} exceeds the number of attributes {self._n_communities}"
 
+        max_id = max(value.values())
+        assert max_id < self._n_communities, (
+            f"error: max community ID {max_id} >= n_communities "
+            f"{self._n_communities}. Community IDs must be contiguous "
+            f"integers in [0, n_communities). Compact IDs before "
+            f"passing to the evaluator."
+        )
+
         self._communities_dict = value.copy()
 
         # Extract membership in attr_list order to match internal array indexing
@@ -899,6 +907,21 @@ class BaseEvaluator(ABC):
     def update_scores_membership(self, membership: np.ndarray):
         communities_dict = {attr: membership[i] for i,attr in enumerate(self._gloader.attr_list)}
         self.communities_dict = communities_dict
+
+    def score_membership(self, membership: np.ndarray) -> Tuple[float, float]:
+        """Return ``(f1, f2)`` for a candidate membership without committing.
+
+        ``f1 = -mean(HHI_edges)``, ``f2 = mean(log MPC_attrs)``. Default
+        implementation does a full ``update_scores_membership`` and reduces the
+        per-edge / per-attr dicts on the host. Subclasses may override with a
+        faster path that skips the Python-dict materialization (the dominant
+        cost in the greedy inner loop). The returned values are what the
+        optimizer scalarizes via ``multiobjective``.
+        """
+        self.update_scores_membership(membership)
+        f1 = -float(np.mean(list(self.hhi.values())))
+        f2 = float(np.mean(list(self.log_mpc.values())))
+        return f1, f2
 
     @cpu_gpu_dispatcher('_update_community_weights_cpu', '_update_community_weights_gpu')
     def _update_community_weights(self):
@@ -2595,9 +2618,13 @@ class SampleWeightedEvaluator(BaseEvaluator):
         for i, edge in enumerate(self._gloader.edge_unique_list):
             self._hhi[edge] = self._hhi_edges[i]
 
-    def _update_hhi_scores_gpu(self):
-        """GPU version of HHI score computation using existing sampling kernels."""
-        # Initialize edge communities
+    def _compute_hhi_device(self):
+        """Run the HHI kernels on ``self.stream``, leaving the result in
+        ``self._hhi_edges_d``. No synchronize, no host copy, no dict build, so
+        it can feed both the dict-materializing update path and the fast
+        score-only path. (init kernels are required here: the sampling/HHI
+        kernels accumulate via ``cuda.atomic.add``.)"""
+        # Initialize edge communities (zeroed before atomic accumulation)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._n_communities), TPB=self.TPB_2D)
         self.init_sample_p_ek[blockspergrid, threadsperblock, self.stream](
             self._edges_communities_d
@@ -2611,7 +2638,7 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._edges_communities_d
         )
 
-        # Calculate HHI from edge communities
+        # Calculate HHI from edge communities (zeroed before atomic accumulation)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges,), TPB=self.TPB_1D)
         self.init_sample_hhi[blockspergrid, threadsperblock, self.stream](
             self._hhi_edges_d
@@ -2624,6 +2651,10 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._sampler.n_samples_edge
         )
 
+    def _update_hhi_scores_gpu(self):
+        """GPU HHI compute + materialize the per-edge ``self._hhi`` dict (the
+        dict path used for committed moves / saving)."""
+        self._compute_hhi_device()
         self.stream.synchronize()
 
         hhi_edges = self._hhi_edges_d.copy_to_host()
@@ -2672,27 +2703,27 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._mpc[attr] = float(self._mpc_attrs[attr_index])
             self._log_mpc[attr] = float(self._log_mpc_attrs[attr_index])
 
-    def _update_mpc_scores_gpu(self):
-        """GPU version of MPC score computation using weighted sampling approach."""
-        
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB=self.TPB_2D)
-        self.init_sample_count_ik[blockspergrid, threadsperblock, self.stream](
-            self._s_k_d
-        )
+    def _compute_mpc_device(self):
+        """Run the MPC kernels on ``self.stream``, leaving the result in
+        ``self._mpc_attrs_d``. No host copy / dict build.
 
-        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
-        self.init_sample_count_ik[blockspergrid,threadsperblock,self.stream](
-            self._p_ik_d
-        )
-
+        Optimizations vs the original:
+          * (D) drops the two ``init_sample_count_ik`` zeroings of ``s_k`` /
+            ``p_ik`` — their compute kernels assign every ``[i, k]`` exactly
+            once (direct ``=``, not atomic), so pre-zeroing is dead work. Only
+            ``mpc_attrs`` needs zeroing (``calc_sample_mpc`` accumulates via
+            ``cuda.atomic.add``).
+          * (B) drops the intermediate ``stream.synchronize()`` calls — kernels
+            queued on one stream already execute in order, so the data
+            dependencies (s_k → p_ik → mpc) are respected without host stalls.
+        """
+        # Zero only the atomic-accumulation target.
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_attr,), TPB = self.TPB_1D)
         self.init_sample_mpc[blockspergrid,threadsperblock,self.stream](
             self._mpc_attrs_d
         )
 
-        self.stream.synchronize()
-
-        # Recalculate weighted alliance scores with new membership using W_total for consistency
+        # Weighted alliance scores for the new membership (direct assign -> no init)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB=self.TPB_2D)
         self.calc_sample_s_k_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._sampler._T_d,
@@ -2701,9 +2732,7 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._s_k_d
         )
 
-        self.stream.synchronize()
-
-        # Recalculate normalized alliance probabilities
+        # Normalized alliance probabilities (direct assign -> no init)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
         self.calc_sample_normalized_p_k_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._s_k_d,
@@ -2711,9 +2740,7 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._p_ik_d
         )
 
-        self.stream.synchronize()
-
-        # Calculate MPC using weighted sampling approach
+        # MPC = sum over nodes of p(t|i) * p(k|i) (atomic accumulation into mpc)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_attr, self._gloader.n_nodes_spatial), TPB=self.TPB_2D)
         self.calc_sample_mpc_weighted_gpu[blockspergrid, threadsperblock, self.stream](
             self._membership_d,
@@ -2722,6 +2749,10 @@ class SampleWeightedEvaluator(BaseEvaluator):
             self._mpc_attrs_d
         )
 
+    def _update_mpc_scores_gpu(self):
+        """GPU MPC compute + materialize the per-attr ``self._mpc`` /
+        ``self._log_mpc`` dicts (the dict path used for committed moves)."""
+        self._compute_mpc_device()
         self.stream.synchronize()
 
         # Average over all root airports: (1/|V|) * sum_i w_{t,i}
@@ -2733,6 +2764,49 @@ class SampleWeightedEvaluator(BaseEvaluator):
             attr_index = self._gloader.attr_key2i[attr]
             self._mpc[attr] = float(self._mpc_attrs[attr_index])
             self._log_mpc[attr] = float(self._log_mpc_attrs[attr_index])
+
+    def score_membership(self, membership: np.ndarray) -> Tuple[float, float]:
+        """Fast ``(f1, f2)`` scoring of a candidate membership.
+
+        Numerically identical to ``update_scores_membership`` followed by
+        ``-mean(hhi)`` / ``mean(log_mpc)``, but for the GPU path it:
+          * updates the device membership buffer in place (no per-call host
+            array reallocation from the ``membership`` setter),
+          * runs HHI + MPC on one stream with a single synchronize,
+          * skips the community-weight update (unused by f1/f2) and the
+            per-edge / per-attr Python-dict materialization,
+          * reduces the small host arrays with numpy.
+        Falls back to the dict-based base implementation on CPU.
+        """
+        if not self.use_gpu:
+            return super().score_membership(membership)
+
+        # Device membership update preserving the array's (integer) dtype so the
+        # index kernels stay valid. Reuse the existing buffer in place when it is
+        # shape/dtype-compatible (the common greedy case after init); otherwise
+        # allocate once. Avoids the membership setter's per-call host-array
+        # reallocations.
+        host_membership = np.ascontiguousarray(membership)
+        existing = getattr(self, '_membership_d', None)
+        if (existing is None
+                or existing.shape != host_membership.shape
+                or np.dtype(existing.dtype) != host_membership.dtype):
+            self._membership_d = self.cuda.to_device(host_membership, stream=self.stream)
+        else:
+            self._membership_d.copy_to_device(host_membership, stream=self.stream)
+        self._membership = host_membership
+
+        self._compute_hhi_device()
+        self._compute_mpc_device()
+        self.stream.synchronize()
+
+        hhi_edges = self._hhi_edges_d.copy_to_host()
+        mpc_attrs = self._mpc_attrs_d.copy_to_host() / self._gloader.n_nodes_spatial
+        # Match the dict path's dtypes: hhi mean in float32, log-mpc mean in
+        # float64 (the dict path stores log_mpc as Python floats).
+        f1 = -float(np.mean(hhi_edges))
+        f2 = float(np.mean(safe_log(mpc_attrs).astype(np.float64)))
+        return f1, f2
 
     def save(self, directory=None, **kwargs):
         super().save(directory, **kwargs)
@@ -3466,10 +3540,7 @@ class GreedyOptimizer(BaseOptimizer):
         ) -> Tuple[float,int,int]:
         # Perform stochastic evaluation using the selected stream
 
-        evaluator.update_scores_membership(membership_pairs[(community_i, community_j)])
-
-        f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.log_mpc.values()))
+        f1, f2 = evaluator.score_membership(membership_pairs[(community_i, community_j)])
         f_new = multiobjective(f1, f2, weights=weights)
 
         increase = f_new - f
@@ -3488,12 +3559,12 @@ class GreedyOptimizer(BaseOptimizer):
 
         evaluator, stream_id, lock = eval_manager.get_evaluator()
         try:
-            evaluator.update_scores_membership(membership)
+            # Score while holding the evaluator lock (mutates per-stream device
+            # state); return only the two scalars.
+            f1, f2 = evaluator.score_membership(membership)
         finally:
             lock.release()
 
-        f1 = -np.mean(list(evaluator.hhi.values()))
-        f2 = np.mean(list(evaluator.log_mpc.values()))
         f_new = multiobjective(f1, f2, weights=weights)
 
         increase = f_new - f
