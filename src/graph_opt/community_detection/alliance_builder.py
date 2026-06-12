@@ -3889,6 +3889,39 @@ class ExactOptimizer(BaseOptimizer):
 
         self._model.update()
 
+    def fix_to_start(self):
+        """Fix every binary decision variable to its current MIP-start value.
+
+        Sets ``lb = ub`` on all ``x[t, k]`` equal to the rounded ``.start``
+        attribute (typically set by :meth:`import_solution`). With the
+        binaries fixed, all quadratic ``x*x`` products become constants, so
+        presolve collapses the model instead of materialising the multi-
+        million-row linearisation of the quadratic objective. Gurobi then
+        merely *evaluates* the supplied partition and returns it as a
+        certified incumbent (status OPTIMAL, ``SolCount >= 1``) in seconds.
+
+        Use this when the full MIQP is intractable (the root LP relaxation
+        never finishes) but a feasible partition is already known and you
+        need its exact objective on the same formulation. The model must be
+        built and a start set (call :meth:`import_solution` first).
+        """
+        assert self.model_built, (
+            "Model not built yet. Run build_model() before fix_to_start()."
+        )
+        n_fixed = 0
+        for var in self._x.values():
+            s = var.start
+            val = 1.0 if (s is not None and s > 0.5) else 0.0
+            var.lb = val
+            var.ub = val
+            n_fixed += 1
+        self._model.update()
+        logger.info(
+            "[ExactOptimizer.fix_to_start] Fixed %d binaries to the MIP "
+            "start; the partition will be evaluated as a certified incumbent.",
+            n_fixed,
+        )
+
     def debug_model(self, directory: Optional[str] = None):
         """
         Debug the optimization model by writing it to a file and performing diagnostics.
