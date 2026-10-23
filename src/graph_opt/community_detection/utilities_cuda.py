@@ -13,7 +13,7 @@ def define_cuda_kernels_sampling(
         n_nodes:int,
     ) -> Tuple[Callable, Callable, Callable]:
 
-    @cuda.jit
+    @cuda.jit(max_registers=64)
     def edge_sampler(
             adj3:DeviceNDArray,
             N_uv:DeviceNDArray,
@@ -51,6 +51,7 @@ def define_cuda_kernels_sampling(
             adj:DeviceNDArray,
             adj_i:DeviceNDArray,
             V:DeviceNDArray,
+            W_total:DeviceNDArray,
             walks_edges:DeviceNDArray,
             rng_states:DeviceNDArray,
             cumsum:DeviceNDArray,
@@ -86,13 +87,16 @@ def define_cuda_kernels_sampling(
 
                     V[i,j,k] = chosen
                     chosen_edge = adj_i[current_node,chosen]
+                    chosen_weight = adj[current_node,chosen]
                     if math.isnan(chosen_edge):
                         walks_edges[i,j,k-1] = -1e6
+                        W_total[i,j,k-1] = 0.0
                     else:
                         walks_edges[i,j,k-1] = chosen_edge
+                        W_total[i,j,k-1] = chosen_weight
                     current_node = chosen
 
-    @cuda.jit
+    @cuda.jit(max_registers=64)
     def attr_sampler(
             walks_edges:DeviceNDArray,
             adj:DeviceNDArray,
@@ -349,6 +353,7 @@ def define_cuda_kernels_deterministic() -> List[Callable]:
     def normalize_w_ix(
             w_ix: DeviceNDArray,
             w_i: DeviceNDArray,
+            w_iy: DeviceNDArray
         ):
 
         # Compute flattened index inside the array
@@ -362,7 +367,9 @@ def define_cuda_kernels_deterministic() -> List[Callable]:
         for i in range(x, n_nodes, dx):
             for j in range(y, n_attr, dy):
                 if w_i[i] > 0:
-                    w_ix[i, j] /= w_i[i]
+                    w_iy[i, j] = w_ix[i, j]/w_i[i]
+                else:
+                    w_iy[i, j] = 0.0
 
     @cuda.jit
     def calc_mpc(
@@ -398,7 +405,7 @@ def define_cuda_kernels_deterministic() -> List[Callable]:
     return init_edges_communities, init_hhi, init_w_it, init_w_ik, init_w_i, init_mpc, \
         edge_postprocess, calc_hhi, calc_w_it, calc_w_i, calc_w_ik, normalize_w_ix, calc_mpc
 
-def define_cuda_kernels_stochastic() -> List[Callable]:
+def define_cuda_kernels_stochastic(n_walks: int, walk_length: int) -> List[Callable]:
 
     @cuda.jit
     def init_sample_p_et(
@@ -454,7 +461,7 @@ def define_cuda_kernels_stochastic() -> List[Callable]:
             hhi[i] = 0
 
     @cuda.jit
-    def init_sample_w_i(
+    def init_sample_count_i(
             w_i:DeviceNDArray
         ):
 
@@ -470,7 +477,7 @@ def define_cuda_kernels_stochastic() -> List[Callable]:
             w_i[i] = 0.0
 
     @cuda.jit
-    def init_sample_w_it(
+    def init_sample_count_it(
             w_it:DeviceNDArray
         ):
 
@@ -487,7 +494,7 @@ def define_cuda_kernels_stochastic() -> List[Callable]:
                 w_it[i, j] = 0.0
 
     @cuda.jit
-    def init_sample_w_ik(
+    def init_sample_count_ik(
             w_ik:DeviceNDArray
         ):
 
@@ -582,7 +589,7 @@ def define_cuda_kernels_stochastic() -> List[Callable]:
                 cuda.atomic.add(hhi, i, cp**2)
 
     @cuda.jit
-    def calc_sample_w_i(
+    def calc_sample_count_i(
             T_ijk:DeviceNDArray, 
             w_i:DeviceNDArray
         ):
@@ -612,7 +619,7 @@ def define_cuda_kernels_stochastic() -> List[Callable]:
                 cuda.atomic.add(w_i, i, walk_weight)
 
     @cuda.jit
-    def calc_sample_w_it(
+    def calc_sample_count_it(
             T_ijk:DeviceNDArray, 
             w_it:DeviceNDArray
         ):
@@ -648,7 +655,7 @@ def define_cuda_kernels_stochastic() -> List[Callable]:
                             cuda.atomic.add(w_it[i], t, 1.0)
 
     @cuda.jit
-    def calc_sample_w_ik(
+    def calc_sample_count_ik(
             T_ijk:DeviceNDArray, 
             membership:DeviceNDArray, 
             w_ik:DeviceNDArray
@@ -704,9 +711,32 @@ def define_cuda_kernels_stochastic() -> List[Callable]:
 
                 cuda.atomic.add(mpc, j, mpc_ij)
 
+    @cuda.jit
+    def calc_sample_p_ix(
+            w_ix:DeviceNDArray,
+            p_ix:DeviceNDArray
+        ):
+
+        # Compute flattened index inside the array
+        x, y = cuda.grid(2)
+
+        # Compute the grid stride
+        dx, dy = cuda.gridsize(2)
+
+        n_nodes, n_x = w_ix.shape
+
+        # Iterate over each sample and walk step
+        for i in range(x, n_nodes, dx):
+            for j in range(y, n_x, dy):
+                if w_ix[i,j] > 0:
+                    p_ix[i,j] = w_ix[i,j] / (n_walks * walk_length)
+                else:
+                    p_ix[i,j] = 0.0
+
     return init_sample_p_et, init_sample_p_ek, init_sample_hhi, \
-        init_sample_w_i, init_sample_w_it, init_sample_w_ik, init_sample_mpc, \
-        edge_sample_p_et, edge_sample_p_ek, calc_sample_hhi, calc_sample_w_i, calc_sample_w_it, calc_sample_w_ik, calc_sample_mpc
+        init_sample_count_i, init_sample_count_it, init_sample_count_ik, init_sample_mpc, \
+        edge_sample_p_et, edge_sample_p_ek, calc_sample_hhi, calc_sample_count_i, \
+        calc_sample_count_it, calc_sample_count_ik, calc_sample_mpc, calc_sample_p_ix
 
 def define_cuda_kernels_sampling_utils() -> Tuple[Callable, Callable, Callable, Callable]:
     

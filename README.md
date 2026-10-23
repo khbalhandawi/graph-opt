@@ -17,3 +17,11 @@ pdm install
 ```
 
 command to install all the required dependencies into a virtual environment
+
+## Testing
+
+Run the command to initiate all no GPU related tests use the command
+
+```bash
+pytest tests/test_community.py -k "not GPU" -v
+```
