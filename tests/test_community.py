@@ -886,14 +886,14 @@ class _TestOptimize():
         f2 = np.mean(list(evaluator.log_mpc.values()))
         f = multiobjective(f1,f2,weights)
 
-        assert abs(optimizer.f - f) / f < 1e-6
+        assert np.isclose(optimizer.f, f, rtol=1e-6, atol=0.0)
 
         evaluator.update_scores(test_communities_dict)
         f1 = -np.mean(list(evaluator.hhi.values()))
         f2 = np.mean(list(evaluator.log_mpc.values()))
         f = multiobjective(f1,f2,weights)
 
-        assert abs(optimizer.f - f) / f < 1e-6
+        assert np.isclose(optimizer.f, f, rtol=1e-6, atol=0.0)
 
     def test_save_load_exact(
         self, 
@@ -1339,14 +1339,14 @@ class _TestOptimizeWeighted():
         f2 = np.mean(list(evaluator.log_mpc.values()))
         f = multiobjective(f1,f2,weights)
 
-        assert abs(optimizer.f - f) / f < 1e-6
+        assert np.isclose(optimizer.f, f, rtol=1e-6, atol=0.0)
 
         evaluator.update_scores(test_communities_dict)
         f1 = -np.mean(list(evaluator.hhi.values()))
         f2 = np.mean(list(evaluator.log_mpc.values()))
         f = multiobjective(f1,f2,weights)
 
-        assert abs(optimizer.f - f) / f < 1e-6
+        assert np.isclose(optimizer.f, f, rtol=1e-6, atol=0.0)
 
     def test_save_load_exact(
         self, 
@@ -1962,12 +1962,12 @@ class _TestDeterministicWeighted():
                 f"w_i mismatch for node {node_id}: expected {expected_val}, got {actual_val}"
 
         # Check p_it values (these are stored in _p_it for compatibility)
-        for node_id, communities in test_p_ik.items():
-            for k in communities.keys():
-                expected_val = test_p_ik[node_id][k]
-                actual_val = test_class.p_ik[node_id, k]  # For weighted evaluator, this contains w_k_normalized
+        for node_id, attrs in test_p_it.items():
+            for attr, expected_val in attrs.items():
+                attr_idx = graph.attr_key2i[attr]
+                actual_val = test_class.p_it[node_id, attr_idx]
                 assert abs(actual_val - expected_val) < self.tolerance, \
-                    f"w_ik mismatch for node {node_id}, community {k}: expected {expected_val}, got {actual_val}"
+                    f"p_it mismatch for node {node_id}, attr {attr}: expected {expected_val}, got {actual_val}"
 
         # Check p_ik values (these are stored in _p_ik for compatibility)
         for node_id, communities in test_p_ik.items():
@@ -2282,7 +2282,8 @@ class TestStochasticWeightedCPU(_TestStochasticWeighted):
 
 
 class TestStochasticWeightedGPU(_TestStochasticWeighted):
-    """GPU tests for SampleWeightedEvaluator (when implemented)."""
+    """GPU tests for SampleWeightedEvaluator."""
+    use_gpu = True
 
 
 # ---------------------------------------------------------------------------
@@ -2710,4 +2711,62 @@ class TestImportSolutionGPU(_TestImportSolution):
 
 class TestImportSolutionCPU(_TestImportSolution):
     use_gpu = False
-    use_gpu = True
+
+
+# ---------------------------------------------------------------------------
+# CPU/GPU parity for the exact evaluators
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    "os.environ.get('CUDA_VISIBLE_DEVICES', '') == '' and not os.path.exists('/dev/nvidia0')",
+    reason="No GPU available",
+)
+class TestExactParityGPU:
+    """The GPU backend must reproduce the CPU objective for every supported setting."""
+
+    tolerance = 1e-5
+
+    @staticmethod
+    def _graph(use_gpu):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        MG = nx.readwrite.graphml.read_graphml(os.path.join(script_dir, '..', 'test_data', 'test_DG_AP_AL.graphml'))
+        return GraphLoader(MG=MG, use_gpu=use_gpu)
+
+    @pytest.mark.parametrize("walk_length", [1, 2, 3])
+    def test_weighted_walk_length(self, walk_length):
+        evaluators = [
+            ExactWeightedEvaluator(gloader=self._graph(use_gpu), use_gpu=use_gpu, walk_length=walk_length,
+                                   threads_per_block_1D=8, threads_per_block_2D=8, threads_per_block_3D=8)
+            for use_gpu in (False, True)
+        ]
+        membership = np.array([0, 1, 2, 3, 3])
+        for evaluator in evaluators:
+            evaluator.update_scores_membership(membership)
+        cpu, gpu = evaluators
+
+        assert np.allclose(cpu.w_i, gpu.w_i, atol=self.tolerance)
+        assert np.allclose(cpu.p_it, gpu.p_it, atol=self.tolerance)
+        assert np.allclose(cpu.p_ik, gpu.p_ik, atol=self.tolerance)
+        assert np.allclose(cpu.mpc_attrs, gpu.mpc_attrs, atol=self.tolerance)
+        assert np.allclose(cpu.w_k, gpu.w_k, atol=self.tolerance)
+
+    @pytest.mark.parametrize("evaluator_class", [ExactEvaluator, ExactWeightedEvaluator])
+    def test_p_it_before_first_update(self, evaluator_class):
+        # ExactOptimizer.build_model() reads p_it straight after construction
+        cpu, gpu = (
+            evaluator_class(gloader=self._graph(use_gpu), use_gpu=use_gpu, walk_length=1,
+                            threads_per_block_1D=8, threads_per_block_2D=8, threads_per_block_3D=8)
+            for use_gpu in (False, True)
+        )
+        assert np.any(cpu.p_it > 0)
+        assert np.allclose(cpu.p_it, gpu.p_it, atol=self.tolerance)
+
+    def test_weighted_community_weights_use_probabilities(self):
+        cpu = ExactWeightedEvaluator(gloader=self._graph(False), use_gpu=False, walk_length=2)
+        cpu.update_scores_membership(np.array([0, 1, 2, 3, 3]))
+        n_nodes, n_edges = cpu._gloader.n_nodes_spatial, cpu._gloader.n_unique_edges
+        p_k = np.sum(cpu.p_ik, axis=0) / n_nodes
+        total = p_k + np.sum(cpu.edges_communities, axis=0) / n_edges
+        expected = np.where(total > 0, np.log(np.where(total > 0, total, 1.0)), 0.0)
+        assert np.any(p_k > 0)
+        assert np.allclose(cpu.w_k, expected, atol=self.tolerance)

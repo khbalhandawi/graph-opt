@@ -453,13 +453,15 @@ class NeighbourSampler(BaseSampler):
 
         self.create_xoroshiro128p_states: Callable = create_xoroshiro128p_states
 
-        # random walk data
-        self._N_uv_d = self.cuda.device_array((self._gloader.n_unique_edges,self.n_samples_edge), dtype=np.int32)
-        self._V_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length+1), dtype=np.int32)
-        self._walks_edges_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.int32)
-        self._T_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.int32)
-        self._W_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32)
-        self._W_total_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32)
+        # random walk data, initialized to the same values as the CPU path: an evaluator built
+        # from a sampler that has not run execute_randomwalk() must not read stale device memory
+        # (stale N_uv entries are out-of-range attribute indices and fault the edge kernels)
+        self._N_uv_d = self.cuda.to_device(np.zeros((self._gloader.n_unique_edges,self.n_samples_edge), dtype=np.int32))
+        self._V_d = self.cuda.to_device(np.zeros((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length+1), dtype=np.int32))
+        self._walks_edges_d = self.cuda.to_device(np.full((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), -10000, dtype=np.int32))
+        self._T_d = self.cuda.to_device(np.full((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), -10000, dtype=np.int32))
+        self._W_d = self.cuda.to_device(np.zeros((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32))
+        self._W_total_d = self.cuda.to_device(np.zeros((self._gloader.n_nodes_spatial,self.n_walks,self.walk_length), dtype=np.float32))
 
     @cpu_gpu_dispatcher('_randomwalk_cpu', '_randomwalk_gpu')
     def execute_randomwalk(self):
@@ -733,7 +735,9 @@ class BaseEvaluator(ABC):
         else:
             self.stream = stream
 
-        self._w_i_d = self.cuda.device_array((self._gloader.n_nodes_spatial),dtype=np.int32, stream=self.stream)
+        # float32: w_i holds summed (possibly fractional) edge weights for the exact
+        # evaluators and walk counts for the sampled ones; both fit exactly below 2**24
+        self._w_i_d = self.cuda.device_array((self._gloader.n_nodes_spatial),dtype=np.float32, stream=self.stream)
         self._w_it_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self._gloader.n_attr),dtype=np.float32, stream=self.stream)
         self._p_it_d = self.cuda.device_array((self._gloader.n_nodes_spatial,self._gloader.n_attr),dtype=np.float32, stream=self.stream)
 
@@ -927,9 +931,13 @@ class BaseEvaluator(ABC):
     def _update_community_weights(self):
         pass
 
+    # Community weights read the normalized node-community probabilities p_ik, which every
+    # evaluator populates on both backends (the raw w_ik buffers are not filled by the
+    # weighted evaluators, and ExactEvaluator fills w_ik only on GPU).
+    # w_k = log(mean_i p_ik + mean_e edge share of k), the same quantity as the GPU kernels
     def _update_community_weights_cpu(self):
-        self._w_k = safe_log(np.sum(self._w_ik,axis=0) / self._gloader.n_nodes_spatial) \
-            + np.sum(self._edges_communities,axis=0) / self._gloader.n_unique_edges
+        self._w_k = safe_log(np.sum(self._p_ik,axis=0) / self._gloader.n_nodes_spatial
+            + np.sum(self._edges_communities,axis=0) / self._gloader.n_unique_edges)
 
     def _update_community_weights_gpu(self):
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._n_communities,), TPB = self.TPB_1D)
@@ -950,7 +958,7 @@ class BaseEvaluator(ABC):
 
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB = self.TPB_2D)
         self.calc_w_k_nodes_gpu[blockspergrid,threadsperblock,self.stream](
-            self._w_ik_d,
+            self._p_ik_d,
             self._w_k_d
         )
 
@@ -1230,6 +1238,18 @@ class ExactEvaluator(BaseEvaluator):
         self.calc_w_i_gpu[blockspergrid,threadsperblock,self.stream](
             self._w_it_d,
             self._w_i_d
+        )
+
+        self.stream.synchronize()
+
+        # p_it is membership-independent; populate it now so that consumers such as
+        # ExactOptimizer.build_model() can read it before the first score update.
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB = self.TPB_2D)
+
+        self.normalize_w_ix_gpu[blockspergrid,threadsperblock,self.stream](
+            self._w_it_d,
+            self._w_i_d,
+            self._p_it_d
         )
 
         self.stream.synchronize()
@@ -1626,7 +1646,18 @@ class ExactWeightedEvaluator(BaseEvaluator):
         self._s_t_d = self.cuda.device_array((self._gloader.n_nodes_spatial, self._gloader.n_attr), dtype=np.float32, stream=self.stream)
         self._s_k_d = self.cuda.device_array((self._gloader.n_nodes_spatial, self._n_communities), dtype=np.float32, stream=self.stream)
         self._s_total_d = self.cuda.device_array(self._gloader.n_nodes_spatial, dtype=np.float32, stream=self.stream)
-        
+
+        # Scratch buffers for the layer-by-layer recursion in _recurse_weighted_gpu
+        self._s_t_prev_d = self.cuda.device_array_like(self._s_t_d, stream=self.stream)
+        self._s_k_prev_d = self.cuda.device_array_like(self._s_k_d, stream=self.stream)
+        self._s_total_prev_d = self.cuda.device_array_like(self._s_total_d, stream=self.stream)
+
+        # Zero both atomic-accumulation targets before computing weights
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial,), TPB=self.TPB_1D)
+        self.init_w_i[blockspergrid, threadsperblock, self.stream](self._w_i_d)
+        nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB=self.TPB_2D)
+        self.init_w_it[blockspergrid, threadsperblock, self.stream](self._w_it_d)
+
         # Compute w_it (attribute weights per node) using existing kernels
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_unique_edges, self._gloader.n_attr), TPB=self.TPB_2D)
         self.calc_w_it_gpu[blockspergrid, threadsperblock, self.stream](
@@ -1673,25 +1704,20 @@ class ExactWeightedEvaluator(BaseEvaluator):
         self._p_iv_d.copy_to_device(p_iv_host)
         self._p_iv_t_d.copy_to_device(p_iv_t_host)
 
-        # Compute total capacity scores (L=1 only)
+        # Compute total capacity scores S_total(i, L)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial,), TPB=self.TPB_1D)
-        self.calc_s_total_weighted_gpu[blockspergrid, threadsperblock, self.stream](
-            self._p_iv_d,
-            self._w_i_d,
-            self._s_total_d,
-            1,  # L=1 always
-            self.lambda_decay
+        self._recurse_weighted_gpu(
+            self.calc_s_total_weighted_gpu, (blockspergrid, threadsperblock),
+            (self._p_iv_d, self._w_i_d),
+            self._s_total_d, self._s_total_prev_d
         )
 
-        # Compute attribute scores (L=1 only)
+        # Compute attribute scores S_t(i, L)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._gloader.n_attr), TPB=self.TPB_2D)
-        self.calc_s_t_weighted_gpu[blockspergrid, threadsperblock, self.stream](
-            self._p_iv_d,
-            self._w_i_d,
-            self._p_iv_t_d,
-            self._s_t_d,
-            1,  # L=1 always
-            self.lambda_decay
+        self._recurse_weighted_gpu(
+            self.calc_s_t_weighted_gpu, (blockspergrid, threadsperblock),
+            (self._p_iv_d, self._w_i_d, self._p_iv_t_d),
+            self._s_t_d, self._s_t_prev_d
         )
 
         # Normalize to get probabilities
@@ -1702,6 +1728,25 @@ class ExactWeightedEvaluator(BaseEvaluator):
         )
 
         self.stream.synchronize()
+
+    def _recurse_weighted_gpu(self, step_kernel, launch, args, out, scratch):
+        """Evaluate S(., walk_length) into ``out`` by applying ``step_kernel`` once per depth.
+
+        ``step_kernel(*args, s_prev, s_out, lambda_decay)`` computes S(., d) from S(., d-1),
+        starting from S(., 0) = 0. ``out`` and ``scratch`` alternate as the two layers.
+        """
+        blockspergrid, threadsperblock = launch
+        zero = self.init_w_i if out.ndim == 1 else self.init_w_ik
+        zero[blockspergrid, threadsperblock, self.stream](scratch)
+
+        prev, cur = scratch, out
+        for _ in range(self.walk_length):
+            step_kernel[blockspergrid, threadsperblock, self.stream](*args, prev, cur, self.lambda_decay)
+            prev, cur = cur, prev
+
+        # after the last swap the result is in prev
+        if prev is not out:
+            out.copy_to_device(prev, stream=self.stream)
 
     def update_scores(self, communities_dict: Dict[str,str]):
         """Update HHI and MPC scores for a given community assignment."""
@@ -1831,16 +1876,12 @@ class ExactWeightedEvaluator(BaseEvaluator):
 
     def _update_mpc_scores_gpu(self):
         """GPU version of MPC score computation using weighted formulation."""
-        # Compute alliance scores S_k(i, L) (L=1 only)
+        # Compute alliance scores S_k(i, L)
         nstates, threadsperblock, blockspergrid = cuda_blocks(dims=(self._gloader.n_nodes_spatial, self._n_communities), TPB=self.TPB_2D)
-        self.calc_s_k_weighted_gpu[blockspergrid, threadsperblock, self.stream](
-            self._p_iv_d,
-            self._w_i_d,
-            self._p_iv_t_d,
-            self._membership_d,
-            self._s_k_d,
-            1,  # L=1 always
-            self.lambda_decay
+        self._recurse_weighted_gpu(
+            self.calc_s_k_weighted_gpu, (blockspergrid, threadsperblock),
+            (self._p_iv_d, self._w_i_d, self._p_iv_t_d, self._membership_d),
+            self._s_k_d, self._s_k_prev_d
         )
 
         # Normalize alliance scores
@@ -1898,13 +1939,17 @@ class ExactWeightedEvaluator(BaseEvaluator):
             safe_delete(state, '_s_t_d')
             safe_delete(state, '_s_k_d')
             safe_delete(state, '_s_total_d')
+            safe_delete(state, '_s_t_prev_d')
+            safe_delete(state, '_s_k_prev_d')
+            safe_delete(state, '_s_total_prev_d')
 
-            state.pop('calc_s_t_weighted_gpu', None)
-            state.pop('calc_s_k_weighted_gpu', None)
-            state.pop('calc_s_total_weighted_gpu', None)
-            state.pop('calc_normalized_mpc_weighted_gpu', None)
-            state.pop('calc_normalized_mpc_k_weighted_gpu', None)
-            state.pop('calc_mpc_weighted_gpu', None)
+            for kernel in ('init_edges_communities', 'init_hhi', 'init_w_it', 'init_w_ik', 'init_w_i',
+                           'init_mpc', 'edge_postprocess_gpu', 'calc_hhi_gpu', 'calc_w_it_gpu',
+                           'calc_w_i_gpu', 'calc_w_ik_gpu', 'normalize_w_ix_gpu', 'calc_mpc_gpu',
+                           'calc_s_t_weighted_gpu', 'calc_s_k_weighted_gpu', 'calc_s_total_weighted_gpu',
+                           'calc_normalized_p_t_weighted_gpu', 'calc_normalized_p_k_weighted_gpu',
+                           'calc_mpc_weighted_gpu'):
+                state.pop(kernel, None)
 
         return state
 
@@ -1922,6 +1967,9 @@ class ExactWeightedEvaluator(BaseEvaluator):
                 del self._s_k_d
             if hasattr(self, '_s_total_d'):
                 del self._s_total_d
+            for name in ('_s_t_prev_d', '_s_k_prev_d', '_s_total_prev_d'):
+                if hasattr(self, name):
+                    delattr(self, name)
         super().__del__()
 
 
@@ -3774,7 +3822,8 @@ class ExactOptimizer(BaseOptimizer):
             # take the log of f2_t_exp
             if not all_zeros:
                 f2_t_var = self._model.addVar(name=f"f2_t_{t}", lb=min_val, ub=max_val)
-                log_f2_t = self._model.addVar(name=f"log_f2_t_{t}", lb=np.log(min_val+epsilon), ub=0.0)
+                # log is taken of the shifted value s_t = f2_t + epsilon in [min_val+epsilon, max_val+epsilon]
+                log_f2_t = self._model.addVar(name=f"log_f2_t_{t}", lb=np.log(min_val+epsilon), ub=np.log(max_val+epsilon))
 
                 if slack is None:
                     self._model.addConstr(f2_t_var == f2_t_exp, f"Link_f2_t_{t}")
@@ -3783,12 +3832,12 @@ class ExactOptimizer(BaseOptimizer):
                     self._model.addConstr(f2_t_var == f2_t_exp + slack_var, f"Link_f2_t_{t}")
 
                 # Create s_t = f2_t_var + epsilon  (guaranteed > 0)
-                s_t = self._model.addVar(lb=min_val+epsilon, ub=max_val+2*epsilon, name=f"s_t_{t}")
+                s_t = self._model.addVar(lb=min_val+epsilon, ub=max_val+epsilon, name=f"s_t_{t}")
                 self._model.addConstr(s_t == f2_t_var + epsilon, name=f"shift_{t}")
 
                 if log_approx == 'PWL':
                     num_points = num_points if num_points > 0 else 100
-                    breakpoints_x = np.logspace(np.log10(min_val+epsilon), np.log10(max_val), num=num_points)
+                    breakpoints_x = np.logspace(np.log10(min_val+epsilon), np.log10(max_val+epsilon), num=num_points)
                     breakpoints_y = np.log(breakpoints_x)
 
                     # Add the PWL constraint that approximates log(f2)
